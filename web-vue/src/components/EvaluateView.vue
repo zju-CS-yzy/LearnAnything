@@ -19,6 +19,15 @@
           <input v-model="subject" placeholder="generic" />
         </div>
         <div class="form-group">
+          <label>测评模式</label>
+          <select v-model="evalMode" class="form-select">
+            <option value="generate">🆕 生成新题</option>
+            <option value="bank">📚 从题库抽题</option>
+            <option value="mixed">🔀 混合模式</option>
+          </select>
+          <div class="mode-hint">{{ modeHint }}</div>
+        </div>
+        <div class="form-group">
           <label>题目数量</label>
           <input v-model.number="count" type="number" min="1" max="10" />
         </div>
@@ -46,7 +55,7 @@
               :key="i"
               class="option-choice"
               :class="{ selected: userAnswers[currentIndex] === opt }"
-              @click="userAnswers[currentIndex] = opt"
+              @click="userAnswers[currentIndex] = String.fromCharCode(65 + i)"
             >
               <span class="choice-label">{{ ['A', 'B', 'C', 'D', 'E', 'F'][i] || i }}</span>
               <span class="choice-text">{{ opt }}</span>
@@ -149,8 +158,18 @@ const step = ref('start')
 const topic = ref('RAG 技术')
 const subject = ref('generic')
 const count = ref(5)
+const evalMode = ref('generate')
 const isLoading = ref(false)
 const isSubmitting = ref(false)
+
+const modeHint = computed(() => {
+  const hints = {
+    generate: '基于知识库实时生成新题目',
+    bank: '从已保存的题库中随机抽取',
+    mixed: '一半题库题目 + 一半生成题目',
+  }
+  return hints[evalMode.value] || ''
+})
 
 const sessionId = ref('')
 const questions = ref([])
@@ -165,7 +184,7 @@ async function startEval() {
   isLoading.value = true
 
   try {
-    const result = await apiEvalStart(topic.value, subject.value, count.value)
+    const result = await apiEvalStart(topic.value, subject.value, count.value, evalMode.value)
     sessionId.value = result.session_id
     questions.value = result.questions
     userAnswers.value = new Array(questions.value.length).fill('')
@@ -237,6 +256,22 @@ function restart() {
 .eval-start {
   max-width: 600px;
   margin: 0 auto;
+}
+
+.form-select {
+  width: 100%;
+  padding: 8px 12px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-color);
+  background: var(--bg-input);
+  color: var(--text-primary);
+  font-size: 14px;
+}
+
+.mode-hint {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-top: 4px;
 }
 
 /* 答题进度 */

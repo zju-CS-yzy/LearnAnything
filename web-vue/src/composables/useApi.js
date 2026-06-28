@@ -109,11 +109,11 @@ export async function apiQuiz(topic, subject = 'generic', count = 5) {
   })
 }
 
-// 评测 — 开始
-export async function apiEvalStart(topic, subject = 'generic', count = 5) {
+// 评测 — 开始（支持 mode: generate/bank/mixed）
+export async function apiEvalStart(topic, subject = 'generic', count = 5, mode = 'generate') {
   return fetchApi('/api/evaluate/start', {
     method: 'POST',
-    body: JSON.stringify({ topic, subject, count }),
+    body: JSON.stringify({ topic, subject, count, mode }),
   })
 }
 
@@ -123,6 +123,41 @@ export async function apiEvalSubmit(sessionId, answers) {
     method: 'POST',
     body: JSON.stringify({ session_id: sessionId, answers }),
   })
+}
+
+// ========== 题库管理 API ==========
+
+// 保存题目到题库
+export async function apiQuizBankSave(questions, subject = 'generic', topic = '', isApproved = false) {
+  return fetchApi('/api/quiz-bank/save', {
+    method: 'POST',
+    body: JSON.stringify({ questions, subject, topic, is_approved: isApproved }),
+  })
+}
+
+// 查询题库列表
+export async function apiQuizBankList(subject = 'generic', topic = null, isApproved = null, limit = 100) {
+  const params = new URLSearchParams()
+  params.append('subject', subject)
+  if (topic) params.append('topic', topic)
+  if (isApproved !== null) params.append('is_approved', isApproved)
+  params.append('limit', limit)
+  return fetchApi(`/api/quiz-bank/list?${params.toString()}`)
+}
+
+// 确认保留题目
+export async function apiQuizBankApprove(qid) {
+  return fetchApi(`/api/quiz-bank/approve/${qid}`, { method: 'POST' })
+}
+
+// 删除题目
+export async function apiQuizBankDelete(qid) {
+  return fetchApi(`/api/quiz-bank/${qid}`, { method: 'DELETE' })
+}
+
+// 题库统计
+export async function apiQuizBankStats(subject = 'generic') {
+  return fetchApi(`/api/quiz-bank/stats?subject=${subject}`)
 }
 
 // 导入文本

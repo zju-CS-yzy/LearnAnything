@@ -206,9 +206,21 @@ class CoachAgent(BaseAgent):
     # ========== 评分子方法 ==========
 
     def _score_objective(self, question: Dict, user_answer: str, max_score: int) -> Dict[str, Any]:
-        """客观题评分 — 精确匹配"""
-        correct = str(question.get("answer", "")).strip().upper()
-        user = str(user_answer).strip().upper()
+        """客观题评分 — 精确匹配（支持多种格式输入）"""
+        # 标准化正确答案：提取字母
+        correct_raw = str(question.get("answer", "")).strip()
+        # 如果正确答案是 "A. xxx" 格式，提取 "A"
+        correct = re.sub(r'^[A-Fa-f][\.．、]\s*', '', correct_raw).strip().upper()
+        if not correct or correct not in "ABCDEF":
+            correct = correct_raw[0].upper() if correct_raw else ""
+
+        # 标准化用户答案：提取字母
+        user_raw = str(user_answer).strip()
+        # 如果用户答案是 "B. xxx" 格式，提取 "B"
+        user = re.sub(r'^[A-Fa-f][\.．、]\s*', '', user_raw).strip().upper()
+        if not user or user not in "ABCDEF":
+            user = user_raw[0].upper() if user_raw else ""
+
         is_correct = user == correct and user != ""
         score = max_score if is_correct else 0
 
@@ -217,7 +229,7 @@ class CoachAgent(BaseAgent):
         elif user == "":
             feedback = "未作答。"
         else:
-            feedback = f"回答错误。正确答案是 {correct}。"
+            feedback = f"回答错误。你选择了 {user}，正确答案是 {correct}。"
 
         return {"score": score, "is_correct": is_correct, "feedback": feedback}
 

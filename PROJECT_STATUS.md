@@ -628,7 +628,7 @@ python -m interfaces.cli import --subject generic --path ./knowledge_base/test_c
 
 ## 十三、2026-06-28 工作记录
 
-### 今日完成（2026-06-28 上午）
+### 今日完成（2026-06-28 上午/下午）
 
 | # | 任务 | 状态 |
 |:---|:---|:---:|
@@ -640,6 +640,9 @@ python -m interfaces.cli import --subject generic --path ./knowledge_base/test_c
 | 6 | **backend_api.py 静态文件路径** — 优先加载 web/dist | ✅ 完成 |
 | 7 | **LA-018 修复** — QuizAgent 重写为 LLM 驱动出题 | ✅ 完成 |
 | 8 | **LA-019 修复** — SSE 流式接口避免重复 LLM 调用 | ✅ 完成 |
+| 9 | **知识库重建** — generic_v1 替换为 ai_llm_v2（113 文档） | ✅ 完成 |
+| 10 | **评测评分 Bug 修复** — 前端提交字母 + 后端容错标准化 | ✅ 完成 |
+| 11 | **题库持久化机制** — SQLite 题库 + 保存/抽题/混合模式 | ✅ 完成 |
 
 ### 关键决策（已确认）
 
@@ -659,6 +662,7 @@ python -m interfaces.cli import --subject generic --path ./knowledge_base/test_c
 | LA-019 | **SSE 流式输出重复调用 LLM** | 🔴 高 | **已修复** — `/api/ask/stream` 改为直接使用 coordinator.handle() 结果分段发送，避免 TutorAgent 被调用两次。按段落/句子切分模拟打字机效果 | 2026-06-28 |
 | LA-020 | **历史会话机制缺失** | 🟡 中 | 当前历史会话是硬编码示例数据，需要 localStorage 或后端持久化 |
 | LA-021 | **学科分类功能未实现** | 🟡 中 | 导航栏显示学科标签，但学科切换逻辑未连接，知识库按学科隔离未验证 |
+| LA-022 | **题库-知识库关联可视化** | 🟡 中 | 题目已支持 source_entry_id 关联知识条目，但知识库可视化时未展示相关题目 |
 
 ### 技术债务记录
 

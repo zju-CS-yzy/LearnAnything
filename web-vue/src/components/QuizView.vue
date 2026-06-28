@@ -32,14 +32,39 @@
           <div class="result-title">{{ quizResult.topic }}</div>
           <div class="result-subtitle">{{ quizResult.subject_name }} · {{ quizResult.questions.length }} 道题</div>
         </div>
+
+        <!-- 保存到题库操作栏 -->
+        <div class="save-bar">
+          <label class="checkbox-label">
+            <input type="checkbox" v-model="selectAll" @change="toggleSelectAll" />
+            <span>全选</span>
+          </label>
+          <button
+            class="btn btn-secondary"
+            :disabled="selectedQuestions.length === 0 || isSaving"
+            @click="saveToBank"
+          >
+            <span v-if="isSaving" class="spinner"></span>
+            <span v-else>保存 {{ selectedQuestions.length }} 题到题库</span>
+          </button>
+        </div>
+
         <div class="questions-list">
           <div
             v-for="(q, i) in quizResult.questions"
             :key="q.id"
             class="question-item"
+            :class="{ selected: selectedIds.has(q.id) }"
           >
             <div class="question-header">
-              <span class="question-number">{{ i + 1 }}</span>
+              <label class="checkbox-label">
+                <input
+                  type="checkbox"
+                  :value="q.id"
+                  v-model="selectedIdList"
+                />
+                <span class="question-number">{{ i + 1 }}</span>
+              </label>
               <span class="question-type tag">{{ q.type }}</span>
             </div>
             <div class="question-text">{{ q.question }}</div>
@@ -65,19 +90,39 @@
 </template>
 
 <script setup>
-import { ref } from 'vue'
-import { apiQuiz } from '../composables/useApi.js'
+import { ref, computed } from 'vue'
+import { apiQuiz, apiQuizBankSave } from '../composables/useApi.js'
 
 const topic = ref('RAG 技术')
 const subject = ref('generic')
 const count = ref(5)
 const isLoading = ref(false)
+const isSaving = ref(false)
 const quizResult = ref(null)
+const selectedIdList = ref([])
+const selectAll = ref(false)
+
+const selectedIds = computed(() => new Set(selectedIdList.value))
+
+const selectedQuestions = computed(() => {
+  if (!quizResult.value) return []
+  return quizResult.value.questions.filter(q => selectedIds.value.has(q.id))
+})
+
+function toggleSelectAll() {
+  if (selectAll.value && quizResult.value) {
+    selectedIdList.value = quizResult.value.questions.map(q => q.id)
+  } else {
+    selectedIdList.value = []
+  }
+}
 
 async function generateQuiz() {
   if (!topic.value.trim()) return
   isLoading.value = true
   quizResult.value = null
+  selectedIdList.value = []
+  selectAll.value = false
 
   try {
     const result = await apiQuiz(topic.value, subject.value, count.value)
@@ -86,6 +131,27 @@ async function generateQuiz() {
     alert('出题失败: ' + e.message)
   } finally {
     isLoading.value = false
+  }
+}
+
+async function saveToBank() {
+  if (selectedQuestions.value.length === 0) return
+  isSaving.value = true
+
+  try {
+    const result = await apiQuizBankSave(
+      selectedQuestions.value,
+      subject.value,
+      topic.value,
+      true, // 直接标记为已确认
+    )
+    alert(`已保存 ${result.saved} 道题目到题库`)
+    selectedIdList.value = []
+    selectAll.value = false
+  } catch (e) {
+    alert('保存失败: ' + e.message)
+  } finally {
+    isSaving.value = false
   }
 }
 </script>
@@ -149,7 +215,7 @@ async function generateQuiz() {
 }
 
 .result-header {
-  margin-bottom: 20px;
+  margin-bottom: 16px;
   padding-bottom: 12px;
   border-bottom: 1px solid var(--border-color);
 }
@@ -166,10 +232,35 @@ async function generateQuiz() {
   margin-top: 4px;
 }
 
+.save-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 16px;
+  padding: 10px 14px;
+  background: var(--bg-input);
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-color);
+}
+
+.checkbox-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  font-size: 14px;
+  color: var(--text-secondary);
+}
+
+.checkbox-label input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+}
+
 .questions-list {
   display: flex;
   flex-direction: column;
-  gap: 20px;
+  gap: 16px;
 }
 
 .question-item {
@@ -177,6 +268,12 @@ async function generateQuiz() {
   background: var(--bg-input);
   border-radius: var(--radius-md);
   border: 1px solid var(--border-color);
+  transition: border-color 0.2s;
+}
+
+.question-item.selected {
+  border-color: var(--accent-primary);
+  background: var(--bg-active);
 }
 
 .question-header {
