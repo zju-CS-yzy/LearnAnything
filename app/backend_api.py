@@ -40,7 +40,16 @@ from core.document_processor import DocumentProcessor
 from core.vector_store import VectorStore
 from core.subject_analyzer import SubjectAnalyzer, save_subject_config
 from core.llm_client import LLMClient
-from config.settings import KNOWLEDGE_BASE_DIR
+from core.quiz_bank import (
+    save_question as qb_save,
+    batch_save_questions as qb_batch_save,
+    random_questions as qb_random,
+    list_questions as qb_list,
+    approve_question as qb_approve,
+    delete_question as qb_delete,
+    get_stats as qb_stats,
+)
+
 
 
 # ========== 路径解析（兼容开发环境和 PyInstaller 打包环境） ==========
@@ -149,6 +158,35 @@ class EvaluateStartRequest(BaseModel):
     topic: str = Field(..., description="评测主题")
     subject: str = Field("generic", description="学科标识")
     count: int = Field(5, ge=1, le=10, description="题目数量")
+    mode: str = Field("generate", description="出题模式: generate(生成新题) / bank(从题库抽题) / mixed(混合)")
+
+class QuizBankQuestion(BaseModel):
+    """题库题目"""
+    id: str
+    type: str
+    question: str
+    options: List[str] = []
+    answer: str
+    explanation: str
+
+class QuizBankListResponse(BaseModel):
+    """题库列表响应"""
+    questions: List[QuizBankQuestion]
+    total: int
+
+class QuizBankSaveRequest(BaseModel):
+    """保存题目到题库请求"""
+    subject: str = Field("generic", description="学科标识")
+    topic: str = Field("", description="主题")
+    questions: List[QuizQuestion]
+    is_approved: bool = Field(False, description="是否直接标记为已确认")
+
+class QuizBankStatsResponse(BaseModel):
+    """题库统计响应"""
+    total: int
+    approved: int
+    pending: int
+    by_type: Dict[str, int]
 
 
 class EvaluateStartResponse(BaseModel):
@@ -407,31 +445,88 @@ def generate_quiz(request: QuizRequest):
 @app.post("/api/evaluate/start", response_model=EvaluateStartResponse)
 def start_evaluation(request: EvaluateStartRequest):
     """
-    开始评测 — 生成题目并创建会话。
+    开始评测 — 生成题目或从题库抽题并创建会话。
 
+    mode: generate(生成新题) / bank(从题库抽题) / mixed(混合)
     返回 session_id 和题目列表，前端保存 session_id 供后续提交答案。
     """
     session_id = str(uuid.uuid4())
 
-    coach = CoachAgent(
-        collection_name=f"{request.subject}_v1",
-        subject=request.subject,
-        top_k=5,
-    )
-    quiz_result = coach.handle(
-        query=f"评测我的{request.topic}水平",
-        n_questions=request.count,
-    )
+    questions = []
+    instructions = ""
+    subject_name = "通用"
 
-    questions = quiz_result.get("questions", [])
-    if not questions:
-        raise HTTPException(status_code=400, detail="无法生成评测题目，请确认知识库中已有材料")
+    if request.mode == "bank":
+        # 从题库抽题
+        bank_questions = qb_random(
+            count=request.count,
+            subject=request.subject,
+            topic=request.topic,
+            is_approved=True,
+        )
+        if not bank_questions:
+            raise HTTPException(status_code=400, detail="题库中没有符合条件的题目，请先用'生成新题'模式或导入题目")
+        questions = bank_questions
+        instructions = f"本次评测从题库中抽取了 {len(questions)} 道题目。"
+
+    elif request.mode == "mixed":
+        # 混合模式：一半题库 + 一半生成
+        bank_count = request.count // 2
+        gen_count = request.count - bank_count
+
+        bank_questions = qb_random(
+            count=bank_count,
+            subject=request.subject,
+            topic=request.topic,
+            is_approved=True,
+        )
+
+        if gen_count > 0:
+            coach = CoachAgent(
+                collection_name=f"{request.subject}_v1",
+                subject=request.subject,
+                top_k=5,
+            )
+            quiz_result = coach.handle(
+                query=f"评测我的{request.topic}水平",
+                n_questions=gen_count,
+            )
+            gen_questions = quiz_result.get("questions", [])
+        else:
+            gen_questions = []
+
+        questions = bank_questions + gen_questions
+        # 重新编号
+        for i, q in enumerate(questions):
+            q["id"] = i + 1
+        instructions = f"本次评测包含 {len(bank_questions)} 道题库题目和 {len(gen_questions)} 道生成题目。"
+
+    else:
+        # 默认：生成新题
+        coach = CoachAgent(
+            collection_name=f"{request.subject}_v1",
+            subject=request.subject,
+            top_k=5,
+        )
+        quiz_result = coach.handle(
+            query=f"评测我的{request.topic}水平",
+            n_questions=request.count,
+        )
+
+        questions = quiz_result.get("questions", [])
+        if not questions:
+            raise HTTPException(status_code=400, detail="无法生成评测题目，请确认知识库中已有材料")
+
+        subject_config = quiz_result.get("subject_config", {})
+        subject_name = subject_config.get("name", "通用")
+        instructions = quiz_result.get("text", "").split("\n\n")[0] if quiz_result.get("text") else ""
 
     # 保存会话
     _eval_sessions[session_id] = {
         "questions": questions,
         "subject": request.subject,
         "topic": request.topic,
+        "mode": request.mode,
         "created_at": time.time(),
     }
 
@@ -447,13 +542,12 @@ def start_evaluation(request: EvaluateStartRequest):
         for q in questions
     ]
 
-    subject_config = quiz_result.get("subject_config", {})
     return EvaluateStartResponse(
         session_id=session_id,
-        topic=quiz_result.get("topic", request.topic),
-        subject_name=subject_config.get("name", "通用"),
+        topic=request.topic,
+        subject_name=subject_name,
         questions=quiz_questions,
-        instructions=quiz_result.get("text", "").split("\n\n")[0] if quiz_result.get("text") else "",
+        instructions=instructions,
     )
 
 
@@ -704,6 +798,94 @@ def knowledge_base_stats(subject: str):
             "document_count": 0,
             "status": f"error: {str(e)}",
         }
+
+
+# ========== 题库管理 API ==========
+
+@app.post("/api/quiz-bank/save")
+def save_to_quiz_bank(request: QuizBankSaveRequest):
+    """
+    保存题目到题库。
+    生成题目后，用户可以选择保留的题目加入题库。
+    """
+    ids = qb_batch_save(
+        questions=[q.model_dump() for q in request.questions],
+        subject=request.subject,
+        topic=request.topic,
+        is_approved=request.is_approved,
+    )
+    return {
+        "saved": len(ids),
+        "question_ids": ids,
+        "message": f"成功保存 {len(ids)} 道题目到题库",
+    }
+
+
+@app.get("/api/quiz-bank/list", response_model=QuizBankListResponse)
+def list_quiz_bank(
+    subject: str = "generic",
+    topic: str = None,
+    is_approved: bool = None,
+    limit: int = 100,
+    offset: int = 0,
+):
+    """
+    查询题库中的题目。
+    """
+    questions = qb_list(
+        subject=subject,
+        topic=topic,
+        is_approved=is_approved,
+        limit=limit,
+        offset=offset,
+    )
+    total = len(qb_list(subject=subject, topic=topic, is_approved=is_approved, limit=10000))
+
+    return QuizBankListResponse(
+        questions=[
+            QuizBankQuestion(
+                id=q["id"],
+                type=q["type"],
+                question=q["question"],
+                options=q.get("options", []),
+                answer=q["answer"],
+                explanation=q.get("explanation", ""),
+            )
+            for q in questions
+        ],
+        total=total,
+    )
+
+
+@app.post("/api/quiz-bank/approve/{qid}")
+def approve_quiz_bank_question(qid: str):
+    """
+    用户确认保留题目（将 is_approved 设为 1）。
+    """
+    success = qb_approve(qid)
+    if not success:
+        raise HTTPException(status_code=404, detail=f"题目 {qid} 不存在")
+    return {"message": f"题目 {qid} 已确认保留", "approved": True}
+
+
+@app.delete("/api/quiz-bank/{qid}")
+def delete_quiz_bank_question(qid: str):
+    """
+    删除题库中的题目。
+    """
+    success = qb_delete(qid)
+    if not success:
+        raise HTTPException(status_code=404, detail=f"题目 {qid} 不存在")
+    return {"message": f"题目 {qid} 已删除", "deleted": True}
+
+
+@app.get("/api/quiz-bank/stats", response_model=QuizBankStatsResponse)
+def quiz_bank_stats(subject: str = "generic"):
+    """
+    题库统计。
+    """
+    stats = qb_stats(subject=subject)
+    return QuizBankStatsResponse(**stats)
 
 
 # ========== 静态前端文件 ==========
