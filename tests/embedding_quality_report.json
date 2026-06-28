@@ -1,0 +1,97 @@
+{
+  "timestamp": "2026-06-27 11:50:08",
+  "embedding_stats": {
+    "dims": 2048,
+    "mean_norm": 1.0,
+    "std_norm": 1.8848643534852272e-08,
+    "mean_value": 0.0006195856840349734,
+    "std_value": 0.022088399156928062,
+    "zero_ratio": 0.0,
+    "max_value": 0.24247612059116364,
+    "min_value": -0.214440256357193,
+    "top5_explained_ratio": 0.7403589230367525,
+    "intra_sim_mean": 0.6451523474284581,
+    "intra_sim_std": 0.06694932224192834,
+    "inter_sim_mean": 0.4934976195034228,
+    "inter_sim_std": 0.08830801026700066,
+    "discrimination": 0.15165472792503526
+  },
+  "chunking_results": [
+    {
+      "chunk_size": 500,
+      "use_parent_child": false,
+      "total_chunks": 6,
+      "parent_count": 0,
+      "child_count": 0,
+      "avg_chunk_size": 252.5,
+      "hit_at_1": 0.75,
+      "hit_at_3": 1.0,
+      "hit_at_5": 1.0,
+      "mrr": 0.875
+    },
+    {
+      "chunk_size": 1000,
+      "use_parent_child": false,
+      "total_chunks": 6,
+      "parent_count": 0,
+      "child_count": 0,
+      "avg_chunk_size": 252.5,
+      "hit_at_1": 0.75,
+      "hit_at_3": 1.0,
+      "hit_at_5": 1.0,
+      "mrr": 0.875
+    },
+    {
+      "chunk_size": 1500,
+      "use_parent_child": false,
+      "total_chunks": 6,
+      "parent_count": 0,
+      "child_count": 0,
+      "avg_chunk_size": 252.5,
+      "hit_at_1": 0.75,
+      "hit_at_3": 1.0,
+      "hit_at_5": 1.0,
+      "mrr": 0.875
+    },
+    {
+      "chunk_size": 500,
+      "use_parent_child": true,
+      "total_chunks": 21,
+      "parent_count": 6,
+      "child_count": 0,
+      "avg_chunk_size": 157.8095238095238,
+      "hit_at_1": 0.9166666666666666,
+      "hit_at_3": 1.0,
+      "hit_at_5": 1.0,
+      "mrr": 0.9583333333333334
+    },
+    {
+      "chunk_size": 1000,
+      "use_parent_child": true,
+      "total_chunks": 21,
+      "parent_count": 6,
+      "child_count": 0,
+      "avg_chunk_size": 157.8095238095238,
+      "hit_at_1": 0.9166666666666666,
+      "hit_at_3": 1.0,
+      "hit_at_5": 1.0,
+      "mrr": 0.9583333333333334
+    },
+    {
+      "chunk_size": 1500,
+      "use_parent_child": true,
+      "total_chunks": 21,
+      "parent_count": 6,
+      "child_count": 0,
+      "avg_chunk_size": 157.8095238095238,
+      "hit_at_1": 0.9166666666666666,
+      "hit_at_3": 1.0,
+      "hit_at_5": 1.0,
+      "mrr": 0.9583333333333334
+    }
+  ],
+  "recommended_config": {
+    "use_parent_child": true,
+    "chunk_size": 500
+  }
+}
