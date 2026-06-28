@@ -256,8 +256,8 @@ class DocumentProcessor:
         # 先全局分 Child（跨页段落不会被切断），再按页码聚合 Parent
         chunker = DocumentChunker()
         parent_chunks, child_chunks = chunker.chunk_document(
-            pages, 
-            document_name=path.name
+            pages,
+            document_name=metadata.get("source", path.name)  # 使用原始文件名，而非临时路径
         )
         
         # Step 5: 统一输出格式
