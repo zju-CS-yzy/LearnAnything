@@ -1,0 +1,29 @@
+{
+  "subject": "generic",
+  "name": "通用配置",
+  "description": "默认学科配置，适用于任何知识领域",
+  "version": "1.0",
+  "question_types": {
+    "single_choice": {
+      "name": "单选题",
+      "description": "从多个选项中选择正确答案",
+      "enabled": true
+    },
+    "short_answer": {
+      "name": "简答题",
+      "description": "简述概念、原理、方法",
+      "enabled": true
+    }
+  },
+  "difficulty_levels": {
+    "easy": {"name": "基础", "description": "入门概念，直接理解"},
+    "medium": {"name": "进阶", "description": "综合应用，需要分析"},
+    "hard": {"name": "高级", "description": "深度理解，创新应用"}
+  },
+  "grading": {
+    "default": {
+      "method": "keyword_match",
+      "description": "基于关键词匹配的自动评分"
+    }
+  }
+}

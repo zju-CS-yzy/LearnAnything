@@ -1,0 +1,14 @@
+; LearnAnything API 密钥配置文件
+; 复制此文件为 api_keys.ini，填入你的实际密钥
+; api_keys.ini 已被 .gitignore 忽略，不会提交到版本控制
+
+[api_keys]
+; 智谱AI Embedding API (https://open.bigmodel.cn/)
+zhipu_api_key = your_zhipu_api_key_here
+
+; DeepSeek LLM API (https://platform.deepseek.com/)
+deepseek_api_key = your_deepseek_api_key_here
+
+; 可选：智谱AI 自定义配置
+; zhipu_base_url = https://open.bigmodel.cn/api/paas/v4
+; zhipu_embedding_model = embedding-3
