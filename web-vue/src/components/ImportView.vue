@@ -5,6 +5,9 @@
         <span class="header-icon">📚</span>
         <span>导入材料</span>
       </div>
+      <div class="header-subject">
+        <span class="tag">{{ currentSubjectName }}</span>
+      </div>
     </header>
 
     <div class="view-content">
@@ -19,13 +22,19 @@
           :class="{ active: importMode === 'file' }"
           @click="importMode = 'file'"
         >文件上传</div>
+        <div
+          class="import-tab"
+          :class="{ active: importMode === 'raw' }"
+          @click="importMode = 'raw'"
+        >原始资料</div>
       </div>
 
       <!-- 文本导入 -->
       <div v-if="importMode === 'text'" class="import-panel card">
         <div class="form-group">
-          <label>学科</label>
-          <input v-model="subject" placeholder="generic" />
+          <label>当前学科</label>
+          <div class="subject-display">{{ currentSubjectName }} ({{ currentSubject }})</div>
+          <div class="hint">文本将导入到当前选中学科的知识库</div>
         </div>
         <div class="form-group">
           <label>文本内容</label>
@@ -44,8 +53,9 @@
       <!-- 文件上传 -->
       <div v-if="importMode === 'file'" class="import-panel card">
         <div class="form-group">
-          <label>学科</label>
-          <input v-model="subject" placeholder="generic" />
+          <label>当前学科</label>
+          <div class="subject-display">{{ currentSubjectName }} ({{ currentSubject }})</div>
+          <div class="hint">文件将保存到该学科的原始资料文件夹，并导入知识库</div>
         </div>
         <div class="form-group">
           <label>选择文件</label>
@@ -64,19 +74,43 @@
               ref="fileInputRef"
               type="file"
               style="display: none"
-              accept=".txt,.md,.pdf,.png,.jpg"
+              accept=".txt,.md,.pdf,.png,.jpg,.jpeg"
               @change="handleFileChange"
             />
           </div>
           <div v-if="selectedFile" class="selected-file">
-            <span>📄 {{ selectedFile.name }}</span>
-            <button class="btn btn-sm btn-secondary" @click="selectedFile = null">移除</button>
+            <span>📄 {{ selectedFile.name }} ({{ formatSize(selectedFile.size) }})</span>
+            <button class="btn btn-sm btn-secondary" @click.stop="selectedFile = null">移除</button>
           </div>
         </div>
         <button class="btn btn-primary" :disabled="isLoading || !selectedFile" @click="uploadFile">
           <span v-if="isLoading" class="spinner"></span>
           <span v-else>开始上传</span>
         </button>
+      </div>
+
+      <!-- 原始资料管理 -->
+      <div v-if="importMode === 'raw'" class="import-panel card">
+        <div class="form-group">
+          <label>当前学科</label>
+          <div class="subject-display">{{ currentSubjectName }} ({{ currentSubject }})</div>
+        </div>
+        <div class="raw-files-section">
+          <div class="section-title">📂 原始资料列表</div>
+          <div v-if="rawFiles.length === 0" class="empty-hint">暂无原始资料，请先上传文件</div>
+          <div v-else class="raw-files-list">
+            <div v-for="f in rawFiles" :key="f.name" class="raw-file-item">
+              <span class="file-icon">📄</span>
+              <span class="file-name">{{ f.name }}</span>
+              <span class="file-size">{{ formatSize(f.size) }}</span>
+              <span class="file-time">{{ formatTime(f.modified) }}</span>
+            </div>
+          </div>
+          <button class="btn btn-sm btn-secondary" @click="loadRawFiles" :disabled="isLoadingRaw">
+            <span v-if="isLoadingRaw" class="spinner"></span>
+            <span v-else">🔄 刷新</span>
+          </button>
+        </div>
       </div>
 
       <!-- 导入结果 -->
@@ -101,8 +135,12 @@
             <div class="stat-label">文档片段</div>
           </div>
           <div class="stat-card">
-            <div class="stat-value">{{ subjectStats.status || '—' }}</div>
-            <div class="stat-label">状态</div>
+            <div class="stat-value">{{ subjectStats.raw_files_count || 0 }}</div>
+            <div class="stat-label">原始资料</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-value">{{ currentSubject }}</div>
+            <div class="stat-label">当前学科</div>
           </div>
         </div>
       </div>
@@ -111,20 +149,41 @@
 </template>
 
 <script setup>
-import { ref, onMounted } from 'vue'
+import { ref, computed, inject, onMounted, watch } from 'vue'
 import { apiImportText, apiSubjectStats } from '../composables/useApi.js'
 
+// 全局学科状态
+const subjectState = inject('subjectState')
+const currentSubject = computed(() => subjectState.currentSubject.value)
+const currentSubjectName = computed(() => {
+  const sub = subjectState.subjects.value.find(s => s.id === currentSubject.value)
+  return sub?.name || currentSubject.value
+})
+
 const importMode = ref('text')
-const subject = ref('generic')
 const textContent = ref('')
 const isLoading = ref(false)
+const isLoadingRaw = ref(false)
 const importResult = ref(null)
 
 const fileInputRef = ref(null)
 const selectedFile = ref(null)
 const isDragOver = ref(false)
+const rawFiles = ref([])
 
 const subjectStats = ref({})
+
+function formatSize(bytes) {
+  if (bytes < 1024) return bytes + ' B'
+  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB'
+  return (bytes / (1024 * 1024)).toFixed(1) + ' MB'
+}
+
+function formatTime(iso) {
+  if (!iso) return ''
+  const d = new Date(iso)
+  return d.toLocaleDateString() + ' ' + d.toLocaleTimeString()
+}
 
 function handleFileChange(e) {
   const file = e.target.files[0]
@@ -143,7 +202,7 @@ async function importText() {
   importResult.value = null
 
   try {
-    const result = await apiImportText(textContent.value, subject.value)
+    const result = await apiImportText(textContent.value, currentSubject.value)
     importResult.value = { ...result, success: true }
     textContent.value = ''
     await loadStats()
@@ -160,18 +219,21 @@ async function uploadFile() {
   importResult.value = null
 
   const formData = new FormData()
-  formData.append('subject', subject.value)
+  formData.append('subject', currentSubject.value)
   formData.append('file', selectedFile.value)
 
   try {
-    const resp = await fetch('/api/import/file', {
+    const resp = await fetch(`${window.location.origin}/api/import/file`, {
       method: 'POST',
       body: formData,
     })
     const result = await resp.json()
     importResult.value = { ...result, success: resp.ok }
-    if (resp.ok) selectedFile.value = null
-    await loadStats()
+    if (resp.ok) {
+      selectedFile.value = null
+      await loadStats()
+      await loadRawFiles()
+    }
   } catch (e) {
     importResult.value = { success: false, message: e.message }
   } finally {
@@ -181,12 +243,35 @@ async function uploadFile() {
 
 async function loadStats() {
   try {
-    const stats = await apiSubjectStats(subject.value)
+    const stats = await apiSubjectStats(currentSubject.value)
     subjectStats.value = stats
   } catch (e) {
     subjectStats.value = {}
   }
 }
+
+async function loadRawFiles() {
+  isLoadingRaw.value = true
+  try {
+    const resp = await fetch(`${window.location.origin}/api/subjects/${currentSubject.value}/raw-files`)
+    if (resp.ok) {
+      const result = await resp.json()
+      rawFiles.value = result.files || []
+    }
+  } catch (e) {
+    console.error('加载原始资料失败:', e)
+  } finally {
+    isLoadingRaw.value = false
+  }
+}
+
+// 学科切换时刷新
+watch(currentSubject, () => {
+  loadStats()
+  if (importMode.value === 'raw') {
+    loadRawFiles()
+  }
+})
 
 onMounted(() => {
   loadStats()
@@ -203,6 +288,7 @@ onMounted(() => {
 .view-header {
   display: flex;
   align-items: center;
+  justify-content: space-between;
   padding: 0 24px;
   height: var(--header-height);
   border-bottom: 1px solid var(--border-color);
@@ -216,6 +302,14 @@ onMounted(() => {
   font-size: 16px;
   font-weight: 600;
   color: var(--text-primary);
+}
+
+.header-subject .tag {
+  background: var(--bg-active);
+  color: var(--accent-primary);
+  padding: 4px 10px;
+  border-radius: var(--radius-sm);
+  font-size: 12px;
 }
 
 .view-content {
@@ -261,6 +355,21 @@ onMounted(() => {
   margin: 0 auto 20px;
 }
 
+.subject-display {
+  padding: 8px 12px;
+  background: var(--bg-active);
+  border-radius: var(--radius-sm);
+  font-size: 14px;
+  color: var(--text-primary);
+  font-weight: 500;
+}
+
+.hint {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-top: 4px;
+}
+
 /* 上传区域 */
 .upload-zone {
   border: 2px dashed var(--border-color);
@@ -278,21 +387,9 @@ onMounted(() => {
   background: var(--bg-hover);
 }
 
-.upload-icon {
-  font-size: 40px;
-  margin-bottom: 12px;
-}
-
-.upload-text {
-  font-size: 15px;
-  color: var(--text-primary);
-  margin-bottom: 6px;
-}
-
-.upload-hint {
-  font-size: 12px;
-  color: var(--text-muted);
-}
+.upload-icon { font-size: 40px; margin-bottom: 12px; }
+.upload-text { font-size: 15px; color: var(--text-primary); margin-bottom: 6px; }
+.upload-hint { font-size: 12px; color: var(--text-muted); }
 
 .selected-file {
   display: flex;
@@ -305,58 +402,49 @@ onMounted(() => {
   font-size: 13px;
 }
 
+/* 原始资料 */
+.raw-files-section { margin-top: 16px; }
+.section-title { font-size: 14px; font-weight: 600; margin-bottom: 12px; color: var(--text-primary); }
+.empty-hint { font-size: 13px; color: var(--text-muted); padding: 20px; text-align: center; }
+
+.raw-files-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 12px;
+}
+
+.raw-file-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  background: var(--bg-input);
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+}
+
+.file-icon { font-size: 16px; }
+.file-name { flex: 1; color: var(--text-primary); }
+.file-size { color: var(--text-muted); }
+.file-time { color: var(--text-muted); font-size: 11px; }
+
 /* 结果卡片 */
 .result-card {
   max-width: 800px;
   margin: 0 auto 20px;
 }
+.result-card.success { border-left: 3px solid var(--success); }
+.result-card.error { border-left: 3px solid var(--error); }
 
-.result-card.success {
-  border-left: 3px solid var(--success);
-}
-
-.result-card.error {
-  border-left: 3px solid var(--error);
-}
-
-.result-title {
-  font-size: 16px;
-  font-weight: 600;
-  margin-bottom: 8px;
-}
-
-.result-message {
-  font-size: 14px;
-  color: var(--text-secondary);
-  line-height: 1.6;
-}
-
-.result-stats {
-  display: flex;
-  gap: 16px;
-  margin-top: 10px;
-  font-size: 13px;
-  color: var(--text-muted);
-}
+.result-title { font-size: 16px; font-weight: 600; margin-bottom: 8px; }
+.result-message { font-size: 14px; color: var(--text-secondary); line-height: 1.6; }
+.result-stats { display: flex; gap: 16px; margin-top: 10px; font-size: 13px; color: var(--text-muted); }
 
 /* 统计区域 */
-.stats-section {
-  max-width: 800px;
-  margin: 0 auto;
-}
-
-.stats-title {
-  font-size: 16px;
-  font-weight: 600;
-  margin-bottom: 16px;
-  color: var(--text-primary);
-}
-
-.stats-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
-  gap: 12px;
-}
+.stats-section { max-width: 800px; margin: 0 auto; }
+.stats-title { font-size: 16px; font-weight: 600; margin-bottom: 16px; color: var(--text-primary); }
+.stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; }
 
 .stat-card {
   background: var(--bg-input);
@@ -366,15 +454,6 @@ onMounted(() => {
   border: 1px solid var(--border-color);
 }
 
-.stat-value {
-  font-size: 24px;
-  font-weight: 700;
-  color: var(--accent-primary);
-  margin-bottom: 4px;
-}
-
-.stat-label {
-  font-size: 12px;
-  color: var(--text-muted);
-}
+.stat-value { font-size: 24px; font-weight: 700; color: var(--accent-primary); margin-bottom: 4px; }
+.stat-label { font-size: 12px; color: var(--text-muted); }
 </style>

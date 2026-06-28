@@ -724,14 +724,20 @@ def import_file(
         if chunks:
             store.add_documents(chunks)
             total_docs = store.count()
+
+            # 保存原始文件到学科 raw 文件夹
+            from core.subject_manager import save_raw_file
+            raw_path = save_raw_file(subject, file.filename, content)
+
             # 记录到学科管理
-            record_import(subject, file.filename, len(chunks))
+            record_import(subject, file.filename, str(raw_path), len(chunks))
             return {
                 "subject": subject,
                 "filename": file.filename,
+                "raw_path": str(raw_path),
                 "chunks_added": len(chunks),
                 "total_documents": total_docs,
-                "message": f"成功导入「{file.filename}」，生成 {len(chunks)} 个知识片段",
+                "message": f"成功导入「{file.filename}」，生成 {len(chunks)} 个知识片段，原始文件已保存",
             }
         else:
             raise HTTPException(status_code=400, detail="文件处理失败，未提取到有效内容")
@@ -965,6 +971,35 @@ def api_detect_subject(query: str = Form(...)):
         detected_subject=detected,
         confidence=confidence,
     )
+
+
+@app.get("/api/subjects/{subject_id}/raw-files")
+def api_list_raw_files(subject_id: str):
+    """
+    列出学科的原始资料文件。
+    """
+    from core.subject_manager import list_raw_files, get_subject_dir
+    subj = get_subject(subject_id)
+    if not subj:
+        raise HTTPException(status_code=404, detail=f"学科「{subject_id}」不存在")
+    files = list_raw_files(subject_id)
+    return {
+        "subject": subject_id,
+        "files": files,
+        "count": len(files),
+    }
+
+
+@app.get("/api/subjects/{subject_id}/meta")
+def api_get_subject_meta(subject_id: str):
+    """
+    获取学科的完整元数据（含原始文件列表）。
+    """
+    from core.subject_manager import get_subject_meta
+    meta = get_subject_meta(subject_id)
+    if not meta:
+        raise HTTPException(status_code=404, detail=f"学科「{subject_id}」不存在")
+    return meta
 
 
 # ========== 静态前端文件 ==========
