@@ -69,7 +69,7 @@ class DocumentProcessor:
                 self._formula_ocr = None
         return self._formula_ocr
 
-    def process_file(self, file_path: str, subject: str = "generic", metadata: Dict[str, Any] = None) -> List[Dict[str, Any]]:
+    def process_file(self, file_path: str, subject: str = "generic", metadata: Dict[str, Any] = None, source_name: str = None, raw_path: str = None) -> List[Dict[str, Any]]:
         """
         处理单个文件，返回分块后的文本列表。
 
@@ -77,6 +77,8 @@ class DocumentProcessor:
             file_path: 文件路径
             subject: 学科标识（用于后续学科专用处理）
             metadata: 额外元数据
+            source_name: 原始文件名（如果不是从文件路径提取）
+            raw_path: 原始文件在知识库中的存储路径
 
         Returns:
             [{"text": str, "metadata": dict, "source": str}, ...]
@@ -86,11 +88,14 @@ class DocumentProcessor:
             raise FileNotFoundError(f"File not found: {file_path}")
 
         ext = path.suffix.lower()
-        source = path.name
+        # 使用传入的 source_name，否则从路径提取
+        source = source_name or path.name
         base_meta = metadata or {}
         base_meta["source"] = source
         base_meta["subject"] = subject
         base_meta["file_path"] = str(path)
+        if raw_path:
+            base_meta["raw_path"] = raw_path
 
         if ext in (".txt", ".md", ".markdown"):
             return self._process_text_file(path, base_meta)
@@ -333,8 +338,8 @@ class DocumentProcessor:
         """对扫描件 PDF 页面进行 OCR，返回 [(text, metadata)] 列表"""
         ocr = self._get_ocr()
         if ocr is None:
-            print("[DocumentProcessor] OCR not available, skipping scan pages")
-            return [("[扫描件，OCR 不可用]", meta) for _, _, meta in pages]
+            print("[DocumentProcessor] OCR not available, falling back to VLM for scan pages")
+            return self._vlm_scan_pages(pages)
 
         results = []
         for page_num, page, meta in pages:
@@ -365,6 +370,32 @@ class DocumentProcessor:
                 if temp_path.exists():
                     temp_path.unlink()
 
+        return results
+
+    def _vlm_scan_pages(self, pages: List[Tuple[int, fitz.Page, Dict[str, Any]]]) -> List[Tuple[str, Dict[str, Any]]]:
+        """
+        OCR 不可用时，使用 VLM 处理扫描件页面。
+        """
+        from core.vlm_client import VLMClient
+        vlm = VLMClient()
+        
+        if not vlm.available:
+            print("[DocumentProcessor] VLM not available either, scan pages will be empty")
+            return [("[扫描件，OCR 和 VLM 均不可用]", meta) for _, _, meta in pages]
+
+        results = []
+        for page_num, page, meta in pages:
+            pix = page.get_pixmap(dpi=200)
+            img_bytes = pix.tobytes("png")
+            
+            result = vlm.analyze_pdf_page(img_bytes, "scan", page_num + 1)
+            
+            if result:
+                combined = f"[第{page_num + 1}页 扫描件识别]\n{result}"
+                results.append((combined, {**meta, "vlm_scan": True, "page_type": "scan"}))
+            else:
+                results.append(("[扫描件，VLM 识别失败]", {**meta, "vlm_scan": False, "page_type": "scan"}))
+        
         return results
 
     def _vlm_formula_pages(self, pages: List[Tuple[bytes, Dict[str, Any]]]) -> List[Tuple[str, Dict[str, Any]]]:
