@@ -699,78 +699,105 @@ def import_text(request: ImportRequest):
 @app.post("/api/import/file")
 def import_file(
     subject: str = Form(..., description="学科标识"),
-    file: UploadFile = File(..., description="上传文件（支持 .txt, .md, .pdf, .png, .jpg）"),
+    files: List[UploadFile] = File(..., description="上传文件（支持 .txt, .md, .pdf, .png, .jpg），可多选"),
     background_tasks: BackgroundTasks = None,
 ):
     """
-    上传文件导入知识库。
+    上传文件导入知识库（支持批量）。
 
     支持格式：文本、Markdown、PDF（文字型/扫描件）、图片（OCR）。
     """
     import tempfile
     import traceback
 
-    print(f"[ImportFile] Starting upload: filename={file.filename}, subject={subject}")
+    results = []
+    total_chunks = 0
+    total_docs = 0
 
-    # 保存上传文件到临时位置
-    suffix = Path(file.filename).suffix.lower()
-    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-        content = file.file.read()
-        tmp.write(content)
-        tmp_path = tmp.name
-        print(f"[ImportFile] Saved to temp: {tmp_path}, size={len(content)} bytes")
+    for file in files:
+        print(f"[ImportFile] Starting upload: filename={file.filename}, subject={subject}")
 
-    try:
-        print(f"[ImportFile] Initializing DocumentProcessor...")
-        processor = DocumentProcessor()
-        print(f"[ImportFile] DocumentProcessor OK")
+        # 保存上传文件到临时位置
+        suffix = Path(file.filename).suffix.lower()
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+            content = file.file.read()
+            tmp.write(content)
+            tmp_path = tmp.name
+            print(f"[ImportFile] Saved to temp: {tmp_path}, size={len(content)} bytes")
 
-        print(f"[ImportFile] Initializing VectorStore({subject}_v1)...")
-        store = VectorStore(f"{subject}_v1")
-        print(f"[ImportFile] VectorStore OK, count={store.count()}")
-
-        print(f"[ImportFile] Processing file...")
-        chunks = processor.process_file(tmp_path, subject=subject)
-        print(f"[ImportFile] Processed, chunks={len(chunks)}")
-
-        if chunks:
-            print(f"[ImportFile] Adding documents to vector store...")
-            store.add_documents(chunks)
-            total_docs = store.count()
-            print(f"[ImportFile] Added, total_docs={total_docs}")
-
-            # 保存原始文件到学科 raw 文件夹
-            print(f"[ImportFile] Saving raw file...")
-            from core.subject_manager import save_raw_file
-            raw_path = save_raw_file(subject, file.filename, content)
-            print(f"[ImportFile] Raw file saved: {raw_path}")
-
-            # 记录到学科管理
-            record_import(subject, file.filename, str(raw_path), len(chunks))
-            print(f"[ImportFile] Done successfully")
-            return {
-                "subject": subject,
-                "filename": file.filename,
-                "raw_path": str(raw_path),
-                "chunks_added": len(chunks),
-                "total_documents": total_docs,
-                "message": f"成功导入「{file.filename}」，生成 {len(chunks)} 个知识片段，原始文件已保存",
-            }
-        else:
-            raise HTTPException(status_code=400, detail="文件处理失败，未提取到有效内容")
-    except HTTPException:
-        raise
-    except Exception as e:
-        error_msg = f"{type(e).__name__}: {str(e)}"
-        print(f"[ImportFile] ERROR: {error_msg}")
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=f"文件处理失败: {error_msg}")
-    finally:
-        # 清理临时文件
         try:
-            Path(tmp_path).unlink()
-        except:
-            pass
+            print(f"[ImportFile] Initializing DocumentProcessor...")
+            processor = DocumentProcessor()
+            print(f"[ImportFile] DocumentProcessor OK")
+
+            print(f"[ImportFile] Initializing VectorStore({subject}_v1)...")
+            store = VectorStore(f"{subject}_v1")
+            print(f"[ImportFile] VectorStore OK, count={store.count()}")
+
+            print(f"[ImportFile] Processing file...")
+            chunks = processor.process_file(tmp_path, subject=subject)
+            print(f"[ImportFile] Processed, chunks={len(chunks)}")
+
+            if chunks:
+                print(f"[ImportFile] Adding documents to vector store...")
+                store.add_documents(chunks)
+                total_docs = store.count()
+                print(f"[ImportFile] Added, total_docs={total_docs}")
+
+                # 保存原始文件到学科 raw 文件夹
+                print(f"[ImportFile] Saving raw file...")
+                from core.subject_manager import save_raw_file
+                raw_path = save_raw_file(subject, file.filename, content)
+                print(f"[ImportFile] Raw file saved: {raw_path}")
+
+                # 记录到学科管理
+                record_import(subject, file.filename, str(raw_path), len(chunks))
+                print(f"[ImportFile] Done successfully")
+
+                results.append({
+                    "filename": file.filename,
+                    "raw_path": str(raw_path),
+                    "chunks_added": len(chunks),
+                    "success": True,
+                    "message": f"成功导入，生成 {len(chunks)} 个知识片段",
+                })
+                total_chunks += len(chunks)
+            else:
+                results.append({
+                    "filename": file.filename,
+                    "success": False,
+                    "message": "文件处理失败，未提取到有效内容",
+                })
+        except Exception as e:
+            error_msg = f"{type(e).__name__}: {str(e)}"
+            print(f"[ImportFile] ERROR for {file.filename}: {error_msg}")
+            traceback.print_exc()
+            results.append({
+                "filename": file.filename,
+                "success": False,
+                "message": f"文件处理失败: {error_msg}",
+            })
+        finally:
+            # 清理临时文件
+            try:
+                Path(tmp_path).unlink()
+            except:
+                pass
+
+    # 汇总结果
+    success_count = sum(1 for r in results if r["success"])
+    fail_count = len(results) - success_count
+
+    return {
+        "subject": subject,
+        "total_files": len(files),
+        "success_count": success_count,
+        "fail_count": fail_count,
+        "total_chunks_added": total_chunks,
+        "total_documents": total_docs,
+        "results": results,
+        "message": f"批量导入完成：{success_count} 个成功，{fail_count} 个失败，共生成 {total_chunks} 个知识片段",
+    }
 
 
 # 旧的学科列表路由已替换为新的 subject_manager 路由（见下方学科管理 API 区域）
@@ -836,6 +863,32 @@ def knowledge_base_stats(subject: str):
             "collection": f"{subject}_v1",
             "document_count": 0,
             "status": f"error: {str(e)}",
+        }
+
+
+@app.get("/api/knowledge-base/{subject}/chunks")
+def knowledge_base_chunks(subject: str, limit: int = 50, offset: int = 0):
+    """
+    获取知识库中的知识片段列表（用于可视化）。
+    """
+    try:
+        store = VectorStore(f"{subject}_v1")
+        chunks = store.list_all(limit=limit, offset=offset)
+        return {
+            "subject": subject,
+            "collection": f"{subject}_v1",
+            "total": store.count(),
+            "count": len(chunks),
+            "chunks": chunks,
+        }
+    except Exception as e:
+        return {
+            "subject": subject,
+            "collection": f"{subject}_v1",
+            "total": 0,
+            "count": 0,
+            "chunks": [],
+            "error": str(e),
         }
 
 

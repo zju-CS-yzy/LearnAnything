@@ -95,6 +95,22 @@ class VectorStore:
             self._conn.execute("DELETE FROM documents WHERE id = ?", (doc_id,))
         self._conn.commit()
 
+    def list_all(self, limit: int = 50, offset: int = 0) -> List[Dict[str, Any]]:
+        """列出所有文档片段（用于知识库可视化）。"""
+        cursor = self._conn.execute(
+            "SELECT id, text, metadata FROM documents LIMIT ? OFFSET ?",
+            (limit, offset)
+        )
+        results = []
+        for row in cursor:
+            meta = json.loads(row[2]) if row[2] else {}
+            results.append({
+                "id": row[0],
+                "text": row[1],
+                "metadata": meta,
+            })
+        return results
+
     # ========== 高级封装 ==========
 
     def add_documents(self, documents: List[Dict[str, Any]]) -> None:
