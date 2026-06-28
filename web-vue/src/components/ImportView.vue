@@ -77,23 +77,26 @@
           >
             <div class="upload-icon">📁</div>
             <div class="upload-text">拖拽文件到此处，或点击上传</div>
-            <div class="upload-hint">支持 .txt, .md, .pdf, .png, .jpg</div>
+            <div class="upload-hint">支持 .txt, .md, .pdf, .png, .jpg（可多选）</div>
             <input
               ref="fileInputRef"
               type="file"
               style="display: none"
               accept=".txt,.md,.pdf,.png,.jpg,.jpeg"
+              multiple
               @change="handleFileChange"
             />
           </div>
-          <div v-if="selectedFile" class="selected-file">
-            <span>📄 {{ selectedFile.name }} ({{ formatSize(selectedFile.size) }})</span>
-            <button class="btn btn-sm btn-secondary" @click.stop="selectedFile = null">移除</button>
+          <div v-if="selectedFiles.length > 0" class="selected-files">
+            <div v-for="(file, i) in selectedFiles" :key="i" class="selected-file">
+              <span>📄 {{ file.name }} ({{ formatSize(file.size) }})</span>
+              <button class="btn btn-sm btn-secondary" @click.stop="removeFile(i)">✕</button>
+            </div>
           </div>
         </div>
-        <button class="btn btn-primary" :disabled="isLoading || !selectedFile" @click="uploadFile">
+        <button class="btn btn-primary" :disabled="isLoading || selectedFiles.length === 0" @click="uploadFiles">
           <span v-if="isLoading" class="spinner"></span>
-          <span v-else>开始上传</span>
+          <span v-else>上传 {{ selectedFiles.length }} 个文件</span>
         </button>
       </div>
 
@@ -120,7 +123,7 @@
           </div>
           <button class="btn btn-sm btn-secondary" @click="loadRawFiles" :disabled="isLoadingRaw">
             <span v-if="isLoadingRaw" class="spinner"></span>
-            <span v-else">🔄 刷新</span>
+            <span v-else>🔄 刷新</span>
           </button>
         </div>
       </div>
@@ -128,13 +131,16 @@
       <!-- 导入结果 -->
       <div v-if="importResult" class="result-card card" :class="{ success: importResult.success, error: !importResult.success }">
         <div class="result-title">
-          <span v-if="importResult.success">✅ 导入成功</span>
+          <span v-if="importResult.success">✅ 导入完成</span>
           <span v-else>❌ 导入失败</span>
         </div>
         <div class="result-message">{{ importResult.message }}</div>
-        <div v-if="importResult.chunks_added" class="result-stats">
-          <span class="stat-item">新增片段：{{ importResult.chunks_added }}</span>
-          <span class="stat-item">总文档数：{{ importResult.total_documents }}</span>
+        <div v-if="importResult.results && importResult.results.length > 0" class="result-details">
+          <div v-for="(r, i) in importResult.results" :key="i" class="result-item" :class="{ success: r.success, error: !r.success }">
+            <span>{{ r.success ? '✅' : '❌' }} {{ r.filename }}</span>
+            <span v-if="r.chunks_added">({{ r.chunks_added }} 个片段)</span>
+            <span v-if="!r.success"> — {{ r.message }}</span>
+          </div>
         </div>
       </div>
 
@@ -179,7 +185,7 @@ const isLoadingRaw = ref(false)
 const importResult = ref(null)
 
 const fileInputRef = ref(null)
-const selectedFile = ref(null)
+const selectedFiles = ref([])
 const isDragOver = ref(false)
 const rawFiles = ref([])
 
@@ -217,14 +223,22 @@ function formatTime(iso) {
 }
 
 function handleFileChange(e) {
-  const file = e.target.files[0]
-  if (file) selectedFile.value = file
+  const files = Array.from(e.target.files)
+  if (files.length > 0) {
+    selectedFiles.value = [...selectedFiles.value, ...files]
+  }
 }
 
 function handleDrop(e) {
   isDragOver.value = false
-  const file = e.dataTransfer.files[0]
-  if (file) selectedFile.value = file
+  const files = Array.from(e.dataTransfer.files)
+  if (files.length > 0) {
+    selectedFiles.value = [...selectedFiles.value, ...files]
+  }
+}
+
+function removeFile(index) {
+  selectedFiles.value = selectedFiles.value.filter((_, i) => i !== index)
 }
 
 async function importText() {
@@ -244,14 +258,16 @@ async function importText() {
   }
 }
 
-async function uploadFile() {
-  if (!selectedFile.value) return
+async function uploadFiles() {
+  if (selectedFiles.value.length === 0) return
   isLoading.value = true
   importResult.value = null
 
   const formData = new FormData()
   formData.append('subject', selectedSubject.value)
-  formData.append('file', selectedFile.value)
+  selectedFiles.value.forEach(file => {
+    formData.append('files', file)
+  })
 
   try {
     const resp = await fetch(`${window.location.origin}/api/import/file`, {
@@ -261,7 +277,7 @@ async function uploadFile() {
     const result = await resp.json()
     importResult.value = { ...result, success: resp.ok }
     if (resp.ok) {
-      selectedFile.value = null
+      selectedFiles.value = []
       await loadStats()
       await loadRawFiles()
     }
@@ -386,13 +402,26 @@ onMounted(() => {
   margin: 0 auto 20px;
 }
 
-.subject-display {
-  padding: 8px 12px;
-  background: var(--bg-active);
-  border-radius: var(--radius-sm);
+.form-group {
+  margin-bottom: 16px;
+}
+
+.form-group label {
+  display: block;
   font-size: 14px;
-  color: var(--text-primary);
   font-weight: 500;
+  color: var(--text-secondary);
+  margin-bottom: 6px;
+}
+
+.subject-select {
+  width: 100%;
+  padding: 8px 12px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-color);
+  background: var(--bg-input);
+  color: var(--text-primary);
+  font-size: 14px;
 }
 
 .hint {
@@ -422,6 +451,13 @@ onMounted(() => {
 .upload-text { font-size: 15px; color: var(--text-primary); margin-bottom: 6px; }
 .upload-hint { font-size: 12px; color: var(--text-muted); }
 
+.selected-files {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 10px;
+}
+
 .selected-file {
   display: flex;
   align-items: center;
@@ -429,7 +465,6 @@ onMounted(() => {
   padding: 8px 12px;
   background: var(--bg-active);
   border-radius: var(--radius-sm);
-  margin-top: 10px;
   font-size: 13px;
 }
 
@@ -470,7 +505,15 @@ onMounted(() => {
 
 .result-title { font-size: 16px; font-weight: 600; margin-bottom: 8px; }
 .result-message { font-size: 14px; color: var(--text-secondary); line-height: 1.6; }
-.result-stats { display: flex; gap: 16px; margin-top: 10px; font-size: 13px; color: var(--text-muted); }
+.result-details { margin-top: 10px; }
+.result-item {
+  padding: 6px 10px;
+  font-size: 13px;
+  border-radius: var(--radius-sm);
+  margin-bottom: 4px;
+}
+.result-item.success { background: var(--bg-active); }
+.result-item.error { background: var(--bg-error); color: var(--error); }
 
 /* 统计区域 */
 .stats-section { max-width: 800px; margin: 0 auto; }

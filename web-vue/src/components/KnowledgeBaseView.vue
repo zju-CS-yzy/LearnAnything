@@ -1,3 +1,4 @@
+
 <template>
   <div class="kb-view">
     <header class="view-header">
@@ -5,35 +6,75 @@
         <span class="header-icon">🗂️</span>
         <span>知识库</span>
       </div>
+      <div class="header-subject">
+        <span class="tag">{{ currentSubjectName }}</span>
+      </div>
     </header>
 
     <div class="view-content">
-      <div class="empty-state card">
-        <div class="empty-icon">📚</div>
-        <div class="empty-title">知识库可视化</div>
-        <div class="empty-desc">
-          此功能正在开发中，计划实现：<br/>
-          • 根据 chunk 之间的逻辑关联生成思维导图<br/>
-          • 支持手动编辑节点关联和节点内容<br/>
-          • 热重载：编辑后实时保存到向量库<br/>
-          • 多维视角切换（按章节、按语义关联、按时间线）
-        </div>
-        <div class="empty-hint">
-          当前可通过「导入」功能添加材料，「智能对话」功能进行问答测试
+      <!-- 统计卡片 -->
+      <div class="stats-section card">
+        <div class="stats-title">📊 知识库统计</div>
+        <div class="stats-grid">
+          <div class="stat-card">
+            <div class="stat-value">{{ totalChunks }}</div>
+            <div class="stat-label">知识片段</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-value">{{ rawFilesCount }}</div>
+            <div class="stat-label">原始资料</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-value">{{ currentSubject }}</div>
+            <div class="stat-label">当前学科</div>
+          </div>
         </div>
       </div>
 
-      <!-- 学科列表（占位） -->
-      <div class="subjects-section card">
-        <div class="section-title">已配置学科</div>
-        <div class="subjects-list">
-          <div class="subject-item">
-            <span class="subject-icon">🧪</span>
-            <div class="subject-info">
-              <div class="subject-name">generic</div>
-              <div class="subject-desc">通用知识库</div>
-            </div>
-            <span class="subject-status tag">活跃</span>
+      <!-- 知识片段列表 -->
+      <div class="chunks-section card">
+        <div class="section-header">
+          <div class="section-title">📚 知识片段列表</div>
+          <button class="btn btn-sm btn-secondary" @click="loadChunks" :disabled="isLoading">
+            <span v-if="isLoading" class="spinner"></span>
+            <span v-else>🔄 刷新</span>
+          </button>
+        </div>
+
+        <div v-if="isLoading && chunks.length === 0" class="loading-hint">加载中...</div>
+
+        <div v-else-if="chunks.length === 0" class="empty-hint">暂无知识片段，请先导入材料</div>
+
+        <div v-else class="chunks-table-wrapper">
+          <table class="chunks-table">
+            <thead>
+              <tr>
+                <th class="col-id">ID</th>
+                <th class="col-source">来源</th>
+                <th class="col-page">页码</th>
+                <th class="col-text">内容</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="chunk in chunks" :key="chunk.id">
+                <td class="col-id">{{ chunk.id }}</td>
+                <td class="col-source">{{ chunk.metadata?.source || '—' }}</td>
+                <td class="col-page">{{ chunk.metadata?.page_number || '—' }}</td>
+                <td class="col-text">
+                  <div class="chunk-text">{{ chunk.text }}</div>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+
+          <div class="pagination" v-if="totalChunks > limit">
+            <button class="btn btn-sm btn-secondary" :disabled="offset === 0" @click="prevPage">
+              ← 上一页
+            </button>
+            <span class="page-info">{{ offset + 1 }} - {{ Math.min(offset + chunks.length, totalChunks) }} / {{ totalChunks }}</span>
+            <button class="btn btn-sm btn-secondary" :disabled="offset + limit >= totalChunks" @click="nextPage">
+              下一页 →
+            </button>
           </div>
         </div>
       </div>
@@ -42,8 +83,80 @@
 </template>
 
 <script setup>
-// 知识库视图 — 预留功能
-// 阶段3 将在此实现思维导图可视化
+import { ref, computed, inject, onMounted, watch } from 'vue'
+
+// 全局学科状态
+const subjectState = inject('subjectState')
+const currentSubject = computed(() => subjectState.currentSubject.value)
+const currentSubjectName = computed(() => {
+  const sub = subjectState.subjects.value.find(s => s.id === currentSubject.value)
+  return sub?.name || currentSubject.value
+})
+
+const chunks = ref([])
+const totalChunks = ref(0)
+const rawFilesCount = ref(0)
+const isLoading = ref(false)
+const limit = ref(50)
+const offset = ref(0)
+
+async function loadChunks() {
+  isLoading.value = true
+  try {
+    const resp = await fetch(
+      `${window.location.origin}/api/knowledge-base/${currentSubject.value}/chunks?limit=${limit.value}&offset=${offset.value}`
+    )
+    if (resp.ok) {
+      const data = await resp.json()
+      chunks.value = data.chunks || []
+      totalChunks.value = data.total || 0
+    }
+  } catch (e) {
+    console.error('加载知识片段失败:', e)
+  } finally {
+    isLoading.value = false
+  }
+}
+
+async function loadStats() {
+  try {
+    const resp = await fetch(
+      `${window.location.origin}/api/knowledge-base/${currentSubject.value}/stats`
+    )
+    if (resp.ok) {
+      const data = await resp.json()
+      totalChunks.value = data.document_count || 0
+      rawFilesCount.value = data.raw_files_count || 0
+    }
+  } catch (e) {
+    console.error('加载统计失败:', e)
+  }
+}
+
+function prevPage() {
+  if (offset.value >= limit.value) {
+    offset.value -= limit.value
+    loadChunks()
+  }
+}
+
+function nextPage() {
+  if (offset.value + limit.value < totalChunks.value) {
+    offset.value += limit.value
+    loadChunks()
+  }
+}
+
+watch(currentSubject, () => {
+  offset.value = 0
+  loadChunks()
+  loadStats()
+})
+
+onMounted(() => {
+  loadChunks()
+  loadStats()
+})
 </script>
 
 <style scoped>
@@ -56,6 +169,7 @@
 .view-header {
   display: flex;
   align-items: center;
+  justify-content: space-between;
   padding: 0 24px;
   height: var(--header-height);
   border-bottom: 1px solid var(--border-color);
@@ -71,6 +185,14 @@
   color: var(--text-primary);
 }
 
+.header-subject .tag {
+  background: var(--bg-active);
+  color: var(--accent-primary);
+  padding: 4px 10px;
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+}
+
 .view-content {
   flex: 1;
   overflow-y: auto;
@@ -78,92 +200,151 @@
   min-height: 0;
 }
 
-.empty-state {
-  max-width: 700px;
-  margin: 0 auto 24px;
-  text-align: center;
-  padding: 40px 24px;
+/* 统计 */
+.stats-section {
+  max-width: 900px;
+  margin: 0 auto 20px;
 }
 
-.empty-icon {
-  font-size: 48px;
-  margin-bottom: 16px;
-}
-
-.empty-title {
-  font-size: 20px;
-  font-weight: 600;
-  color: var(--text-primary);
-  margin-bottom: 12px;
-}
-
-.empty-desc {
-  font-size: 14px;
-  color: var(--text-secondary);
-  line-height: 1.8;
-  margin-bottom: 16px;
-}
-
-.empty-hint {
-  font-size: 13px;
-  color: var(--text-muted);
-  padding: 10px 16px;
-  background: var(--bg-input);
-  border-radius: var(--radius-sm);
-  display: inline-block;
-}
-
-/* 学科列表 */
-.subjects-section {
-  max-width: 700px;
-  margin: 0 auto;
-}
-
-.section-title {
+.stats-title {
   font-size: 16px;
   font-weight: 600;
   margin-bottom: 16px;
   color: var(--text-primary);
 }
 
-.subjects-list {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
+.stats-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 12px;
 }
 
-.subject-item {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  padding: 12px 16px;
+.stat-card {
   background: var(--bg-input);
   border-radius: var(--radius-sm);
+  padding: 16px;
+  text-align: center;
   border: 1px solid var(--border-color);
 }
 
-.subject-icon {
+.stat-value {
   font-size: 24px;
+  font-weight: 700;
+  color: var(--accent-primary);
+  margin-bottom: 4px;
 }
 
-.subject-info {
-  flex: 1;
-  min-width: 0;
+.stat-label {
+  font-size: 12px;
+  color: var(--text-muted);
 }
 
-.subject-name {
-  font-size: 14px;
-  font-weight: 500;
+/* 知识片段列表 */
+.chunks-section {
+  max-width: 900px;
+  margin: 0 auto;
+}
+
+.section-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 16px;
+}
+
+.section-title {
+  font-size: 16px;
+  font-weight: 600;
   color: var(--text-primary);
 }
 
-.subject-desc {
-  font-size: 12px;
+.loading-hint, .empty-hint {
+  text-align: center;
+  padding: 40px;
   color: var(--text-muted);
-  margin-top: 2px;
+  font-size: 14px;
 }
 
-.subject-status {
-  font-size: 11px;
+.chunks-table-wrapper {
+  overflow-x: auto;
+}
+
+.chunks-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.chunks-table th {
+  text-align: left;
+  padding: 10px 12px;
+  background: var(--bg-active);
+  color: var(--text-secondary);
+  font-weight: 600;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  border-bottom: 1px solid var(--border-color);
+  white-space: nowrap;
+}
+
+.chunks-table td {
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border-color);
+  color: var(--text-primary);
+  vertical-align: top;
+}
+
+.chunks-table tr:hover td {
+  background: var(--bg-hover);
+}
+
+.col-id { width: 80px; font-family: monospace; font-size: 11px; color: var(--text-muted); }
+.col-source { width: 120px; white-space: nowrap; }
+.col-page { width: 60px; text-align: center; }
+.col-text { min-width: 300px; }
+
+.chunk-text {
+  max-height: 120px;
+  overflow-y: auto;
+  line-height: 1.6;
+  color: var(--text-secondary);
+  font-size: 13px;
+  word-break: break-word;
+}
+
+/* 分页 */
+.pagination {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  margin-top: 20px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border-color);
+}
+
+.page-info {
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+.btn-sm {
+  padding: 6px 12px;
+  font-size: 13px;
+}
+
+.spinner {
+  display: inline-block;
+  width: 14px;
+  height: 14px;
+  border: 2px solid var(--border-color);
+  border-top-color: var(--accent-primary);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
 }
 </style>
