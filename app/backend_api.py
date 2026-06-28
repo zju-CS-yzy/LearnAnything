@@ -914,18 +914,16 @@ def api_create_subject(request: SubjectCreateRequest):
         description=request.description,
         keywords=request.keywords,
     )
-    return SubjectItem(**result)
+    return result
 
 
-@app.get("/api/subjects", response_model=SubjectListResponse)
+@app.get("/api/subjects")
 def api_list_subjects():
     """
     列出所有已创建的学科。
     """
     subjects = list_subjects()
-    return SubjectListResponse(
-        subjects=[SubjectItem(**s) for s in subjects]
-    )
+    return {"subjects": subjects}
 
 
 @app.get("/api/subjects/{subject_id}")
@@ -936,7 +934,7 @@ def api_get_subject(subject_id: str):
     sub = get_subject(subject_id)
     if not sub:
         raise HTTPException(status_code=404, detail=f"学科「{subject_id}」不存在")
-    return SubjectItem(**sub)
+    return sub
 
 
 @app.delete("/api/subjects/{subject_id}")
