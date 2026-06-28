@@ -708,6 +708,9 @@ def import_file(
     支持格式：文本、Markdown、PDF（文字型/扫描件）、图片（OCR）。
     """
     import tempfile
+    import traceback
+
+    print(f"[ImportFile] Starting upload: filename={file.filename}, subject={subject}")
 
     # 保存上传文件到临时位置
     suffix = Path(file.filename).suffix.lower()
@@ -715,22 +718,36 @@ def import_file(
         content = file.file.read()
         tmp.write(content)
         tmp_path = tmp.name
+        print(f"[ImportFile] Saved to temp: {tmp_path}, size={len(content)} bytes")
 
     try:
+        print(f"[ImportFile] Initializing DocumentProcessor...")
         processor = DocumentProcessor()
-        store = VectorStore(f"{subject}_v1")
+        print(f"[ImportFile] DocumentProcessor OK")
 
+        print(f"[ImportFile] Initializing VectorStore({subject}_v1)...")
+        store = VectorStore(f"{subject}_v1")
+        print(f"[ImportFile] VectorStore OK, count={store.count()}")
+
+        print(f"[ImportFile] Processing file...")
         chunks = processor.process_file(tmp_path, subject=subject)
+        print(f"[ImportFile] Processed, chunks={len(chunks)}")
+
         if chunks:
+            print(f"[ImportFile] Adding documents to vector store...")
             store.add_documents(chunks)
             total_docs = store.count()
+            print(f"[ImportFile] Added, total_docs={total_docs}")
 
             # 保存原始文件到学科 raw 文件夹
+            print(f"[ImportFile] Saving raw file...")
             from core.subject_manager import save_raw_file
             raw_path = save_raw_file(subject, file.filename, content)
+            print(f"[ImportFile] Raw file saved: {raw_path}")
 
             # 记录到学科管理
             record_import(subject, file.filename, str(raw_path), len(chunks))
+            print(f"[ImportFile] Done successfully")
             return {
                 "subject": subject,
                 "filename": file.filename,
@@ -741,8 +758,13 @@ def import_file(
             }
         else:
             raise HTTPException(status_code=400, detail="文件处理失败，未提取到有效内容")
+    except HTTPException:
+        raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"文件处理失败: {str(e)}")
+        error_msg = f"{type(e).__name__}: {str(e)}"
+        print(f"[ImportFile] ERROR: {error_msg}")
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"文件处理失败: {error_msg}")
     finally:
         # 清理临时文件
         try:

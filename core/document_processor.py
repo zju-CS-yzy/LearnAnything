@@ -187,10 +187,10 @@ class DocumentProcessor:
         doc = fitz.open(str(path))
         total_pages = len(doc)
         ocr_pages = []
-        formula_pages = []
-        vlm_pages = []  # 需要 VLM 处理的页面（表格/图表/流程图/图片）
+        formula_pages = []  # (img_bytes, metadata)
+        vlm_pages = []      # (img_bytes, metadata, page_type)
         
-        # Step 1: 收集所有页面文本
+        # Step 1: 收集所有页面文本，同时渲染需要 VLM 的页面为图片
         pages = []
         
         for page_num in range(total_pages):
@@ -210,11 +210,15 @@ class DocumentProcessor:
                 # 扫描件，需要 OCR
                 ocr_pages.append((page_num, page, page_meta))
             elif page_type == "formula_heavy":
-                # 公式密集型页面，使用 VLM 提取公式
-                formula_pages.append((page_num, page, page_meta))
+                # 公式密集型页面，先渲染为图片，再 VLM 提取
+                pix = page.get_pixmap(dpi=200)
+                img_bytes = pix.tobytes("png")
+                formula_pages.append((img_bytes, page_meta))
             elif page_type in ("table", "chart", "diagram", "mixed"):
-                # 表格/图表/流程图/混合页面，使用 VLM 分析
-                vlm_pages.append((page_num, page, page_meta, page_type))
+                # 表格/图表/流程图/混合页面，先渲染为图片，再 VLM 分析
+                pix = page.get_pixmap(dpi=200)
+                img_bytes = pix.tobytes("png")
+                vlm_pages.append((img_bytes, page_meta, page_type))
             else:
                 # 文字型页面，直接加入
                 pages.append({"text": text, "metadata": page_meta})
@@ -363,67 +367,53 @@ class DocumentProcessor:
 
         return results
 
-    def _vlm_formula_pages(self, pages: List[Tuple[int, fitz.Page, Dict[str, Any]]]) -> List[Tuple[str, Dict[str, Any]]]:
+    def _vlm_formula_pages(self, pages: List[Tuple[bytes, Dict[str, Any]]]) -> List[Tuple[str, Dict[str, Any]]]:
         """
         使用 VLM 处理公式密集型页面，提取 LaTeX 公式。
+        
+        Args:
+            pages: [(img_bytes, metadata), ...]
         """
         from core.vlm_client import VLMClient
         vlm = VLMClient()
         
         if not vlm.available:
             print("[DocumentProcessor] VLM not available, falling back to original text")
-            results = []
-            for page_num, page, meta in pages:
-                text = page.get_text().strip()
-                results.append((text, {**meta, "vlm_formula": False}))
-            return results
+            return []
 
         results = []
-        for page_num, page, meta in pages:
-            # 渲染页面为图片
-            pix = page.get_pixmap(dpi=200)
-            img_bytes = pix.tobytes("png")
+        for img_bytes, meta in pages:
+            page_num = meta.get("page_number", 0)
             
             # 调用 VLM 识别公式
-            result = vlm.analyze_pdf_page(img_bytes, "formula", page_num + 1)
+            result = vlm.analyze_pdf_page(img_bytes, "formula", page_num)
             
             if result:
-                # 合并原始文本和 VLM 提取的公式
-                original_text = page.get_text().strip()
-                combined = f"[第{page_num + 1}页 公式识别]\n{result}\n\n[原始文本]\n{original_text}"
+                combined = f"[第{page_num}页 公式识别]\n{result}"
                 results.append((combined, {**meta, "vlm_formula": True, "page_type": "formula"}))
-            else:
-                text = page.get_text().strip()
-                results.append((text, {**meta, "vlm_formula": False}))
         
         return results
 
-    def _vlm_pdf_pages(self, pages: List[Tuple[int, fitz.Page, Dict[str, Any], str]]) -> List[Tuple[str, Dict[str, Any]]]:
+    def _vlm_pdf_pages(self, pages: List[Tuple[bytes, Dict[str, Any], str]]) -> List[Tuple[str, Dict[str, Any]]]:
         """
         使用 VLM 处理表格/图表/流程图页面，返回 [(text, metadata)] 列表。
         
         Args:
-            pages: [(page_num, page, metadata, page_type), ...]
+            pages: [(img_bytes, metadata, page_type), ...]
         """
         from core.vlm_client import VLMClient
         vlm = VLMClient()
         
         if not vlm.available:
             print("[DocumentProcessor] VLM not available, skipping visual pages")
-            results = []
-            for page_num, page, meta, ptype in pages:
-                text = page.get_text().strip() or f"[{ptype}页面，VLM不可用]"
-                results.append((text, {**meta, "vlm_processed": False, "page_type": ptype}))
-            return results
+            return []
 
         results = []
-        for page_num, page, meta, ptype in pages:
-            # 渲染页面为图片
-            pix = page.get_pixmap(dpi=200)
-            img_bytes = pix.tobytes("png")
+        for img_bytes, meta, ptype in pages:
+            page_num = meta.get("page_number", 0)
             
             # 调用 VLM 分析
-            result = vlm.analyze_pdf_page(img_bytes, ptype, page_num + 1)
+            result = vlm.analyze_pdf_page(img_bytes, ptype, page_num)
             
             if result:
                 type_labels = {
@@ -433,11 +423,8 @@ class DocumentProcessor:
                     "mixed": "图片内容分析",
                 }
                 label = type_labels.get(ptype, "视觉内容分析")
-                combined = f"[第{page_num + 1}页 {label}]\n{result}"
+                combined = f"[第{page_num}页 {label}]\n{result}"
                 results.append((combined, {**meta, "vlm_processed": True, "page_type": ptype}))
-            else:
-                text = page.get_text().strip() or f"[{ptype}页面，VLM分析失败]"
-                results.append((text, {**meta, "vlm_processed": False, "page_type": ptype}))
         
         return results
 
