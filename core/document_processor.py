@@ -188,6 +188,7 @@ class DocumentProcessor:
         total_pages = len(doc)
         ocr_pages = []
         formula_pages = []
+        vlm_pages = []  # 需要 VLM 处理的页面（表格/图表/流程图/图片）
         
         # Step 1: 收集所有页面文本
         pages = []
@@ -209,25 +210,35 @@ class DocumentProcessor:
                 # 扫描件，需要 OCR
                 ocr_pages.append((page_num, page, page_meta))
             elif page_type == "formula_heavy":
-                # 公式密集型页面，标记待处理
-                formula_pages.append((page_num, text, page_meta))
+                # 公式密集型页面，使用 VLM 提取公式
+                formula_pages.append((page_num, page, page_meta))
+            elif page_type in ("table", "chart", "diagram", "mixed"):
+                # 表格/图表/流程图/混合页面，使用 VLM 分析
+                vlm_pages.append((page_num, page, page_meta, page_type))
             else:
-                # 文字型/混合页面，直接加入
+                # 文字型页面，直接加入
                 pages.append({"text": text, "metadata": page_meta})
         
         doc.close()
         
-        # Step 2: 处理 OCR 页面
+        # Step 2: 处理 OCR 页面（扫描件）
         if ocr_pages:
             ocr_results = self._ocr_pdf_pages(ocr_pages)
             for ocr_text, ocr_meta in ocr_results:
                 pages.append({"text": ocr_text, "metadata": ocr_meta})
         
-        # Step 3: 处理公式密集型页面
+        # Step 3: 处理公式密集型页面（VLM）
         if formula_pages:
-            formula_results = self._process_formula_pages(formula_pages)
+            formula_results = self._vlm_formula_pages(formula_pages)
             for text, meta in formula_results:
                 pages.append({"text": text, "metadata": meta})
+        
+        # Step 4: 处理表格/图表/流程图页面（VLM）
+        if vlm_pages:
+            vlm_results = self._vlm_pdf_pages(vlm_pages)
+            for text, meta in vlm_results:
+                if text:
+                    pages.append({"text": text, "metadata": meta})
         
         # 按页码排序
         pages.sort(key=lambda p: p["metadata"].get("page_number", 0))
@@ -269,24 +280,48 @@ class DocumentProcessor:
             "text": 文字型页面（文字充足）
             "scan": 扫描件（文字极少）
             "formula_heavy": 公式密集型（大量特殊字符/数学符号）
-            "mixed": 混合页面
+            "table": 表格页面（大量单元格结构）
+            "chart": 图表页面（数据可视化）
+            "diagram": 流程图/架构图
+            "mixed": 混合页面（文字+图片）
         """
         text_len = len(text.strip())
-        # 简单的启发式规则
+        
+        # 文字极少 → 扫描件或纯图片页
         if text_len < 50:
-            # 文字极少，可能是扫描件或纯图片页
             return "scan"
 
-        # 检测公式密度：大量 LaTeX 风格符号、希腊字母、上下标
+        # 检测公式密度
         formula_chars = len(re.findall(r'[\u0370-\u03FF\u2200-\u22FF\^\_\$\\]', text))
         formula_ratio = formula_chars / max(text_len, 1)
-        if formula_ratio > 0.05:  # 超过 5% 的特殊字符
+        if formula_ratio > 0.05:
             return "formula_heavy"
 
-        # 检测图片密度：通过页面上图像对象数量
+        # 检测表格密度：大量 | 或制表符，或特定表格关键词
+        table_markers = len(re.findall(r'[|+─━┌┐└┘├┤┬┴┼]', text))
+        if table_markers > 10 or text.count('\t') > 20:
+            return "table"
+
+        # 获取页面图像
         images = page.get_images()
-        if len(images) > 2 and text_len < 300:
-            return "mixed"
+        
+        # 图片数量多但文字少 → 可能是图表/流程图
+        if len(images) >= 1:
+            # 检查是否有图表特征文字
+            chart_keywords = ["图", "fig", "figure", "chart", "graph", "plot", "趋势", "增长", "下降", "%"]
+            chart_score = sum(1 for kw in chart_keywords if kw.lower() in text.lower())
+            if chart_score >= 2 and text_len < 800:
+                return "chart"
+            
+            # 检查是否有流程图特征
+            diagram_keywords = ["流程", "步骤", "stage", "process", "workflow", "架构", "系统", "模块"]
+            diagram_score = sum(1 for kw in diagram_keywords if kw.lower() in text.lower())
+            if diagram_score >= 2 and text_len < 600:
+                return "diagram"
+            
+            # 文字+图片混合
+            if len(images) > 2 and text_len < 500:
+                return "mixed"
 
         return "text"
 
@@ -328,23 +363,90 @@ class DocumentProcessor:
 
         return results
 
+    def _vlm_formula_pages(self, pages: List[Tuple[int, fitz.Page, Dict[str, Any]]]) -> List[Tuple[str, Dict[str, Any]]]:
+        """
+        使用 VLM 处理公式密集型页面，提取 LaTeX 公式。
+        """
+        from core.vlm_client import VLMClient
+        vlm = VLMClient()
+        
+        if not vlm.available:
+            print("[DocumentProcessor] VLM not available, falling back to original text")
+            results = []
+            for page_num, page, meta in pages:
+                text = page.get_text().strip()
+                results.append((text, {**meta, "vlm_formula": False}))
+            return results
+
+        results = []
+        for page_num, page, meta in pages:
+            # 渲染页面为图片
+            pix = page.get_pixmap(dpi=200)
+            img_bytes = pix.tobytes("png")
+            
+            # 调用 VLM 识别公式
+            result = vlm.analyze_pdf_page(img_bytes, "formula", page_num + 1)
+            
+            if result:
+                # 合并原始文本和 VLM 提取的公式
+                original_text = page.get_text().strip()
+                combined = f"[第{page_num + 1}页 公式识别]\n{result}\n\n[原始文本]\n{original_text}"
+                results.append((combined, {**meta, "vlm_formula": True, "page_type": "formula"}))
+            else:
+                text = page.get_text().strip()
+                results.append((text, {**meta, "vlm_formula": False}))
+        
+        return results
+
+    def _vlm_pdf_pages(self, pages: List[Tuple[int, fitz.Page, Dict[str, Any], str]]) -> List[Tuple[str, Dict[str, Any]]]:
+        """
+        使用 VLM 处理表格/图表/流程图页面，返回 [(text, metadata)] 列表。
+        
+        Args:
+            pages: [(page_num, page, metadata, page_type), ...]
+        """
+        from core.vlm_client import VLMClient
+        vlm = VLMClient()
+        
+        if not vlm.available:
+            print("[DocumentProcessor] VLM not available, skipping visual pages")
+            results = []
+            for page_num, page, meta, ptype in pages:
+                text = page.get_text().strip() or f"[{ptype}页面，VLM不可用]"
+                results.append((text, {**meta, "vlm_processed": False, "page_type": ptype}))
+            return results
+
+        results = []
+        for page_num, page, meta, ptype in pages:
+            # 渲染页面为图片
+            pix = page.get_pixmap(dpi=200)
+            img_bytes = pix.tobytes("png")
+            
+            # 调用 VLM 分析
+            result = vlm.analyze_pdf_page(img_bytes, ptype, page_num + 1)
+            
+            if result:
+                type_labels = {
+                    "table": "表格提取",
+                    "chart": "图表分析",
+                    "diagram": "流程图分析",
+                    "mixed": "图片内容分析",
+                }
+                label = type_labels.get(ptype, "视觉内容分析")
+                combined = f"[第{page_num + 1}页 {label}]\n{result}"
+                results.append((combined, {**meta, "vlm_processed": True, "page_type": ptype}))
+            else:
+                text = page.get_text().strip() or f"[{ptype}页面，VLM分析失败]"
+                results.append((text, {**meta, "vlm_processed": False, "page_type": ptype}))
+        
+        return results
+
     def _process_formula_pages(self, pages: List[Tuple[int, str, Dict[str, Any]]]) -> List[Tuple[str, Dict[str, Any]]]:
         """
-        处理公式密集型页面，返回 [(text, metadata)] 列表。
-        
-        当前策略：保留原始文本，标记需要公式 OCR。
-        后续可实现：提取页面为图片 → pix2tex → 合并 LaTeX 到文本。
+        处理公式密集型页面（已废弃，改用 _vlm_formula_pages）。
+        保留此方法用于兼容和降级。
         """
-        formula_ocr = self._get_formula_ocr()
-        if formula_ocr is None:
-            print("[DocumentProcessor] Formula OCR not available, keeping original text")
-            return [(text, {**meta, "formula_ocr_attempted": False}) for _, text, meta in pages]
-
-        # 简化处理：保留原始文本，标记已尝试公式识别
-        results = []
-        for _, text, meta in pages:
-            results.append((text, {**meta, "formula_ocr_attempted": True}))
-        return results
+        return [(text, {**meta, "formula_ocr_attempted": False}) for _, text, meta in pages]
 
     def _process_image(self, path: Path, metadata: Dict[str, Any]) -> List[Dict[str, Any]]:
         """
