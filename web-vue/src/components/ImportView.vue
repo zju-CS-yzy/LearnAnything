@@ -32,9 +32,13 @@
       <!-- 文本导入 -->
       <div v-if="importMode === 'text'" class="import-panel card">
         <div class="form-group">
-          <label>当前学科</label>
-          <div class="subject-display">{{ currentSubjectName }} ({{ currentSubject }})</div>
-          <div class="hint">文本将导入到当前选中学科的知识库</div>
+          <label>目标学科</label>
+          <select v-model="selectedSubject" @change="changeSubject" class="subject-select">
+            <option v-for="sub in availableSubjects" :key="sub.id" :value="sub.id">
+              {{ sub.name }} ({{ sub.id }})
+            </option>
+          </select>
+          <div class="hint">文本将导入到选中学科的知识库</div>
         </div>
         <div class="form-group">
           <label>文本内容</label>
@@ -53,8 +57,12 @@
       <!-- 文件上传 -->
       <div v-if="importMode === 'file'" class="import-panel card">
         <div class="form-group">
-          <label>当前学科</label>
-          <div class="subject-display">{{ currentSubjectName }} ({{ currentSubject }})</div>
+          <label>目标学科</label>
+          <select v-model="selectedSubject" @change="changeSubject" class="subject-select">
+            <option v-for="sub in availableSubjects" :key="sub.id" :value="sub.id">
+              {{ sub.name }} ({{ sub.id }})
+            </option>
+          </select>
           <div class="hint">文件将保存到该学科的原始资料文件夹，并导入知识库</div>
         </div>
         <div class="form-group">
@@ -92,8 +100,12 @@
       <!-- 原始资料管理 -->
       <div v-if="importMode === 'raw'" class="import-panel card">
         <div class="form-group">
-          <label>当前学科</label>
-          <div class="subject-display">{{ currentSubjectName }} ({{ currentSubject }})</div>
+          <label>目标学科</label>
+          <select v-model="selectedSubject" @change="changeSubject" class="subject-select">
+            <option v-for="sub in availableSubjects" :key="sub.id" :value="sub.id">
+              {{ sub.name }} ({{ sub.id }})
+            </option>
+          </select>
         </div>
         <div class="raw-files-section">
           <div class="section-title">📂 原始资料列表</div>
@@ -139,7 +151,7 @@
             <div class="stat-label">原始资料</div>
           </div>
           <div class="stat-card">
-            <div class="stat-value">{{ currentSubject }}</div>
+            <div class="stat-value">{{ selectedSubject }}</div>
             <div class="stat-label">当前学科</div>
           </div>
         </div>
@@ -156,8 +168,8 @@ import { apiImportText, apiSubjectStats } from '../composables/useApi.js'
 const subjectState = inject('subjectState')
 const currentSubject = computed(() => subjectState.currentSubject.value)
 const currentSubjectName = computed(() => {
-  const sub = subjectState.subjects.value.find(s => s.id === currentSubject.value)
-  return sub?.name || currentSubject.value
+  const sub = subjectState.subjects.value.find(s => s.id === selectedSubject.value)
+  return sub?.name || selectedSubject.value
 })
 
 const importMode = ref('text')
@@ -172,6 +184,25 @@ const isDragOver = ref(false)
 const rawFiles = ref([])
 
 const subjectStats = ref({})
+
+// 学科选择（与全局状态联动）
+const availableSubjects = computed(() => subjectState.subjects.value || [])
+const selectedSubject = ref(subjectState.currentSubject.value)
+
+// 监听全局学科变化
+watch(() => subjectState.currentSubject.value, (val) => {
+  if (val !== selectedSubject.value) {
+    selectedSubject.value = val
+    loadStats()
+    if (importMode.value === 'raw') loadRawFiles()
+  }
+})
+
+function changeSubject() {
+  subjectState.setSubject(selectedSubject.value)
+  loadStats()
+  if (importMode.value === 'raw') loadRawFiles()
+}
 
 function formatSize(bytes) {
   if (bytes < 1024) return bytes + ' B'
@@ -202,7 +233,7 @@ async function importText() {
   importResult.value = null
 
   try {
-    const result = await apiImportText(textContent.value, currentSubject.value)
+    const result = await apiImportText(textContent.value, selectedSubject.value)
     importResult.value = { ...result, success: true }
     textContent.value = ''
     await loadStats()
@@ -219,7 +250,7 @@ async function uploadFile() {
   importResult.value = null
 
   const formData = new FormData()
-  formData.append('subject', currentSubject.value)
+  formData.append('subject', selectedSubject.value)
   formData.append('file', selectedFile.value)
 
   try {
@@ -243,7 +274,7 @@ async function uploadFile() {
 
 async function loadStats() {
   try {
-    const stats = await apiSubjectStats(currentSubject.value)
+    const stats = await apiSubjectStats(selectedSubject.value)
     subjectStats.value = stats
   } catch (e) {
     subjectStats.value = {}
@@ -253,7 +284,7 @@ async function loadStats() {
 async function loadRawFiles() {
   isLoadingRaw.value = true
   try {
-    const resp = await fetch(`${window.location.origin}/api/subjects/${currentSubject.value}/raw-files`)
+    const resp = await fetch(`${window.location.origin}/api/subjects/${selectedSubject.value}/raw-files`)
     if (resp.ok) {
       const result = await resp.json()
       rawFiles.value = result.files || []
@@ -266,7 +297,7 @@ async function loadRawFiles() {
 }
 
 // 学科切换时刷新
-watch(currentSubject, () => {
+watch(selectedSubject, () => {
   loadStats()
   if (importMode.value === 'raw') {
     loadRawFiles()
