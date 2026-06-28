@@ -26,7 +26,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, FileResponse
 from pydantic import BaseModel, Field
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Union
 import uuid
 import time
 import json
@@ -38,6 +38,10 @@ from agents.quiz_agent import QuizAgent
 from agents.tutor_agent import TutorAgent
 from core.document_processor import DocumentProcessor
 from core.vector_store import VectorStore
+from core.subject_manager import (
+    create_subject, list_subjects, get_subject, delete_subject,
+    detect_subject, ensure_default_subjects, record_import,
+)
 from core.subject_analyzer import SubjectAnalyzer, save_subject_config
 from core.llm_client import LLMClient
 from core.quiz_bank import (
@@ -108,6 +112,12 @@ def _cleanup_session(session_id: str):
         del _eval_sessions[session_id]
 
 
+# ========== 启动初始化 ==========
+
+# 确保默认学科存在
+ensure_default_subjects()
+
+
 # ========== Pydantic 模型（请求/响应） ==========
 
 class AskRequest(BaseModel):
@@ -137,7 +147,7 @@ class QuizRequest(BaseModel):
 
 class QuizQuestion(BaseModel):
     """单道题目"""
-    id: int
+    id: Union[int, str]
     type: str
     question: str
     options: List[str] = []
@@ -189,6 +199,38 @@ class QuizBankStatsResponse(BaseModel):
     by_type: Dict[str, int]
 
 
+# ========== 学科管理模型 ==========
+
+class SubjectCreateRequest(BaseModel):
+    """创建学科请求"""
+    id: str = Field(..., description="学科标识（英文，如 ai_llm）")
+    name: str = Field(..., description="学科名称（中文，如 AI大模型）")
+    description: str = Field("", description="学科描述")
+    keywords: List[str] = Field(default_factory=list, description="关键词列表，用于自动识别")
+
+
+class SubjectItem(BaseModel):
+    """学科条目"""
+    id: str
+    name: str
+    description: str
+    keywords: List[str]
+    created_at: str
+    document_count: int
+
+
+class SubjectListResponse(BaseModel):
+    """学科列表响应"""
+    subjects: List[SubjectItem]
+
+
+class SubjectDetectResponse(BaseModel):
+    """学科识别响应"""
+    query: str
+    detected_subject: Optional[str]
+    confidence: str  # high / medium / low / none
+
+
 class EvaluateStartResponse(BaseModel):
     """开始评测响应"""
     session_id: str
@@ -206,7 +248,7 @@ class EvaluateSubmitRequest(BaseModel):
 
 class EvaluateDetail(BaseModel):
     """单题评分详情"""
-    id: int
+    id: Union[int, str]
     type: str
     question: str
     user_answer: str
@@ -529,6 +571,7 @@ def start_evaluation(request: EvaluateStartRequest):
         "mode": request.mode,
         "created_at": time.time(),
     }
+    print(f"[EvalStart] session={session_id} mode={request.mode} questions={len(questions)} sessions_count={len(_eval_sessions)}")
 
     quiz_questions = [
         QuizQuestion(
@@ -558,6 +601,7 @@ def submit_evaluation(request: EvaluateSubmitRequest):
 
     需要传入之前 /api/evaluate/start 返回的 session_id。
     """
+    print(f"[EvalSubmit] session_id={request.session_id} available_sessions={list(_eval_sessions.keys())}")
     session = _eval_sessions.get(request.session_id)
     if not session:
         raise HTTPException(status_code=404, detail="评测会话不存在或已过期")
@@ -641,6 +685,9 @@ def import_text(request: ImportRequest):
     store.add_documents(docs)
     total_docs = store.count()
 
+    # 记录到学科管理
+    record_import(request.subject, request.source_name, len(docs))
+
     return ImportResponse(
         subject=request.subject,
         chunks_added=len(docs),
@@ -677,6 +724,8 @@ def import_file(
         if chunks:
             store.add_documents(chunks)
             total_docs = store.count()
+            # 记录到学科管理
+            record_import(subject, file.filename, len(chunks))
             return {
                 "subject": subject,
                 "filename": file.filename,
@@ -696,49 +745,7 @@ def import_file(
             pass
 
 
-@app.get("/api/subjects", response_model=SubjectListResponse)
-def list_subjects():
-    """
-    列出已配置的学科。
-
-    扫描 config/subjects/ 目录，返回所有已配置的学科列表。
-    """
-    from config.settings import SUBJECT_CONFIG_DIR
-
-    subjects = []
-    if SUBJECT_CONFIG_DIR.exists():
-        for config_file in SUBJECT_CONFIG_DIR.glob("*.json"):
-            try:
-                with open(config_file, "r", encoding="utf-8") as f:
-                    config = json.load(f)
-                subjects.append({
-                    "subject": config.get("subject", config_file.stem),
-                    "name": config.get("name", config_file.stem),
-                    "description": config.get("description", ""),
-                })
-            except:
-                pass
-
-    return SubjectListResponse(subjects=subjects)
-
-
-@app.get("/api/subjects/{subject}", response_model=SubjectConfig)
-def get_subject_config(subject: str):
-    """
-    获取指定学科的配置详情。
-    """
-    config = SubjectAnalyzer.load_config(subject)
-    if not config:
-        raise HTTPException(status_code=404, detail=f"学科「{subject}」配置不存在")
-
-    return SubjectConfig(
-        subject=config.get("subject", subject),
-        name=config.get("name", subject),
-        description=config.get("description", ""),
-        question_types=config.get("question_types", {}),
-        difficulty_levels=config.get("difficulty_levels", {}),
-        special_features=config.get("special_features", []),
-    )
+# 旧的学科列表路由已替换为新的 subject_manager 路由（见下方学科管理 API 区域）
 
 
 @app.post("/api/subjects/{subject}/analyze")
@@ -886,6 +893,78 @@ def quiz_bank_stats(subject: str = "generic"):
     """
     stats = qb_stats(subject=subject)
     return QuizBankStatsResponse(**stats)
+
+
+# ========== 学科管理 API ==========
+
+@app.post("/api/subjects", response_model=SubjectItem)
+def api_create_subject(request: SubjectCreateRequest):
+    """
+    创建新学科。
+    """
+    result = create_subject(
+        id=request.id,
+        name=request.name,
+        description=request.description,
+        keywords=request.keywords,
+    )
+    return SubjectItem(**result)
+
+
+@app.get("/api/subjects", response_model=SubjectListResponse)
+def api_list_subjects():
+    """
+    列出所有已创建的学科。
+    """
+    subjects = list_subjects()
+    return SubjectListResponse(
+        subjects=[SubjectItem(**s) for s in subjects]
+    )
+
+
+@app.get("/api/subjects/{subject_id}")
+def api_get_subject(subject_id: str):
+    """
+    获取学科详情。
+    """
+    sub = get_subject(subject_id)
+    if not sub:
+        raise HTTPException(status_code=404, detail=f"学科「{subject_id}」不存在")
+    return SubjectItem(**sub)
+
+
+@app.delete("/api/subjects/{subject_id}")
+def api_delete_subject(subject_id: str):
+    """
+    删除学科（同时清空关联知识库）。
+    """
+    # 删除知识库
+    try:
+        from config.settings import VECTOR_DB_DIR
+        db_path = VECTOR_DB_DIR / f"{subject_id}_v1.db"
+        if db_path.exists():
+            db_path.unlink()
+    except Exception as e:
+        print(f"[SubjectDelete] 删除知识库失败: {e}")
+
+    success = delete_subject(subject_id)
+    if not success:
+        raise HTTPException(status_code=404, detail=f"学科「{subject_id}」不存在")
+    return {"message": f"学科「{subject_id}」已删除", "deleted": True}
+
+
+@app.post("/api/subjects/detect", response_model=SubjectDetectResponse)
+def api_detect_subject(query: str = Form(...)):
+    """
+    自动识别查询所属学科。
+    """
+    detected = detect_subject(query)
+    confidence = "high" if detected else "none"
+    return SubjectDetectResponse(
+        query=query,
+        detected_subject=detected,
+        confidence=confidence,
+    )
 
 
 # ========== 静态前端文件 ==========

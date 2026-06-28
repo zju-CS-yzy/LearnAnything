@@ -16,15 +16,17 @@
 </template>
 
 <script setup>
-import { ref, computed } from 'vue'
+import { ref, computed, provide, onMounted } from 'vue'
 import Sidebar from './components/Sidebar.vue'
 import ChatView from './components/ChatView.vue'
 import QuizView from './components/QuizView.vue'
 import EvaluateView from './components/EvaluateView.vue'
 import ImportView from './components/ImportView.vue'
 import KnowledgeBaseView from './components/KnowledgeBaseView.vue'
+import { useSubject } from './composables/useSubject.js'
+import { apiListSubjects } from './composables/useApi.js'
 
-// 视图组件映射（直接使用组件，不需要 shallowRef）
+// 视图组件映射
 const viewComponents = {
   chat: ChatView,
   quiz: QuizView,
@@ -33,24 +35,31 @@ const viewComponents = {
   knowledge: KnowledgeBaseView,
 }
 
-// 当前激活的视图
 const activeView = ref('chat')
-
-// 计算当前视图组件
+const sidebarCollapsed = ref(false)
 const currentViewComponent = computed(() => viewComponents[activeView.value] || ChatView)
 
-// 侧边栏折叠状态
-const sidebarCollapsed = ref(false)
-
-// 切换视图
 function switchView(view) {
   activeView.value = view
 }
 
-// 折叠/展开侧边栏
 function toggleSidebar() {
   sidebarCollapsed.value = !sidebarCollapsed.value
 }
+
+// 全局学科状态
+const subjectState = useSubject()
+provide('subjectState', subjectState)
+
+// 加载学科列表
+onMounted(async () => {
+  try {
+    const result = await apiListSubjects()
+    subjectState.setSubjects(result.subjects || [])
+  } catch (e) {
+    console.error('加载学科列表失败:', e)
+  }
+})
 </script>
 
 <style scoped>
@@ -63,14 +72,9 @@ function toggleSidebar() {
 
 .main-content {
   flex: 1;
-  min-width: 0; /* 防止 flex 子元素溢出 */
+  min-width: 0;
   height: 100%;
   overflow: hidden;
   background: var(--bg-main);
-}
-
-/* 侧边栏折叠时 */
-.app-container.sidebar-collapsed {
-  --sidebar-width: var(--sidebar-collapsed);
 }
 </style>
