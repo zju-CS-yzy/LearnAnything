@@ -15,8 +15,8 @@
           <input v-model="topic" placeholder="例如：RAG 技术" />
         </div>
         <div class="form-group">
-          <label>学科</label>
-          <input v-model="subject" placeholder="generic" />
+          <label>当前学科</label>
+          <div class="subject-display">{{ currentSubject }}</div>
         </div>
         <div class="form-group">
           <label>测评模式</label>
@@ -54,11 +54,11 @@
               v-for="(opt, i) in currentQuestion.options"
               :key="i"
               class="option-choice"
-              :class="{ selected: userAnswers[currentIndex] === opt }"
+              :class="{ selected: userAnswers[currentIndex] === String.fromCharCode(65 + i) }"
               @click="userAnswers[currentIndex] = String.fromCharCode(65 + i)"
             >
               <span class="choice-label">{{ ['A', 'B', 'C', 'D', 'E', 'F'][i] || i }}</span>
-              <span class="choice-text">{{ opt }}</span>
+              <span class="choice-text">{{ stripPrefix(opt) }}</span>
             </div>
           </div>
           <div v-else class="answer-input">
@@ -151,12 +151,15 @@
 </template>
 
 <script setup>
-import { ref, computed } from 'vue'
+import { ref, computed, inject } from 'vue'
 import { apiEvalStart, apiEvalSubmit } from '../composables/useApi.js'
+
+// 全局学科状态
+const subjectState = inject('subjectState')
+const currentSubject = computed(() => subjectState.currentSubject.value)
 
 const step = ref('start')
 const topic = ref('RAG 技术')
-const subject = ref('generic')
 const count = ref(5)
 const evalMode = ref('generate')
 const isLoading = ref(false)
@@ -184,7 +187,7 @@ async function startEval() {
   isLoading.value = true
 
   try {
-    const result = await apiEvalStart(topic.value, subject.value, count.value, evalMode.value)
+    const result = await apiEvalStart(topic.value, currentSubject.value, count.value, evalMode.value)
     sessionId.value = result.session_id
     questions.value = result.questions
     userAnswers.value = new Array(questions.value.length).fill('')
@@ -195,6 +198,11 @@ async function startEval() {
   } finally {
     isLoading.value = false
   }
+}
+
+function stripPrefix(opt) {
+  // 去掉选项前缀 "A. " "B. " 等，避免显示重复
+  return opt.replace(/^[A-Fa-f][\.．、]\s*/, '')
 }
 
 async function submitEval() {

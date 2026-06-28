@@ -17,6 +17,29 @@
       </button>
     </div>
 
+    <!-- 学科选择器 -->
+    <div class="subject-section" v-show="!collapsed">
+      <div class="section-title">当前学科</div>
+      <div class="subject-selector">
+        <select v-model="selectedSubject" @change="changeSubject" class="subject-select">
+          <option v-for="sub in subjectState.subjects.value" :key="sub.id" :value="sub.id">
+            {{ sub.name }} ({{ sub.document_count }})
+          </option>
+        </select>
+        <button class="btn-icon" @click="showCreateSubject = true" title="新建学科">+</button>
+      </div>
+      <!-- 新建学科弹窗 -->
+      <div v-if="showCreateSubject" class="subject-create">
+        <input v-model="newSubjectId" placeholder="标识(如ai_llm)" class="subject-input" />
+        <input v-model="newSubjectName" placeholder="名称(如AI大模型)" class="subject-input" />
+        <input v-model="newSubjectKeywords" placeholder="关键词(逗号分隔)" class="subject-input" />
+        <div class="subject-create-actions">
+          <button class="btn btn-sm btn-primary" @click="createSubject">创建</button>
+          <button class="btn btn-sm btn-secondary" @click="showCreateSubject = false">取消</button>
+        </div>
+      </div>
+    </div>
+
     <!-- 新建会话按钮 -->
     <button class="new-chat-btn" v-show="!collapsed" @click="$emit('switch-view', 'chat')">
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -44,7 +67,7 @@
     <!-- 历史会话（仅智能对话视图时显示） -->
     <div class="history-section" v-show="!collapsed && activeView === 'chat'">
       <div class="section-title">历史会话</div>
-      <div class="history-list">
+      <div class="history-list" v-if="chatSessions.length">
         <div
           v-for="session in chatSessions"
           :key="session.id"
@@ -56,6 +79,7 @@
           <span class="history-text">{{ session.title }}</span>
         </div>
       </div>
+      <div v-else class="history-empty">暂无历史会话</div>
     </div>
 
     <!-- 底部信息 -->
@@ -69,16 +93,54 @@
 </template>
 
 <script setup>
-import { ref } from 'vue'
-import { useHealthCheck } from '../composables/useApi.js'
+import { ref, computed, inject, watch } from 'vue'
+import { useHealthCheck, apiCreateSubject, apiListSubjects } from '../composables/useApi.js'
 
-// Props
-defineProps({
+const props = defineProps({
   activeView: { type: String, default: 'chat' },
   collapsed: { type: Boolean, default: false },
 })
 
 defineEmits(['switch-view', 'toggle-sidebar'])
+
+// 全局学科状态
+const subjectState = inject('subjectState')
+const selectedSubject = ref(subjectState.currentSubject.value)
+
+watch(() => subjectState.currentSubject.value, (val) => {
+  selectedSubject.value = val
+})
+
+function changeSubject() {
+  subjectState.setSubject(selectedSubject.value)
+}
+
+// 新建学科
+const showCreateSubject = ref(false)
+const newSubjectId = ref('')
+const newSubjectName = ref('')
+const newSubjectKeywords = ref('')
+
+async function createSubject() {
+  if (!newSubjectId.value.trim() || !newSubjectName.value.trim()) return
+  try {
+    const keywords = newSubjectKeywords.value.split(',').map(k => k.trim()).filter(Boolean)
+    const result = await apiCreateSubject(
+      newSubjectId.value.trim(),
+      newSubjectName.value.trim(),
+      '',
+      keywords,
+    )
+    subjectState.addSubject(result)
+    subjectState.setSubject(result.id)
+    showCreateSubject.value = false
+    newSubjectId.value = ''
+    newSubjectName.value = ''
+    newSubjectKeywords.value = ''
+  } catch (e) {
+    alert('创建学科失败: ' + e.message)
+  }
+}
 
 // 导航菜单项
 const navItems = [
@@ -97,20 +159,34 @@ const statusText = computed(() => {
   return map[healthStatus.value] || '未知'
 })
 
-// 会话历史（示例数据，实际应从 localStorage 或后端获取）
-const chatSessions = ref([
-  { id: '1', title: 'RAG 技术讨论' },
-  { id: '2', title: 'Transformer 注意力机制' },
-  { id: '3', title: '化学键基础知识' },
-])
-const currentSessionId = ref('1')
+// 历史会话（从 localStorage 读取，后续迁移到后端）
+const chatSessions = ref([])
+const currentSessionId = ref('')
+
+function loadSessions() {
+  try {
+    const saved = localStorage.getItem('la_chat_sessions')
+    chatSessions.value = saved ? JSON.parse(saved) : []
+  } catch {
+    chatSessions.value = []
+  }
+}
 
 function selectSession(id) {
   currentSessionId.value = id
-  // TODO: 加载会话历史消息
+  // 通知 ChatView 加载会话
+  window.dispatchEvent(new CustomEvent('load-chat-session', { detail: { sessionId: id } }))
 }
 
-import { computed } from 'vue'
+loadSessions()
+
+// 监听新会话创建
+window.addEventListener('chat-session-created', (e) => {
+  const session = e.detail
+  chatSessions.value.unshift(session)
+  currentSessionId.value = session.id
+  localStorage.setItem('la_chat_sessions', JSON.stringify(chatSessions.value))
+})
 </script>
 
 <style scoped>
@@ -151,14 +227,8 @@ import { computed } from 'vue'
   white-space: nowrap;
 }
 
-.logo-icon {
-  font-size: 20px;
-}
-
-.logo-icon-only {
-  font-size: 24px;
-  margin: 0 auto;
-}
+.logo-icon { font-size: 20px; }
+.logo-icon-only { font-size: 24px; margin: 0 auto; }
 
 .toggle-btn {
   color: var(--text-secondary);
@@ -172,6 +242,50 @@ import { computed } from 'vue'
 .toggle-btn:hover {
   color: var(--text-primary);
   background: var(--bg-hover);
+}
+
+/* 学科选择器 */
+.subject-section {
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border-color);
+  flex-shrink: 0;
+}
+
+.subject-selector {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.subject-select {
+  flex: 1;
+  padding: 6px 8px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-color);
+  background: var(--bg-input);
+  color: var(--text-primary);
+  font-size: 13px;
+}
+
+.subject-create {
+  margin-top: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.subject-input {
+  padding: 6px 8px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-color);
+  background: var(--bg-input);
+  color: var(--text-primary);
+  font-size: 12px;
+}
+
+.subject-create-actions {
+  display: flex;
+  gap: 6px;
 }
 
 /* 新建会话按钮 */
@@ -274,15 +388,19 @@ import { computed } from 'vue'
   color: var(--text-primary);
 }
 
-.history-icon {
-  font-size: 14px;
-  flex-shrink: 0;
-}
+.history-icon { font-size: 14px; flex-shrink: 0; }
 
 .history-text {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.history-empty {
+  padding: 12px 16px;
+  font-size: 12px;
+  color: var(--text-muted);
+  text-align: center;
 }
 
 /* 底部状态 */

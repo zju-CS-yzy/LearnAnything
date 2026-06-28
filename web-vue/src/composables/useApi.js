@@ -173,6 +173,35 @@ export async function apiListSubjects() {
   return fetchApi('/api/subjects')
 }
 
+// 创建学科
+export async function apiCreateSubject(id, name, description = '', keywords = []) {
+  return fetchApi('/api/subjects', {
+    method: 'POST',
+    body: JSON.stringify({ id, name, description, keywords }),
+  })
+}
+
+// 删除学科
+export async function apiDeleteSubject(subjectId) {
+  return fetchApi(`/api/subjects/${subjectId}`, { method: 'DELETE' })
+}
+
+// 自动检测学科
+export async function apiDetectSubject(query) {
+  const form = new URLSearchParams()
+  form.append('query', query)
+  const resp = await fetch(`${API_BASE}/api/subjects/detect`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: form,
+  })
+  if (!resp.ok) {
+    const text = await resp.text()
+    throw new Error(`HTTP ${resp.status}: ${text}`)
+  }
+  return resp.json()
+}
+
 // 获取学科统计
 export async function apiSubjectStats(subject) {
   return fetchApi(`/api/knowledge-base/${subject}/stats`)

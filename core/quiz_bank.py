@@ -14,7 +14,14 @@ from typing import Dict, Any, List, Optional
 
 from config.settings import KNOWLEDGE_BASE_DIR
 
-DB_PATH = KNOWLEDGE_BASE_DIR / "quiz_bank.db"
+# 题库数据库路径：使用用户数据目录（PyInstaller 打包后数据持久化）
+# 用户数据目录：~/.learnanything/ 或 AppData/Local/LearnAnything/
+_user_data_dir = Path.home() / ".learnanything"
+_user_data_dir.mkdir(parents=True, exist_ok=True)
+DB_PATH = _user_data_dir / "quiz_bank.db"
+
+# 同时保留知识库目录的引用（用于数据迁移）
+LEGACY_DB_PATH = KNOWLEDGE_BASE_DIR / "quiz_bank.db"
 
 
 def _get_conn():
@@ -51,6 +58,43 @@ def _ensure_table(conn: sqlite3.Connection):
     conn.execute('CREATE INDEX IF NOT EXISTS idx_qb_source_entry ON question_bank(source_entry_id)')
     conn.execute('CREATE INDEX IF NOT EXISTS idx_qb_approved ON question_bank(is_approved)')
     conn.commit()
+    # 迁移：从旧数据库复制数据（如果旧数据库存在且新数据库为空）
+    _migrate_legacy_data(conn)
+
+
+def _migrate_legacy_data(conn: sqlite3.Connection):
+    """从旧数据库位置迁移数据到新用户数据目录"""
+    if not LEGACY_DB_PATH.exists():
+        return
+    try:
+        # 检查新数据库是否已有数据
+        cursor = conn.execute('SELECT COUNT(*) FROM question_bank')
+        count = cursor.fetchone()[0]
+        if count > 0:
+            return  # 新数据库已有数据，不迁移
+        
+        # 连接旧数据库并复制数据
+        legacy_conn = sqlite3.connect(str(LEGACY_DB_PATH))
+        legacy_conn.row_factory = sqlite3.Row
+        legacy_cursor = legacy_conn.execute('SELECT * FROM question_bank')
+        rows = legacy_cursor.fetchall()
+        
+        for row in rows:
+            conn.execute('''
+                INSERT OR IGNORE INTO question_bank
+                (id, subject, topic, type, question, options, answer, explanation,
+                 difficulty, source, source_entry_id, tags, is_approved, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (
+                row['id'], row['subject'], row['topic'], row['type'], row['question'],
+                row['options'], row['answer'], row['explanation'], row['difficulty'],
+                row['source'], row['source_entry_id'], row['tags'], row['is_approved'],
+                row['created_at'],
+            ))
+        conn.commit()
+        legacy_conn.close()
+    except Exception as e:
+        print(f"[QuizBank] Legacy migration skipped: {e}")
 
 
 def save_question(

@@ -7,7 +7,7 @@
         <span>智能问答</span>
       </div>
       <div class="header-subject">
-        <span class="tag">{{ currentSubject }}</span>
+        <span class="tag">{{ currentSubjectName }}</span>
       </div>
     </header>
 
@@ -44,7 +44,6 @@
                 <span class="time-tag">{{ msg.time }}</span>
               </div>
               <div class="message-body markdown-body" v-html="renderMarkdown(msg.text)"></div>
-              <!-- 引用来源 -->
               <div class="message-sources" v-if="msg.sources && msg.sources.length">
                 <div class="sources-title">📎 引用来源</div>
                 <div class="source-item" v-for="(src, i) in msg.sources" :key="i">
@@ -55,7 +54,6 @@
             </div>
           </div>
         </div>
-        <!-- 流式输出中的光标 -->
         <div v-if="isStreaming" class="message-row ai-row">
           <div class="message-avatar"><span>🎓</span></div>
           <div class="message-content">
@@ -96,16 +94,24 @@
       </div>
       <div class="input-hint">
         <span v-if="isStreaming" class="streaming-hint">正在生成回答...</span>
-        <span v-else>Shift + Enter 换行</span>
+        <span v-else>当前学科: {{ currentSubjectName }} | Shift + Enter 换行</span>
       </div>
     </div>
   </div>
 </template>
 
 <script setup>
-import { ref, nextTick, onMounted } from 'vue'
+import { ref, nextTick, onMounted, inject, computed } from 'vue'
 import { marked } from 'marked'
-import { apiAsk, apiAskStream } from '../composables/useApi.js'
+import { apiAskStream } from '../composables/useApi.js'
+
+// 全局学科状态
+const subjectState = inject('subjectState')
+const currentSubject = computed(() => subjectState.currentSubject.value)
+const currentSubjectName = computed(() => {
+  const sub = subjectState.subjects.value.find(s => s.id === currentSubject.value)
+  return sub?.name || currentSubject.value
+})
 
 // 消息列表
 const messages = ref([])
@@ -113,7 +119,10 @@ const inputText = ref('')
 const isStreaming = ref(false)
 const messagesContainer = ref(null)
 const inputRef = ref(null)
-const currentSubject = ref('generic')
+
+// 会话 ID（用于历史记录）
+const sessionId = ref(`session_${Date.now()}`)
+const sessionTitle = ref('新会话')
 
 // 快速提示
 const quickHints = [
@@ -123,7 +132,6 @@ const quickHints = [
   'LangChain 的核心组件有哪些？',
 ]
 
-// Markdown 渲染
 function renderMarkdown(text) {
   if (!text) return ''
   try {
@@ -133,7 +141,6 @@ function renderMarkdown(text) {
   }
 }
 
-// 自动调整 textarea 高度
 function autoResize() {
   const el = inputRef.value
   if (!el) return
@@ -141,7 +148,6 @@ function autoResize() {
   el.style.height = Math.min(el.scrollHeight, 200) + 'px'
 }
 
-// 键盘事件处理
 function handleKeydown(e) {
   if (e.key === 'Enter' && !e.shiftKey) {
     e.preventDefault()
@@ -149,12 +155,19 @@ function handleKeydown(e) {
   }
 }
 
-// 发送消息
 async function sendMessage(presetText = null) {
   const text = presetText || inputText.value.trim()
   if (!text || isStreaming.value) return
 
-  // 添加用户消息
+  // 第一用户消息作为会话标题
+  if (messages.value.length === 0) {
+    sessionTitle.value = text.slice(0, 30)
+    // 通知 Sidebar 创建新会话
+    window.dispatchEvent(new CustomEvent('chat-session-created', {
+      detail: { id: sessionId.value, title: sessionTitle.value }
+    }))
+  }
+
   const userMsg = {
     id: Date.now(),
     role: 'user',
@@ -163,16 +176,12 @@ async function sendMessage(presetText = null) {
   }
   messages.value.push(userMsg)
 
-  // 清空输入框
   if (!presetText) {
     inputText.value = ''
     nextTick(autoResize)
   }
-
-  // 滚动到底部
   scrollToBottom()
 
-  // 开始流式输出
   isStreaming.value = true
   const aiMsg = {
     id: Date.now() + 1,
@@ -201,21 +210,60 @@ async function sendMessage(presetText = null) {
   } finally {
     isStreaming.value = false
     scrollToBottom()
+    saveSession()
   }
 }
 
-// 滚动到底部
 function scrollToBottom() {
   nextTick(() => {
     const el = messagesContainer.value
-    if (el) {
-      el.scrollTop = el.scrollHeight
-    }
+    if (el) el.scrollTop = el.scrollHeight
   })
+}
+
+function saveSession() {
+  try {
+    const sessions = JSON.parse(localStorage.getItem('la_chat_sessions') || '[]')
+    const existing = sessions.find(s => s.id === sessionId.value)
+    if (existing) {
+      existing.messages = messages.value
+      existing.updatedAt = Date.now()
+    } else {
+      sessions.unshift({
+        id: sessionId.value,
+        title: sessionTitle.value,
+        subject: currentSubject.value,
+        messages: messages.value,
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+      })
+    }
+    localStorage.setItem('la_chat_sessions', JSON.stringify(sessions))
+  } catch (e) {
+    console.error('保存会话失败:', e)
+  }
+}
+
+// 加载历史会话
+function loadSession(id) {
+  try {
+    const sessions = JSON.parse(localStorage.getItem('la_chat_sessions') || '[]')
+    const session = sessions.find(s => s.id === id)
+    if (session) {
+      sessionId.value = session.id
+      sessionTitle.value = session.title
+      messages.value = session.messages || []
+    }
+  } catch (e) {
+    console.error('加载会话失败:', e)
+  }
 }
 
 onMounted(() => {
   autoResize()
+  window.addEventListener('load-chat-session', (e) => {
+    loadSession(e.detail.sessionId)
+  })
 })
 </script>
 
@@ -226,7 +274,6 @@ onMounted(() => {
   height: 100%;
 }
 
-/* 顶部标题栏 */
 .chat-header {
   display: flex;
   align-items: center;
@@ -247,11 +294,8 @@ onMounted(() => {
   color: var(--text-primary);
 }
 
-.header-icon {
-  font-size: 18px;
-}
+.header-icon { font-size: 18px; }
 
-/* 消息区域 */
 .messages-container {
   flex: 1;
   overflow-y: auto;
@@ -259,7 +303,6 @@ onMounted(() => {
   min-height: 0;
 }
 
-/* 空状态 */
 .empty-state {
   display: flex;
   flex-direction: column;
@@ -271,23 +314,9 @@ onMounted(() => {
   padding: 40px;
 }
 
-.empty-icon {
-  font-size: 64px;
-  margin-bottom: 16px;
-}
-
-.empty-title {
-  font-size: 24px;
-  font-weight: 600;
-  color: var(--text-primary);
-  margin-bottom: 8px;
-}
-
-.empty-desc {
-  font-size: 14px;
-  color: var(--text-muted);
-  margin-bottom: 32px;
-}
+.empty-icon { font-size: 64px; margin-bottom: 16px; }
+.empty-title { font-size: 24px; font-weight: 600; color: var(--text-primary); margin-bottom: 8px; }
+.empty-desc { font-size: 14px; color: var(--text-muted); margin-bottom: 32px; }
 
 .empty-hints {
   display: flex;
@@ -307,14 +336,12 @@ onMounted(() => {
   font-size: 14px;
   text-align: left;
 }
-
 .hint-item:hover {
   background: var(--bg-hover);
   border-color: var(--accent-primary);
   color: var(--text-primary);
 }
 
-/* 消息列表 */
 .messages-list {
   display: flex;
   flex-direction: column;
@@ -330,9 +357,7 @@ onMounted(() => {
   gap: 12px;
 }
 
-.user-row {
-  flex-direction: row-reverse;
-}
+.user-row { flex-direction: row-reverse; }
 
 .message-avatar {
   width: 32px;
@@ -371,27 +396,16 @@ onMounted(() => {
   font-size: 12px;
 }
 
-.agent-tag {
-  color: var(--accent-primary);
-  font-weight: 500;
-}
+.agent-tag { color: var(--accent-primary); font-weight: 500; }
+.time-tag { color: var(--text-muted); }
 
-.time-tag {
-  color: var(--text-muted);
-}
-
-/* 引用来源 */
 .message-sources {
   margin-top: 12px;
   padding-top: 12px;
   border-top: 1px dashed var(--border-color);
 }
 
-.sources-title {
-  font-size: 12px;
-  color: var(--text-muted);
-  margin-bottom: 6px;
-}
+.sources-title { font-size: 12px; color: var(--text-muted); margin-bottom: 6px; }
 
 .source-item {
   display: flex;
@@ -424,7 +438,6 @@ onMounted(() => {
   -webkit-box-orient: vertical;
 }
 
-/* 输入区域 */
 .input-area {
   border-top: 1px solid var(--border-color);
   padding: 12px 24px 16px;

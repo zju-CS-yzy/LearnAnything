@@ -14,8 +14,8 @@
           <input v-model="topic" placeholder="例如：RAG 技术、Transformer 机制..." />
         </div>
         <div class="form-group">
-          <label>学科</label>
-          <input v-model="subject" placeholder="generic" />
+          <label>当前学科</label>
+          <div class="subject-display">{{ currentSubject }}</div>
         </div>
         <div class="form-group">
           <label>题目数量</label>
@@ -71,7 +71,7 @@
             <div v-if="q.options && q.options.length" class="question-options">
               <div v-for="(opt, j) in q.options" :key="j" class="option-item">
                 <span class="option-label">{{ ['A', 'B', 'C', 'D', 'E', 'F'][j] || j }}</span>
-                <span class="option-text">{{ opt }}</span>
+                <span class="option-text">{{ opt.replace(/^[A-Fa-f][\.．、]\s*/, '') }}</span>
               </div>
             </div>
             <div class="question-answer">
@@ -90,11 +90,14 @@
 </template>
 
 <script setup>
-import { ref, computed } from 'vue'
+import { ref, computed, inject } from 'vue'
 import { apiQuiz, apiQuizBankSave } from '../composables/useApi.js'
 
+// 全局学科状态
+const subjectState = inject('subjectState')
+const currentSubject = computed(() => subjectState.currentSubject.value)
+
 const topic = ref('RAG 技术')
-const subject = ref('generic')
 const count = ref(5)
 const isLoading = ref(false)
 const isSaving = ref(false)
@@ -125,7 +128,7 @@ async function generateQuiz() {
   selectAll.value = false
 
   try {
-    const result = await apiQuiz(topic.value, subject.value, count.value)
+    const result = await apiQuiz(topic.value, currentSubject.value, count.value)
     quizResult.value = result
   } catch (e) {
     alert('出题失败: ' + e.message)
@@ -141,9 +144,9 @@ async function saveToBank() {
   try {
     const result = await apiQuizBankSave(
       selectedQuestions.value,
-      subject.value,
+      currentSubject.value,
       topic.value,
-      true, // 直接标记为已确认
+      true,
     )
     alert(`已保存 ${result.saved} 道题目到题库`)
     selectedIdList.value = []
