@@ -820,10 +820,14 @@ def knowledge_base_stats(subject: str):
     try:
         store = VectorStore(f"{subject}_v1")
         count = store.count()
+        # 动态计算原始文件数量
+        from core.subject_manager import list_raw_files
+        raw_files = list_raw_files(subject)
         return {
             "subject": subject,
             "collection": f"{subject}_v1",
             "document_count": count,
+            "raw_files_count": len(raw_files),
             "status": "active" if count > 0 else "empty",
         }
     except Exception as e:
