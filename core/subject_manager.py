@@ -65,6 +65,11 @@ def _ensure_table(conn: sqlite3.Connection):
             imported_at TEXT
         )
     ''')
+    # 迁移：旧表可能没有 source_path 列
+    try:
+        conn.execute('ALTER TABLE subject_documents ADD COLUMN source_path TEXT')
+    except sqlite3.OperationalError:
+        pass  # 列已存在
     conn.commit()
 
 
