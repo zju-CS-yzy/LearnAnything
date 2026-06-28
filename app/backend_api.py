@@ -734,6 +734,12 @@ def import_file(
             store = VectorStore(f"{subject}_v1")
             print(f"[ImportFile] VectorStore OK, count={store.count()}")
 
+            # 先保存原始文件到学科 raw 文件夹（获取 raw_path）
+            print(f"[ImportFile] Saving raw file...")
+            from core.subject_manager import save_raw_file
+            raw_path = save_raw_file(subject, file.filename, content)
+            print(f"[ImportFile] Raw file saved: {raw_path}")
+
             print(f"[ImportFile] Processing file...")
             chunks = processor.process_file(tmp_path, subject=subject, source_name=file.filename, raw_path=str(raw_path))
             print(f"[ImportFile] Processed, chunks={len(chunks)}")
@@ -743,12 +749,6 @@ def import_file(
                 store.add_documents(chunks)
                 total_docs = store.count()
                 print(f"[ImportFile] Added, total_docs={total_docs}")
-
-                # 保存原始文件到学科 raw 文件夹
-                print(f"[ImportFile] Saving raw file...")
-                from core.subject_manager import save_raw_file
-                raw_path = save_raw_file(subject, file.filename, content)
-                print(f"[ImportFile] Raw file saved: {raw_path}")
 
                 # 记录到学科管理
                 record_import(subject, file.filename, str(raw_path), len(chunks))
