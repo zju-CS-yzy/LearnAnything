@@ -735,7 +735,7 @@ def import_file(
             print(f"[ImportFile] VectorStore OK, count={store.count()}")
 
             print(f"[ImportFile] Processing file...")
-            chunks = processor.process_file(tmp_path, subject=subject)
+            chunks = processor.process_file(tmp_path, subject=subject, source_name=file.filename, raw_path=str(raw_path))
             print(f"[ImportFile] Processed, chunks={len(chunks)}")
 
             if chunks:

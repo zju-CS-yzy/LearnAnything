@@ -1,4 +1,3 @@
-
 <template>
   <div class="kb-view">
     <header class="view-header">
@@ -58,7 +57,13 @@
             <tbody>
               <tr v-for="chunk in chunks" :key="chunk.id">
                 <td class="col-id">{{ chunk.id }}</td>
-                <td class="col-source">{{ chunk.metadata?.source || '—' }}</td>
+                <td class="col-source">
+                  <span
+                    class="source-link"
+                    :title="getSourceTooltip(chunk)"
+                    @click="showSourceDetail(chunk)"
+                  >{{ chunk.metadata?.source || '—' }}</span>
+                </td>
                 <td class="col-page">{{ chunk.metadata?.page_number || '—' }}</td>
                 <td class="col-text">
                   <div class="chunk-text">{{ chunk.text }}</div>
@@ -75,6 +80,38 @@
             <button class="btn btn-sm btn-secondary" :disabled="offset + limit >= totalChunks" @click="nextPage">
               下一页 →
             </button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 来源详情弹窗 -->
+    <div v-if="sourceDetail" class="modal-overlay" @click="sourceDetail = null">
+      <div class="modal-content" @click.stop>
+        <div class="modal-header">
+          <h3>📄 来源详情</h3>
+          <button class="btn-icon" @click="sourceDetail = null">✕</button>
+        </div>
+        <div class="modal-body">
+          <div class="detail-item">
+            <div class="detail-label">原始文件名</div>
+            <div class="detail-value">{{ sourceDetail.source }}</div>
+          </div>
+          <div class="detail-item">
+            <div class="detail-label">学科</div>
+            <div class="detail-value">{{ sourceDetail.subject }}</div>
+          </div>
+          <div class="detail-item">
+            <div class="detail-label">页码</div>
+            <div class="detail-value">{{ sourceDetail.page_number || '—' }}</div>
+          </div>
+          <div v-if="sourceDetail.raw_path" class="detail-item">
+            <div class="detail-label">知识库存储路径</div>
+            <div class="detail-value path">{{ sourceDetail.raw_path }}</div>
+          </div>
+          <div v-if="sourceDetail.file_path" class="detail-item">
+            <div class="detail-label">处理时临时路径</div>
+            <div class="detail-value path">{{ sourceDetail.file_path }}</div>
           </div>
         </div>
       </div>
@@ -99,6 +136,23 @@ const rawFilesCount = ref(0)
 const isLoading = ref(false)
 const limit = ref(50)
 const offset = ref(0)
+const sourceDetail = ref(null)
+
+function getSourceTooltip(chunk) {
+  const meta = chunk.metadata || {}
+  return `点击查看详情\n文件名: ${meta.source || '—'}\n学科: ${meta.subject || '—'}\n页码: ${meta.page_number || '—'}`
+}
+
+function showSourceDetail(chunk) {
+  const meta = chunk.metadata || {}
+  sourceDetail.value = {
+    source: meta.source || '—',
+    subject: meta.subject || '—',
+    page_number: meta.page_number,
+    raw_path: meta.raw_path,
+    file_path: meta.file_path,
+  }
+}
 
 async function loadChunks() {
   isLoading.value = true
@@ -300,9 +354,20 @@ onMounted(() => {
 }
 
 .col-id { width: 80px; font-family: monospace; font-size: 11px; color: var(--text-muted); }
-.col-source { width: 120px; white-space: nowrap; }
+.col-source { width: 160px; }
 .col-page { width: 60px; text-align: center; }
 .col-text { min-width: 300px; }
+
+.source-link {
+  color: var(--accent-primary);
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.source-link:hover {
+  color: var(--accent-secondary);
+}
 
 .chunk-text {
   max-height: 120px;
@@ -327,6 +392,75 @@ onMounted(() => {
 .page-info {
   font-size: 13px;
   color: var(--text-muted);
+}
+
+/* 弹窗 */
+.modal-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+
+.modal-content {
+  background: var(--bg-card);
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border-color);
+  width: 90%;
+  max-width: 500px;
+  max-height: 80vh;
+  overflow-y: auto;
+}
+
+.modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.modal-header h3 {
+  margin: 0;
+  font-size: 16px;
+  color: var(--text-primary);
+}
+
+.modal-body {
+  padding: 20px;
+}
+
+.detail-item {
+  margin-bottom: 16px;
+}
+
+.detail-label {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-bottom: 4px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.detail-value {
+  font-size: 14px;
+  color: var(--text-primary);
+  word-break: break-all;
+}
+
+.detail-value.path {
+  font-family: monospace;
+  font-size: 12px;
+  background: var(--bg-input);
+  padding: 8px;
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
 }
 
 .btn-sm {
