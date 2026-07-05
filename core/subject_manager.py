@@ -261,13 +261,17 @@ def record_import(subject_id: str, source_name: str, source_path: str = "", chun
             "INSERT INTO subject_documents (id, subject_id, source_name, source_path, chunk_count, imported_at) VALUES (?, ?, ?, ?, ?, ?)",
             (doc_id, subject_id, source_name, source_path, chunk_count, datetime.now().isoformat()),
         )
-        total = conn.execute(
+        total_chunks = conn.execute(
             "SELECT SUM(chunk_count) FROM subject_documents WHERE subject_id = ?",
             (subject_id,),
         ).fetchone()[0] or 0
+        total_files = conn.execute(
+            "SELECT COUNT(*) FROM subject_documents WHERE subject_id = ?",
+            (subject_id,),
+        ).fetchone()[0] or 0
         conn.execute(
-            "UPDATE subjects SET document_count = ? WHERE id = ?",
-            (total, subject_id),
+            "UPDATE subjects SET document_count = ?, raw_files_count = ? WHERE id = ?",
+            (total_chunks, total_files, subject_id),
         )
         conn.commit()
     finally:

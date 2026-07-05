@@ -1,39 +1,51 @@
-# LearnAnything 忽略文件
+# ============================================
+# LearnAnything Project - Git Ignore
+# ============================================
 
-# API 密钥配置文件（包含真实密钥，绝不可提交）
-config/api_keys.ini
+# ---- 构建产物 ----
+/dist/                          # PyInstaller 打包产物 (142MB+)
+/web/dist/                      # Vite 前端构建产物
 
-# Python 缓存
+# ---- 数据库 & 大文件 ----
+/knowledge_base/graph_db/       # KùzuDB 数据库文件 (37MB+)
+/knowledge_base/*.db
+
+# ---- 依赖 ----
+/node_modules/                  # npm 依赖
+/venv/                          # Python 虚拟环境
+/.venv/
+
+# ---- Python 缓存 ----
 __pycache__/
 *.pyc
 *.pyo
 *.pyd
+.Python
 
-# 虚拟环境
-venv/
-env/
-.venv/
-
-# PyInstaller 构建输出
-build/
-dist/
-*.spec.bak
-
-# IDE
+# ---- IDE & 编辑器 ----
 .vscode/
 .idea/
 *.swp
 *.swo
+*~
 
-# 操作系统
+# ---- 日志 & 临时文件 ----
+*.log
+/tmp/
+/temp/
+
+# ---- 操作系统文件 ----
 .DS_Store
 Thumbs.db
 
-# 知识库运行时数据（大型文件）
-knowledge_base/vector_db/
-knowledge_base/cache/
-!knowledge_base/vector_db/.gitkeep
-!knowledge_base/cache/.gitkeep
-
-# 测试数据
-*.log
+# ============================================
+# 以下目录应纳入版本控制（核心代码）
+# ============================================
+# /web-vue/src/    - 前端源码
+# /app/            - 后端 API
+# /core/           - 核心算法（语义分析、图构建）
+# /config/         - 配置文件
+# /prompts/        - LLM 提示词模板
+# /tests/          - 测试用例
+# /knowledge_base/*.csv  - 概念数据（去重后的小文件）
+# ============================================

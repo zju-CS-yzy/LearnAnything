@@ -49,8 +49,26 @@ added_files.extend(collect_files(str(project_root / "web"), "web"))
 # 配置文件
 added_files.extend(collect_files(str(project_root / "config"), "config"))
 
-# 知识库目录
-added_files.extend(collect_files(str(project_root / "knowledge_base"), "knowledge_base"))
+# 知识库目录（排除运行时生成的数据库目录，只保留原始资料）
+def collect_files_exclude_db(directory, prefix):
+    """递归收集目录下所有文件，排除 graph_db 和 vector_db 子目录"""
+    result = []
+    if not os.path.exists(directory):
+        return result
+    for root, dirs, files in os.walk(directory):
+        # 排除运行时生成的数据库目录
+        dirs[:] = [d for d in dirs if d not in ('graph_db', 'vector_db', 'cache')]
+        for file in files:
+            src = os.path.join(root, file)
+            rel_dir = os.path.relpath(root, directory)
+            if rel_dir == '.':
+                dest = prefix
+            else:
+                dest = os.path.join(prefix, rel_dir).replace('\\', '/')
+            result.append((src, dest))
+    return result
+
+added_files.extend(collect_files_exclude_db(str(project_root / "knowledge_base"), "knowledge_base"))
 
 
 # ========== 收集本地 Python 包的子模块 ==========

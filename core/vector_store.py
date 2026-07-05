@@ -60,11 +60,11 @@ class VectorStore:
                 if isinstance(condition, dict) and "$eq" in condition:
                     conditions.append("json_extract(metadata, ?) = ?")
                     params.append(f"$.{key}")
-                    params.append(json.dumps(condition["$eq"]))
+                    params.append(condition["$eq"])
                 elif isinstance(condition, dict) and "$ne" in condition:
                     conditions.append("json_extract(metadata, ?) != ?")
                     params.append(f"$.{key}")
-                    params.append(json.dumps(condition["$ne"]))
+                    params.append(condition["$ne"])
 
         if conditions:
             sql += " WHERE " + " AND ".join(conditions)
@@ -95,12 +95,36 @@ class VectorStore:
             self._conn.execute("DELETE FROM documents WHERE id = ?", (doc_id,))
         self._conn.commit()
 
-    def list_all(self, limit: int = 50, offset: int = 0) -> List[Dict[str, Any]]:
-        """列出所有文档片段（用于知识库可视化）。"""
-        cursor = self._conn.execute(
-            "SELECT id, text, metadata FROM documents LIMIT ? OFFSET ?",
-            (limit, offset)
-        )
+    def list_all(self, limit: int = 50, offset: int = 0, where: Optional[Dict] = None) -> List[Dict[str, Any]]:
+        """列出所有文档片段（用于知识库可视化）。
+
+        Args:
+            limit: 返回数量上限
+            offset: 偏移量
+            where: 过滤条件（支持 metadata 字段的 $eq / $ne 过滤）
+        """
+        sql = "SELECT id, text, metadata FROM documents"
+        params = []
+        conditions = []
+
+        if where:
+            for key, condition in where.items():
+                if isinstance(condition, dict) and "$eq" in condition:
+                    conditions.append("json_extract(metadata, ?) = ?")
+                    params.append(f"$.{key}")
+                    params.append(condition["$eq"])
+                elif isinstance(condition, dict) and "$ne" in condition:
+                    conditions.append("json_extract(metadata, ?) != ?")
+                    params.append(f"$.{key}")
+                    params.append(condition["$ne"])
+
+        if conditions:
+            sql += " WHERE " + " AND ".join(conditions)
+
+        sql += " LIMIT ? OFFSET ?"
+        params.extend([limit, offset])
+
+        cursor = self._conn.execute(sql, params)
         results = []
         for row in cursor:
             meta = json.loads(row[2]) if row[2] else {}
@@ -110,6 +134,34 @@ class VectorStore:
                 "metadata": meta,
             })
         return results
+
+    def count(self, where: Optional[Dict] = None) -> int:
+        """返回集合文档数，支持过滤条件。"""
+        sql = "SELECT COUNT(*) FROM documents"
+        params = []
+        conditions = []
+
+        if where:
+            for key, condition in where.items():
+                if isinstance(condition, dict) and "$eq" in condition:
+                    conditions.append("json_extract(metadata, ?) = ?")
+                    params.append(f"$.{key}")
+                    params.append(condition["$eq"])
+                elif isinstance(condition, dict) and "$ne" in condition:
+                    conditions.append("json_extract(metadata, ?) != ?")
+                    params.append(f"$.{key}")
+                    params.append(condition["$ne"])
+
+        if conditions:
+            sql += " WHERE " + " AND ".join(conditions)
+
+        cursor = self._conn.execute(sql, params)
+        return cursor.fetchone()[0]
+
+    def count_all(self) -> int:
+        """返回集合文档总数（无过滤）。"""
+        cursor = self._conn.execute("SELECT COUNT(*) FROM documents")
+        return cursor.fetchone()[0]
 
     # ========== 高级封装 ==========
 
@@ -124,6 +176,9 @@ class VectorStore:
         for doc, emb in zip(documents, embeddings):
             doc_id = doc.get("id", self._generate_id(doc["text"]))
             meta = json.dumps(doc.get("metadata", {}), ensure_ascii=False)
+            # 兼容 ndarray（HashEmbedding 返回 numpy array）
+            if hasattr(emb, 'tolist'):
+                emb = emb.tolist()
             emb_json = json.dumps(emb, ensure_ascii=False)
             self._conn.execute(
                 "INSERT OR REPLACE INTO documents (id, text, metadata, embedding) VALUES (?, ?, ?, ?)",
