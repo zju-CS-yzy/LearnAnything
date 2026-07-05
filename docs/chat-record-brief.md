@@ -1,46 +1,73 @@
+# LearnAnything 项目对话记录摘要
 
+## 2026-06-30 — Phase 2 Step 2: 语义层构建（进行中）
+
+### 参与者
+- 树状图（AI 项目经理）
+- 开发者（用户）
+
+### 关键决策
+
+#### 决策 1: 多分解范式支持
+**内容**: 不再使用单一的理论归纳范式，改为支持 3 种内置范式：
+- 理论归纳（定义→规律→应用→扩展）：适合物理、数学等理论学科
+- 工程分解（需求→技术→子需求→子技术）：适合技术类知识
+- 层级归纳（事实→概念→方法→评价）：适合通用知识
+
+**决策原因**: 用户指出单一范式不适用于所有文本类型，如技术文本更适合需求-技术分解范式。
+
+#### 决策 2: 语义质量评估五维度
+**内容**: 综合质量分数 = 0.25×稳定性 + 0.20×覆盖度 + 0.20×忠实度 + 0.15×多样性 + 0.20×连接覆盖率
+
+**参考来源**: 
+- OpenReview LLM-judge 框架（稳定性评估）
+- ACL 2025 "MoC: Mixtures of Text Chunking Learners"（连接覆盖率/Chunk Stickiness）
+- Terminology Extraction 评估框架（覆盖度、忠实度）
+
+#### 决策 3: 模糊概念过滤规则
+**内容**: 自动过滤长度 ≤4 且以模糊词（聚合/嵌入/优化/集成/整合/微调/完善/完整/整体）结尾或开头的概念名称。
+
+**决策原因**: LLM 常生成"完整聚合""微调嵌入"等脱离上下文的概念。
+
+#### 决策 4: 连接覆盖率计算方法
+**内容**: 
+- 相邻 chunk 的概念集合计算 Jaccard 相似度
+- 阈值 0.3，超过视为存在逻辑连接
+- 覆盖率 = 度数 ≥2 的 chunk 数 / 总 chunk 数
+
+### 技术实现
+
+#### 新增模块
+| 模块 | 文件 | 功能 |
+|------|------|------|
+| 概念去重器 | `core/concept_deduper.py` | 基于 embedding 相似度的贪婪合并 |
+| 质量评估器 | `core/semantic_quality_evaluator.py` | 五维度自一致性评估 |
+
+#### 修改模块
+| 模块 | 修改内容 |
+|------|---------|
+| 语义提取器 | 支持多范式 + 模糊概念过滤 |
+| GraphBuilder | 批量提取 + 去重入口 |
+| GraphStore | 概念 CRUD 操作 |
+| Backend API | 新增 6 个 API 端点 |
+| GraphView | 概念分解面板 + 表格 + 分页/搜索 |
+
+### 测试数据
+- 批量提取质量分数: ~0.662
+- 去重后概念数量: 367 个（从约 500+ 原始概念）
+
+### 遗留问题
+1. 前端表格增强需测试验证（分页、搜索、弹窗）
+2. 多分解范式缺少前端选择 UI
+3. 概念质量仍需进一步优化（过滤规则、类型准确性）
+4. 连接覆盖率未接入批量提取流程
+
+### 下一步行动
+1. 测试前端表格功能并修复 Bug
+2. 添加范式选择下拉框
+3. 接入连接覆盖率计算
+4. 人工抽样检查概念质量
 
 ---
 
-## [2026-06-26] LearnAnything 前端 Markdown 渲染修复
-
-**参与者：** 开发者、树状图（PM）
-**时间：** 2026-06-26 23:23:59 ~ 2026-06-27 00:16:39 GMT+8
-
-### 今日工作内容
-
-**问题**：前端返回的 JSON 数据无法正确渲染为 Markdown 格式。
-
-**第一轮尝试**：引入 `marked.js` v5+ 进行 Markdown 渲染
-- 添加了 `marked.min.js` 引用和 Markdown CSS 样式
-- 将 `apiAsk()` 从 `textContent` 改为 `innerHTML = marked.parse(data.answer)`
-- **失败**：Qt WebEngine 的 Chromium 版本较老，不支持 `String.prototype.at()`（ES2022 API），前端报错 `t.at is not a function`
-
-**第二轮尝试**：添加 `String.prototype.at()` polyfill
-- 在 HTML `<head>` 中添加 polyfill 脚本
-- 重新打包
-- **失败**：网络下载 `marked.js` v4.3.0 超时，且 `lib/marked.min.js` 文件不存在导致打包中断
-
-**第三轮尝试（成功）**：内联 Markdown 渲染器
-- 完全移除外部的 `marked.js` 依赖
-- 在 HTML 中内联实现 `renderMarkdown()` 函数
-- 支持：粗体、斜体、标题、代码块、行内代码、列表、引用、水平线、链接、表格
-- 重新打包成功
-- **验证**：API 返回 Status 200，answer 长度 1,906，包含 Markdown 语法
-- **前端测试**：自然语言回答正确显示，Markdown 格式正确渲染
-
-### 核心变更
-
-| 文件 | 变更 |
-|:---|:---|
-| `web/index.html` | 移除 `marked.js` 外部依赖，添加内联 `renderMarkdown()` 函数 |
-| `web/index.html` | 添加 Markdown 渲染 CSS 样式（标题/列表/代码块/引用/表格） |
-| `web/index.html` | `apiAsk()` 使用 `renderMarkdown(data.answer)` 替代 `textContent` |
-
-### 技术要点
-
-- Qt WebEngine（PyQt5）内置的 Chromium 版本较老，不支持 ES2022 的 `String.prototype.at()`
-- 内联渲染器避免了外部依赖和网络下载问题
-- 所有 Markdown 常用语法均已支持
-
----
+*记录时间: 2026-07-01 01:30*

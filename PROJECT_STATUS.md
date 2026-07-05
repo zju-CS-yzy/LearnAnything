@@ -687,3 +687,282 @@ python -m interfaces.cli import --subject generic --path ./knowledge_base/test_c
 
 *最后更新：2026-06-28*
 
+---
+
+## 十四、2026-06-29 变更记录：LA-023 修复 + 知识库可视化架构确立
+
+### LA-023 修复：前端展示知识片段层级问题
+
+**问题**：向量库同时存储 Parent（15个，整页级）和 Child（98个，段落级）chunks，前端 API 未过滤，展示的是混合内容。
+
+**修复**：
+| 文件 | 修改 |
+|:---|:---|
+| `core/vector_store.py` | `list_all()` / `count()` 增加 `where` 过滤参数；修复 `json_extract` 比较值格式 |
+| `app/backend_api.py` | `/chunks` 接口默认过滤 `type=parent`，只返回 child 层 |
+| `web-vue/.../KnowledgeBaseView.vue` | 统计展示改为"知识片段/来源页数/原始资料"；新增"上下文路径"列 |
+
+---
+
+## 十五、知识库可视化（思维导图）专项设计
+
+### 15.1 技术栈决策（2026-06-29）
+
+| 决策项 | 选定方案 | 原因 |
+|:---|:---|:---|
+| 图数据库 | **KùzuDB**（嵌入式） | 零配置、进程内运行、Windows原生、PyInstaller兼容；Cypher查询能力等同于Neo4j |
+| 舍弃方案 | Neo4j | 需要Java运行时+独立服务，与单文件exe桌面应用冲突 |
+| LLM | DeepSeek API | 已有配置，成本低 |
+| 概念提取 | **全局跨chunk联合提取** | 避免概念重复，保证同一概念只有一个节点 |
+| 前端可视化 | 待选（Cytoscape.js vs D3.js） | 见15.4节 |
+
+### 15.2 Chunk间关系构建思路（开发者原创）
+
+> **理论来源**：《技术的本质》+ 概念空间向量模型
+>
+> **核心思想**：意义的本质是概念空间中的向量。每个chunk代表一个意义向量，将其分解为子意义向量后，通过共享概念维度建立联系。
+
+#### 15.2.1 联系的定义
+
+- **直接联系**：两个意义向量存在相同的概念维分向量
+  - 例：`[黑色的球]`和`[白色的球]`通过`[球]`建立直接联系
+- **间接联系**：两个意义向量A和B无直接联系，但存在C同时与A和B建立直接联系
+  - 例：`[黑色]`和`[球]`通过`[黑色的球]`建立间接联系
+
+#### 15.2.2 分解范式
+
+参考《技术的本质》的技术组合理论，chunk分解采用递归树状结构：
+
+**技术类文档**：
+```
+需求（为什么需要）
+  └─ 子需求分解（产生什么子需求）
+      └─ 子技术解决（用什么技术满足）
+          └─ 原理支撑（基于什么物理现象）
+```
+
+**知识类文档**：
+```
+定义
+  └─ 规律
+      └─ 应用
+          └─ 扩展
+```
+
+每个chunk在知识库整体结构中具有唯一位置，内部通过四个方向分解，最终形成**分形且递归的树形结构**。
+
+#### 15.2.3 图模型设计（KùzuDB）
+
+```cypher
+-- 节点类型
+Chunk(chunk_id, text, heading_path, source, page_number, chunk_type)
+Concept(concept_id, name, concept_type, source_chunk)
+Principle(principle_id, name, description)
+
+-- 结构层关系（确定性，零成本）
+BELONGS_TO(Chunk → Chunk)      -- 同heading_path层级
+HAS_PARENT(Chunk → Chunk)      -- parent-child引用
+ADJACENT_TO(Chunk → Chunk)     -- 相邻/同源
+
+-- 语义层关系（LLM提取）
+DEFINES(Chunk → Concept)       -- 定义关系
+HAS_LAW(Chunk → Concept)       -- 规律关系
+APPLIES_TO(Chunk → Concept)    -- 应用关系
+EXTENDS(Chunk → Concept)       -- 扩展关系
+REQUIRES(Concept → Concept)    -- 需求/依赖
+IMPLEMENTS(Concept → Concept)  -- 实现关系
+PREREQUISITE(Concept → Concept)-- 先修关系
+
+-- 用户层关系（交互式）
+USER_DEFINED(Chunk → Chunk)    -- 用户自定义
+QUESTION_ABOUT(Chunk → Chunk)  -- 关联题库
+```
+
+### 15.3 实现阶段规划
+
+| 阶段 | 内容 | 输入 | 输出 |
+|:---|:---|:---|:---|
+| **Phase 1** | 结构层构建 | SQLite向量库chunk数据 | KùzuDB文档结构树 |
+| **Phase 2** | 语义层构建 | chunk文本 + DeepSeek LLM | 概念节点 + 语义关系边 |
+| **Phase 3** | 用户层交互 | 用户操作 | 自定义边 + 可视化思维导图 |
+
+### 15.4 前端可视化库对比（待选）
+
+| 特性 | Cytoscape.js | D3.js |
+|:---|:---|:---|
+| **定位** | 专业图/网络可视化库 | 通用数据可视化框架 |
+| **上手难度** | 低，API专为图设计 | 高，需手写力导向算法 |
+| **布局算法** | 内置15+种（力导向、环形、网格、分层等） | 需自行实现或引入插件 |
+| **交互能力** | 拖拽、缩放、框选、聚类、手势原生支持 | 需手动绑定事件 |
+| **性能** | 针对大规模图优化（1000+节点流畅） | 依赖实现质量 |
+| **样式控制** | 节点/边样式集中配置 | 完全自由（CSS+SVG） |
+| **社区生态** | 图分析专用，文档清晰 | 生态巨大，但图相关示例分散 |
+| **适用场景** | 知识图谱、社交网络、流程图 | 自定义交互、复杂动画 |
+
+**推荐**：Cytoscape.js（与知识图谱场景高度匹配，开发效率高）
+
+### 15.5 当前状态
+
+- KùzuDB 已安装（v0.11.3），功能验证通过
+- 测试数据来源：IWork/yuque_download/pdfs/（53个PDF，AI/大模型/后端技术主题）
+- Phase 1 实现中...
+
+---
+
+## 十六、2026-06-29 详细进展记录
+
+### 16.1 已完成工作
+
+| 序号 | 工作项 | 状态 | 说明 |
+|:---|:---|:---:|:---|
+| 1 | LA-023 修复 | ✅ 完成 | 前端展示 parent 层而非 child 层。后端 API 增加 where 过滤，前端统计展示修正 |
+| 2 | 技术栈决策 | ✅ 确认 | KùzuDB（嵌入式图数据库）替代 Neo4j，适配桌面应用单文件部署 |
+| 3 | chunk 关系构建思路归档 | ✅ 完成 | 基于《技术的本质》的递归树状分解思路，已存入 15.2 节 |
+| 4 | Phase 1 结构层实现 | ✅ 完成 | KùzuDB Schema + GraphBuilder + 4个图谱 API + 前端 GraphView |
+| 5 | 测试数据导入 | ✅ 完成 | IWork PDF 导入 9/20 成功，142 chunks，构建图谱 142 节点/19 层级边/131 相邻边 |
+| 6 | 前端主题切换 | ✅ 完成 | 暗色/亮色主题一键切换，localStorage 持久化，平滑过渡动画 |
+| 7 | 前端字号调节 | ✅ 完成 | 小/中/大 三档字号（14px/16px/18px），全局响应式 |
+| 8 | 知识图谱前端 bug 修复 | ✅ 完成 | isLoading 未定义、wheelSensitivity 警告、Failed to load nodes 均已修复 |
+| 9 | 内容预览 + 节点标题 | ✅ 完成 | 后端返回 text 字段，前端智能提取 Markdown 标题/heading_path 作为节点标签 |
+| 10 | 去除 parent 节点显示 | ✅ 完成 | 图谱只显示 child 节点（蓝色圆形），parent 节点已过滤 |
+
+### 16.2 新增文件
+
+| 文件 | 功能 |
+|:---|:---|
+| `core/graph_store.py` | KùzuDB 图数据库封装（Schema/CRUD/统计/子图查询） |
+| `core/graph_builder.py` | Phase 1 结构层构建器（向量库 → 图数据库） |
+| `composables/useTheme.js` | 全局主题状态管理（主题切换 + 字号调节 + localStorage） |
+| `scripts/import_test_pdfs.py` | 批量导入 IWork PDF 测试数据脚本 |
+| `web-vue/src/components/GraphView.vue` | Cytoscape.js 知识图谱可视化组件 |
+
+### 16.3 新增 API 接口
+
+| 接口 | 方法 | 说明 |
+|:---|:---:|:---|
+| `/api/knowledge-graph/{subject}/build` | POST | 构建/重建图谱（113 chunks → 113 节点，9 层级边，112 相邻边） |
+| `/api/knowledge-graph/{subject}/stats` | GET | 图谱统计（节点数、各类边数） |
+| `/api/knowledge-graph/{subject}/subgraph/{chunk_id}` | GET | 以指定 chunk 为中心的子图（用于可视化） |
+| `/api/knowledge-graph/{subject}/nodes` | GET | 所有 child Chunk 节点列表（全局浏览，过滤 parent） |
+| `/api/knowledge-graph/{subject}/edges` | GET | child 节点之间的边列表（BELONGS_TO + ADJACENT_TO） |
+
+### 16.4 前端 GraphView 功能
+
+| 功能 | 状态 |
+|:---|:---:|
+| 力导向图布局（cose 算法） | ✅ |
+| 节点渲染（蓝色圆形，Markdown 标题命名） | ✅ |
+| 边渲染（BELONGS_TO=蓝色实线，ADJACENT_TO=灰色虚线） | ✅ |
+| 点击选中 → 右侧内容预览面板 | ✅ |
+| 双击展开子树 | ✅ |
+| 搜索节点 | ✅ |
+| 聚焦/适应窗口/重置布局 | ✅ |
+| 邻居高亮 | ✅ |
+| 一键重新构建图谱 | ✅ |
+
+### 16.5 新增关键决策
+
+| # | 决策 | 方案 | 决策时间 |
+|:---|:---|:---|:---:|
+| 7 | 图数据库 | **KùzuDB**（嵌入式，Cypher，PyInstaller 兼容） | 2026-06-29 |
+| 8 | 前端可视化库 | **Cytoscape.js**（专业图布局，开发效率高） | 2026-06-29 |
+| 9 | 概念提取模式 | **全局跨 chunk 联合提取**（去重，避免概念重复） | 2026-06-29 |
+| 10 | LLM 用于语义层 | **DeepSeek API**（已有配置，成本低） | 2026-06-29 |
+| 11 | 主题系统 | 暗色/亮色双主题 + 三档字号（S/M/L）+ localStorage 持久化 | 2026-06-29 |
+
+### 16.6 遗留问题更新
+
+| # | 问题 | 优先级 | 状态 | 备注 |
+|:---|:---|:---:|:---:|:---|
+| LA-001 | HeadhunterAgent 未接入职位数据源 | 🔴 高 | ⏳ | 阶段5 标记实验性 |
+| LA-003 | 学科配置单一 | ⏳ 中 | ⏳ | 已支持多学科，但配置模板有限 |
+| LA-004 | 公式 OCR 未完整实现 | ⏳ 中 | ⏳ | 需 paddleocr 或 Mathpix |
+| LA-005 | 评测会话内存存储 → SQLite 持久化 | 🟡 中 | ⏳ | |
+| LA-006 | 用户认证缺失 | 🟡 中 | ⏳ | |
+| LA-007 | SSE 流式输出重复调用 LLM | 🟡 中 | ✅ 已修复 | LA-019 |
+| LA-008 | 混合检索首次加载延迟 | 🟡 中 | ⏳ | |
+| LA-009 | 测试覆盖率低 | 🟢 低 | ⏳ | |
+| LA-010 | 知识库可视化缺失 | 🟢 低 | **✅ Phase 1 完成** | Phase 2 语义层待开始 |
+| LA-011 | 监控数据未暴露 | 🟢 低 | ⏳ | |
+| LA-012 | CORS 配置过于宽松 | 🟢 低 | ⏳ | |
+| LA-017 | PDF 图片/表格/流程图 VLM 提取 | 🔴 高 | ⏳ | 部分 PDF 因扫描件无法解析 |
+| LA-022 | 题库-知识库关联可视化 | 🟡 中 | ⏳ | 题目已支持 source_entry_id |
+| LA-023 | 前端展示知识片段层级 | 🔴 高 | ✅ 已修复 | 2026-06-29 |
+| **LA-020** | **贝塞尔曲线端点** | 🔴 高 | **🔴 未解决** | **Cytoscape.js 的 bezier/unbundled-bezier 不支持精确连接点控制（如 Visio 的连接点系统）。端点仍由 Cytoscape 自动计算，无法固定在"右边界中点→左边界中点"** |
+| **LA-021** | **纵向连线（多根树共享子节点）** | 🔴 高 | **🔴 未解决** | **多棵树的根节点共享同一个子节点时，布局算法无法正确分配位置。尝试自底向上布局引入 maxDepth 未定义 bug，回退后仍有问题** |
+| **LA-024** | **构建脚本执行** | 🟡 中 | **🟡 待验证** | **用户反馈 `scripts/build.ps1` 无法直接执行（PowerShell 执行策略限制），需使用 `powershell -ExecutionPolicy Bypass -File`** |
+| LA-023 | 前端展示知识片段层级 | 🔴 高 | ✅ 已修复 | 2026-06-29 |
+
+### 16.7 技术债务更新
+
+- `main.py` 和 `app/desktop_app.py` 存在重复代码（两个桌面应用入口），需要统一
+- `web/` 根目录已清理旧文件，仅保留 `dist/` 和 `lib/`
+- PyInstaller 打包时需确保进程完全关闭，否则文件被占用导致打包失败
+- KùzuDB 图数据库目录（`knowledge_base/graph_db/`）已创建，但需要在打包时包含
+
+### 16.8 下一步计划（Phase 2：语义层）
+
+1. **LLM 驱动的概念提取**：对每个 chunk 提取核心概念，建立 DEFINES/HAS_LAW/APPLIES_TO/EXTENDS 关系
+2. **需求链提取**：技术文档中提取需求→子需求→子技术的层级关系（REQUIRES/IMPLEMENTS）
+3. **全局去重**：同一概念在不同 chunk 中重复出现时，合并为单一 Concept 节点
+4. **先修关系**：基于概念依赖建立 PREREQUISITE 边（用于学习路径推荐）
+5. **社区发现**：使用 Louvain 算法识别知识社区，生成社区摘要
+
+---
+
+*最后更新：2026-06-29*
+
+---
+
+## 十七、2026-07-01 变更记录：范式选择 UI + 多范式提示词优化
+
+### 17.1 范式选择前端 UI
+
+| 功能 | 状态 | 说明 |
+|:---|:---:|:---|
+| 图谱生成配置覆盖层 | ✅ | GraphView.vue 新增非弹窗选项面板 |
+| 范式选择（3种） | ✅ | 卡片式单选，带描述 |
+| 分解粒度滑块 | ✅ | 粗/中/细，实验性预留 |
+| 附加选项 | ✅ | 语义层构建、去重、强制重建开关 |
+| 评估参数权重 | ⚠️ | 折叠面板预留，未实际可配置 |
+| 后端 build API 扩展 | ✅ | 支持 paradigm/force_rebuild/with_semantic |
+
+### 17.2 多范式提示词优化
+
+| 范式 | 优化前问题 | 优化后效果 |
+|:---|:---|:---|
+| 理论归纳 | 标签稳定 | 增加"内在逻辑链"指令，定义/规律/应用/扩展分类更精确 |
+| 工程分解 | 缺少需求类型 | 强制识别"需求→技术"链条，成功提取 requirement 概念 |
+| 层级归纳 | 类型单一（全是 concept） | 明确四种认知层次，fact/concept/method/evaluation 全部出现 |
+
+### 17.3 范式对比测试结果
+
+测试 chunk: 86b43f7c10f0bc74（Transformer 架构发展）
+
+| 范式 | 概念数 | 类型分布 | 独有概念 | Jaccard（vs 理论归纳） |
+|:---|:---:|:---|:---:|:---:|
+| 理论归纳 | 6 | definition(2), law(1), extension(2), application(1) | 0 | — |
+| 工程分解 | 8 | technology(2), sub_technology(4), requirement(2) | 突破RNN顺序处理瓶颈 | 0.75 |
+| 层级归纳 | 7 | fact(2), concept(1), method(2), evaluation(2) | Decoder-only架构, Encoder-only架构 | 0.44 |
+
+**结论**：三种范式差异化显著，每种视角提取出了其他范式看不到的概念。
+
+### 17.4 新增文件
+
+| 文件 | 功能 |
+|:---|:---|
+| `scripts/test_paradigm_comparison.py` | 自动化范式对比测试脚本 |
+| `scripts/paradigm_comparison_report.json` | 测试报告 JSON |
+
+### 17.5 遗留问题更新
+
+| # | 问题 | 优先级 | 状态 | 备注 |
+|:---|:---|:---:|:---:|:---|
+| LA-002 | 前端 UI 缺失 | 🔴 高 | **部分完成** | 范式选择 UI 已实现，分解粒度预留 |
+| — | 连接覆盖率未接入批量提取 | 🟡 中 | ⏳ | Phase 2 后续 |
+| — | 评估参数权重未实际可配置 | 🟡 中 | ⏳ | 预留面板 |
+
+---
+
+*最后更新：2026-07-01*
+

@@ -685,6 +685,14 @@ def import_text(request: ImportRequest):
     store.add_documents(docs)
     total_docs = store.count()
 
+    # 同时写入 KùzuDB 图数据库
+    from core.graph_store import GraphStore
+    graph_store = GraphStore(request.subject)
+    graph_store.init_schema()
+    graph_store.add_chunk_nodes(docs)
+    graph_store.build_belongs_to_relations()
+    graph_store.build_adjacent_relations()
+
     # 记录到学科管理
     record_import(request.subject, request.source_name, len(docs))
 
@@ -748,7 +756,17 @@ def import_file(
                 print(f"[ImportFile] Adding documents to vector store...")
                 store.add_documents(chunks)
                 total_docs = store.count()
-                print(f"[ImportFile] Added, total_docs={total_docs}")
+                print(f"[ImportFile] Added to vector store, total_docs={total_docs}")
+                
+                # 同时写入 KùzuDB 图数据库
+                print(f"[ImportFile] Writing to KùzuDB...")
+                from core.graph_store import GraphStore
+                graph_store = GraphStore(subject)
+                graph_store.init_schema()
+                graph_store.add_chunk_nodes(chunks)
+                graph_store.build_belongs_to_relations()
+                graph_store.build_adjacent_relations()
+                print(f"[ImportFile] KùzuDB write complete")
 
                 # 记录到学科管理
                 record_import(subject, file.filename, str(raw_path), len(chunks))
@@ -1050,6 +1068,467 @@ def api_detect_subject(query: str = Form(...)):
     )
 
 
+
+# ========== 知识图谱 API ==========
+
+@app.post("/api/knowledge-graph/{subject}/build")
+def build_knowledge_graph(subject: str, body: Dict[str, Any] = None):
+    """
+    构建知识图谱 — 从向量库读取 chunk，生成图数据库结构。
+
+    支持通过 body 传入参数：
+    - paradigm: 语义提取范式（"theory"/"engineering"/"hierarchical"），如传入则自动触发语义层构建
+    - force_rebuild: 是否强制重建（默认 false）
+    """
+    from core.graph_builder import GraphBuilder
+
+    body = body or {}
+    paradigm = body.get("paradigm", "theory")
+    force_rebuild = body.get("force_rebuild", False)
+
+    try:
+        # Phase 1: 结构层构建
+        builder = GraphBuilder(f"{subject}_v1", paradigm=paradigm)
+        result = builder.build_all(force_rebuild=force_rebuild)
+
+        # Phase 2: 如果传入了 paradigm（非默认 theory 或明确请求），自动执行语义层
+        semantic_result = None
+        dedupe_result = None
+        if body.get("with_semantic", True):
+            semantic_result = builder.extract_all_concepts()
+            dedupe_result = builder.dedupe_concepts()
+
+        return {
+            "subject": subject,
+            "paradigm": paradigm,
+            **result,
+            "semantic": semantic_result,
+            "dedupe": dedupe_result,
+        }
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"图谱构建失败: {str(e)}")
+
+
+@app.get("/api/knowledge-graph/{subject}/stats")
+def get_graph_stats(subject: str):
+    """
+    获取知识图谱统计信息。
+    """
+    from core.graph_store import GraphStore
+
+    try:
+        store = GraphStore(f"{subject}_v1")
+        store.init_schema()
+        stats = store.get_graph_stats()
+        return {
+            "subject": subject,
+            **stats,
+        }
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"统计失败: {str(e)}")
+
+
+@app.get("/api/knowledge-graph/{subject}/nodes")
+def list_graph_nodes(subject: str, limit: int = 500):
+    """
+    获取图谱中的 Chunk 节点（用于前端全局浏览，排除 parent 节点）。
+    """
+    from core.graph_store import GraphStore
+
+    # 限制最大返回数量，防止性能问题
+    limit = max(1, min(limit, 2000))
+
+    try:
+        store = GraphStore(f"{subject}_v1")
+        store.init_schema()
+        conn = store._ensure_db()
+
+        result = conn.execute(f"""
+            MATCH (c:Chunk)
+            WHERE c.chunk_type <> 'parent'
+            RETURN c.chunk_id, c.heading_path, c.source, c.page_number, c.chunk_type, c.text
+            LIMIT {limit}
+        """)
+
+        nodes = []
+        while result.has_next():
+            row = result.get_next()
+            nodes.append({
+                "id": row[0],
+                "heading_path": row[1] or "",
+                "source": row[2],
+                "page_number": row[3],
+                "chunk_type": row[4],
+                "text": row[5] or "",
+            })
+
+        count_result = conn.execute("MATCH (c:Chunk) WHERE c.chunk_type <> 'parent' RETURN COUNT(c) AS cnt")
+        total = count_result.get_next()[0] if count_result.has_next() else 0
+
+        return {
+            "subject": subject,
+            "total": total,
+            "count": len(nodes),
+            "nodes": nodes,
+        }
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"节点查询失败: {str(e)}")
+
+
+@app.get("/api/knowledge-graph/{subject}/edges")
+def list_graph_edges(subject: str, limit: int = 200):
+    """
+    获取 Chunk 节点之间的边（排除 parent 节点相关的边）。
+    """
+    from core.graph_store import GraphStore
+
+    # 限制最大返回数量，防止性能问题
+    limit = max(1, min(limit, 1000))
+
+    try:
+        store = GraphStore(f"{subject}_v1")
+        store.init_schema()
+        conn = store._ensure_db()
+
+        edges = []
+        try:
+            result = conn.execute("""
+                MATCH (a:Chunk)-[r:BELONGS_TO]->(b:Chunk)
+                WHERE a.chunk_type <> 'parent' AND b.chunk_type <> 'parent'
+                RETURN a.chunk_id, b.chunk_id
+                LIMIT 100
+            """)
+            while result.has_next():
+                row = result.get_next()
+                edges.append({
+                    "source": row[0],
+                    "target": row[1],
+                    "type": "BELONGS_TO",
+                })
+        except Exception:
+            pass
+
+        try:
+            result = conn.execute("""
+                MATCH (a:Chunk)-[r:ADJACENT_TO]->(b:Chunk)
+                WHERE a.chunk_type <> 'parent' AND b.chunk_type <> 'parent'
+                RETURN a.chunk_id, b.chunk_id
+                LIMIT 100
+            """)
+            while result.has_next():
+                row = result.get_next()
+                edges.append({
+                    "source": row[0],
+                    "target": row[1],
+                    "type": "ADJACENT_TO",
+                })
+        except Exception:
+            pass
+
+        return {
+            "subject": subject,
+            "count": len(edges),
+            "edges": edges,
+        }
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"边查询失败: {str(e)}")
+
+
+@app.get("/api/knowledge-graph/{subject}/subgraph/{chunk_id}")
+def get_subgraph(subject: str, chunk_id: str, depth: int = 2):
+    """
+    获取以指定 chunk 为中心的子图。
+    """
+    from core.graph_store import GraphStore
+
+    try:
+        store = GraphStore(f"{subject}_v1")
+        store.init_schema()
+        subgraph = store.get_subgraph(chunk_id, depth=depth)
+        return {
+            "subject": subject,
+            "center_chunk": chunk_id,
+            "depth": depth,
+            "node_count": len(subgraph["nodes"]),
+            "edge_count": len(subgraph["edges"]),
+            **subgraph,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"子图查询失败: {str(e)}")
+
+
+# ========== 知识图谱 API (Phase 2: 语义层) ==========
+
+@app.post("/api/knowledge-graph/{subject}/extract/{chunk_id}")
+async def extract_chunk_concepts(subject: str, chunk_id: str, body: Dict[str, Any] = None):
+    """
+    对指定 chunk 进行语义提取，分析其内部概念结构。
+
+    支持范式选择：theory / engineering / hierarchical
+    """
+    from core.graph_store import GraphStore
+    from core.semantic_extractor import SemanticExtractor
+
+    try:
+        graph_store = GraphStore(f"{subject}_v1")
+        graph_store.init_schema()
+        conn = graph_store._ensure_db()
+        safe_chunk_id = graph_store._escape_cypher_string(chunk_id)
+        result = conn.execute(f"""
+            MATCH (c:Chunk {{chunk_id: '{safe_chunk_id}'}})
+            RETURN c.text
+        """)
+        if not result.has_next():
+            raise HTTPException(status_code=404, detail=f"Chunk {chunk_id} 不存在")
+
+        chunk_text = result.get_next()[0] or ""
+        if not chunk_text.strip():
+            raise HTTPException(status_code=400, detail=f"Chunk {chunk_id} 文本为空")
+
+        paradigm = "theory"
+        if body and isinstance(body, dict):
+            paradigm = body.get("paradigm", "theory")
+        extractor = SemanticExtractor(paradigm=paradigm)
+        concepts = extractor.extract_concepts(chunk_text)
+
+        for c in concepts:
+            c["id"] = extractor.generate_concept_id(c["name"], chunk_id)
+
+        added = graph_store.add_concepts(chunk_id, concepts)
+
+        return {
+            "subject": subject,
+            "chunk_id": chunk_id,
+            "paradigm": paradigm,
+            "status": "success",
+            "concepts_extracted": len(concepts),
+            "concepts_added": added,
+            "concepts": concepts,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"语义提取失败: {str(e)}")
+
+
+@app.get("/api/knowledge-graph/{subject}/chunk/{chunk_id}/concepts")
+def get_chunk_concepts(subject: str, chunk_id: str):
+    """
+    获取指定 chunk 已提取的概念列表。
+    """
+    from core.graph_store import GraphStore
+
+    try:
+        graph_store = GraphStore(f"{subject}_v1")
+        graph_store.init_schema()
+        concepts = graph_store.get_concepts_for_chunk(chunk_id)
+
+        return {
+            "subject": subject,
+            "chunk_id": chunk_id,
+            "concepts_count": len(concepts),
+            "concepts": concepts,
+        }
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"获取概念失败: {str(e)}")
+
+
+@app.get("/api/knowledge-graph/{subject}/concepts")
+def list_graph_concepts(subject: str, limit: int = 2000):
+    """
+    获取图谱中的所有概念节点。
+    优先从 KùzuDB 读取（确保 ID 与 /concept-links 接口中的边源/目标一致），
+    从 CSV 补充 description / parent_hint 等额外字段。
+    """
+    import csv
+    from config.settings import KNOWLEDGE_BASE_DIR
+    from core.graph_store import GraphStore
+
+    try:
+        # 1. 从 CSV 读取额外字段（description, parent_hint）
+        csv_path = KNOWLEDGE_BASE_DIR / f"{subject}_v1_concepts.csv"
+        csv_data = {}
+        if csv_path.exists():
+            with open(csv_path, "r", encoding="utf-8") as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    cid = row.get("id", "").strip()
+                    if not cid:
+                        continue
+                    csv_data[cid] = {
+                        "name": row.get("name", ""),
+                        "type": row.get("concept_type", ""),
+                        "description": row.get("description", ""),
+                        "parent_hint": row.get("parent_hint", ""),
+                        "source_chunks": row.get("source_chunks", ""),
+                    }
+
+        # 2. 从 KùzuDB 读取概念节点（确保 ID 与边一致）
+        graph_store = GraphStore(f"{subject}_v1")
+        graph_store.init_schema()
+        db_nodes = graph_store.get_concept_nodes(limit=limit)
+
+        # 3. 合并：优先使用 KùzuDB 的 ID，从 CSV 补充额外字段
+        concepts = []
+        for node in db_nodes:
+            db_id = node["id"]
+            csv_info = csv_data.get(db_id, {})
+            concepts.append({
+                "id": db_id,
+                "name": node["name"] or csv_info.get("name", ""),
+                "type": node["type"] or csv_info.get("type", ""),
+                "description": csv_info.get("description", ""),
+                "parent_hint": csv_info.get("parent_hint", ""),
+                "source_chunks": csv_info.get("source_chunks", ""),
+            })
+
+        # 4. 补充 CSV 中有但 KùzuDB 中没有的概念（孤立概念）
+        db_ids = {n["id"] for n in db_nodes}
+        for csv_id, csv_info in csv_data.items():
+            if csv_id not in db_ids:
+                concepts.append({
+                    "id": csv_id,
+                    "name": csv_info.get("name", ""),
+                    "type": csv_info.get("type", ""),
+                    "description": csv_info.get("description", ""),
+                    "parent_hint": csv_info.get("parent_hint", ""),
+                    "source_chunks": csv_info.get("source_chunks", ""),
+                })
+
+        return {
+            "subject": subject,
+            "count": len(concepts),
+            "concepts": concepts,
+        }
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"获取概念节点失败: {str(e)}")
+
+
+@app.get("/api/knowledge-graph/{subject}/concept-links")
+def list_concept_links(subject: str, limit: int = 500):
+    """
+    获取概念间的语义连接边（全局推断生成的 SOLUTION / DEPENDS_ON）。
+    """
+    from core.graph_store import GraphStore
+
+    try:
+        graph_store = GraphStore(f"{subject}_v1")
+        graph_store.init_schema()
+        edges = graph_store.get_concept_links(limit=limit)
+
+        return {
+            "subject": subject,
+            "count": len(edges),
+            "edges": edges,
+        }
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"获取语义连接边失败: {str(e)}")
+
+
+# ========== 批量语义提取 + 去重 ==========
+
+@app.post("/api/knowledge-graph/{subject}/build/semantic")
+async def build_semantic_layer(subject: str, body: Dict[str, Any] = None):
+    """
+    批量构建语义层 — 对所有 chunk 提取概念。
+    """
+    from core.graph_builder import GraphBuilder
+
+    try:
+        paradigm = "theory"
+        if body and isinstance(body, dict):
+            paradigm = body.get("paradigm", "theory")
+        builder = GraphBuilder(f"{subject}_v1", paradigm=paradigm)
+        result = builder.extract_all_concepts()
+        return {
+            "subject": subject,
+            "paradigm": paradigm,
+            "status": "success",
+            **result,
+        }
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"语义层构建失败: {str(e)}")
+
+
+@app.post("/api/knowledge-graph/{subject}/build/link")
+async def build_semantic_links(subject: str, body: Dict[str, Any] = None):
+    """
+    执行全局语义连接推断（在已有去重概念基础上）。
+    """
+    from core.graph_builder import GraphBuilder
+
+    try:
+        body = body or {}
+        paradigm = body.get("paradigm", "engineering")
+        builder = GraphBuilder(f"{subject}_v1", paradigm=paradigm)
+        result = builder.link_concepts(paradigm=paradigm)
+        return {
+            "subject": subject,
+            "paradigm": paradigm,
+            **result,
+        }
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"语义连接构建失败: {str(e)}")
+
+
+@app.post("/api/knowledge-graph/{subject}/dedupe")
+async def dedupe_concepts(subject: str):
+    """
+    对全局概念空间进行去重。
+    """
+    from core.graph_builder import GraphBuilder
+
+    try:
+        builder = GraphBuilder(f"{subject}_v1")
+        result = builder.dedupe_concepts()
+        return {
+            "subject": subject,
+            **result,
+        }
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"概念去重失败: {str(e)}")
+
+
+# ========== 范式管理 API ==========
+
+@app.get("/api/knowledge-graph/paradigms")
+def list_paradigms():
+    """
+    获取所有可用的分解范式。
+    """
+    from core.semantic_extractor import get_paradigm_names
+
+    paradigms = get_paradigm_names()
+    return {
+        "paradigms": [
+            {"id": p[0], "name": p[1], "description": p[2]}
+            for p in paradigms
+        ]
+    }
+
+
 @app.get("/api/subjects/{subject_id}/raw-files")
 def api_list_raw_files(subject_id: str):
     """
@@ -1084,14 +1563,13 @@ def api_get_subject_meta(subject_id: str):
 # 否则保留 root() 路由返回 API 信息
 # 优先使用构建后的前端（web/dist/），否则回退到源码（web/）
 WEB_DIR = PROJECT_ROOT / "web" / "dist"
-INDEX_FILE = WEB_DIR / "index.html"
+INDEX_FILE = WEB_DIR / "dist" / "index.html"
 if not INDEX_FILE.exists():
-    WEB_DIR = PROJECT_ROOT / "web"
     INDEX_FILE = WEB_DIR / "index.html"
 
-if WEB_DIR.exists() and INDEX_FILE.exists():
+if INDEX_FILE.exists():
     # 有前端文件，挂载静态文件服务到 /，index.html 作为默认页
-    app.mount("/", StaticFiles(directory=str(WEB_DIR), html=True), name="static")
+    app.mount("/", StaticFiles(directory=str(INDEX_FILE.parent), html=True), name="static")
 else:
     # 无前端文件，保留 API 根路由
     @app.get("/")

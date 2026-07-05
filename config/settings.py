@@ -76,6 +76,9 @@ KNOWLEDGE_BASE_DIR = PROJECT_ROOT / "knowledge_base"
 # 向量数据库目录
 VECTOR_DB_DIR = KNOWLEDGE_BASE_DIR / "vector_db"
 
+# 图数据库目录（KùzuDB）
+GRAPH_DB_DIR = KNOWLEDGE_BASE_DIR / "graph_db"
+
 # 缓存目录
 CACHE_DIR = KNOWLEDGE_BASE_DIR / "cache"
 
