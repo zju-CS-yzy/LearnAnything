@@ -349,8 +349,6 @@ export function runConceptLayout(cy) {
       e.style('display', 'none')
     }
   })
-  // 先隐藏所有概念节点
-  allConceptNodes.forEach(n => n.style('display', 'none'))
 
   // ===== 步骤1: 正确识别连通分量（无向图 BFS） =====
   const components = []
