@@ -395,7 +395,7 @@ export function runConceptLayout(cy) {
 
   // ===== 步骤2: 对每棵树独立处理 =====
   const treeBboxes = []
-  const treeGap = 200
+  const treeGap = 80
 
   for (let i = 0; i < trees.length; i++) {
     const treeNodeIds = trees[i]
@@ -481,10 +481,10 @@ export function runConceptLayout(cy) {
     treeCollection.layout({
       name: 'dagre',
       rankDir: 'LR',
-      rankSep: 250,
-      nodeSep: 80,
-      edgeSep: 20,
-      padding: 20,
+      rankSep: 120,
+      nodeSep: 50,
+      edgeSep: 15,
+      padding: 15,
       fit: false,
       animate: false,
     }).run()
@@ -536,9 +536,15 @@ export function runConceptLayout(cy) {
   const container = cy.container()
   const containerW = container.clientWidth
   const containerH = container.clientHeight
-  const zoom = Math.min(containerW / totalBbox.w, containerH / totalBbox.h, 0.5)
-  cy.zoom(Math.max(Math.min(zoom, 0.5), 0.15))
-  cy.center(allConnected)
+  // 优先 fit 宽度，垂直方向允许滚动
+  const zoomByWidth = (containerW * 0.85) / totalBbox.w
+  const zoom = Math.min(zoomByWidth, 0.5)
+  cy.zoom(Math.max(zoom, 0.15))
+  // 水平居中，垂直对齐顶部留出边距
+  cy.pan({
+    x: (containerW - totalBbox.w * cy.zoom()) / 2,
+    y: 30
+  })
 
   // 孤立节点布局
   if (orphanNodes.length > 0) {
@@ -548,10 +554,10 @@ export function runConceptLayout(cy) {
     })
 
     let orphanIdx = 0
-    const orphanCols = 4
-    const orphanGapX = 160
-    const orphanGapY = 60
-    const orphanStartX = maxX + 100
+    const orphanCols = 6
+    const orphanGapX = 180
+    const orphanGapY = 50
+    const orphanStartX = maxX + 80
     const orphanStartY = 50
 
     orphanNodes.forEach(n => {
