@@ -383,32 +383,19 @@ export function runConceptLayout(cy) {
 
   console.log(`[runConceptLayout] ${components.length} comps, ${connectedNodes.length} nodes, ${edgeList.length} edges`)
 
-  // ===== 步骤2: 对每个连通分量独立处理（dagre LR + 副本） =====
-  const compBboxes = []
-  const compInfos = []
+  // ===== 步骤2: 副本处理 + 按根拆分为独立子树 =====
+  // 先处理多入边节点（创建副本），然后按根拆分子树
 
+  // 2a. 为每个分量创建副本（处理多入度节点）
   components.forEach((compNodes, compIdx) => {
-    if (compNodes.size === 0) return
-
-    // 收集该分量的节点和边
-    const compCyNodes = []
-    compNodes.forEach(id => {
-      const el = cy.getElementById(id)
-      if (el.length > 0) compCyNodes.push(el)
-    })
-
     const compEdgeList = edgeList.filter(e =>
       compNodes.has(e.source) && compNodes.has(e.target)
     )
 
-    // 处理多入边节点（创建副本）
     const compInDegree = {}
     compEdgeList.forEach(e => {
       compInDegree[e.target] = (compInDegree[e.target] || 0) + 1
     })
-
-    const copyNodes = []
-    const copyEdges = []
 
     compNodes.forEach(nid => {
       const deg = compInDegree[nid] || 0
@@ -422,7 +409,7 @@ export function runConceptLayout(cy) {
         const copyId = `${nid}_copy${j}_c${compIdx}`
         const originalNode = cy.getElementById(nid)
 
-        copyNodes.push({
+        cy.add({
           data: {
             id: copyId,
             label: originalNode.data('label'),
@@ -438,7 +425,7 @@ export function runConceptLayout(cy) {
         })
 
         incoming[j].edgeRef.style('display', 'none')
-        copyEdges.push({
+        cy.add({
           data: {
             id: `${incoming[j].source}_${incoming[j].type}_${copyId}`,
             source: incoming[j].source,
@@ -450,47 +437,110 @@ export function runConceptLayout(cy) {
         })
       }
     })
+  })
 
-    if (copyNodes.length > 0) cy.add(copyNodes)
-    if (copyEdges.length > 0) cy.add(copyEdges)
+  // 2b. 基于 cy 中实际可见的边，识别所有根和子树
+  const visibleEdges = cy.edges().filter(e => {
+    const t = e.data('type')
+    return (t === 'SOLUTION' || t === 'DEPENDS_ON') && e.style('display') !== 'none'
+  })
 
-    // 构建布局集合
+  // 计算入度（基于可见边）
+  const finalInDegree = {}
+  visibleEdges.forEach(e => {
+    const tid = e.target().id()
+    finalInDegree[tid] = (finalInDegree[tid] || 0) + 1
+  })
+
+  // 找到所有根（入度为0的概念节点或副本）
+  const allConceptIds = new Set()
+  connectedNodes.forEach(n => allConceptIds.add(n.id()))
+  cy.nodes('[isCopy = 1]').forEach(n => allConceptIds.add(n.id()))
+
+  const roots = []
+  allConceptIds.forEach(id => {
+    if (!finalInDegree[id] || finalInDegree[id] === 0) {
+      roots.push(id)
+    }
+  })
+
+  // 处理纯环（没有根）：任选一个节点作为伪根
+  if (roots.length === 0 && allConceptIds.size > 0) {
+    roots.push(allConceptIds.values().next().value)
+  }
+
+  console.log(`[runConceptLayout] Total roots (trees): ${roots.length}, total concept nodes: ${allConceptIds.size}`)
+
+  // 2c. 从每个根出发，收集可达子树
+  const allTrees = []
+
+  roots.forEach(rootId => {
+    const treeNodes = new Set()
+    const queue = [rootId]
+
+    while (queue.length > 0) {
+      const nid = queue.shift()
+      if (treeNodes.has(nid)) continue
+      treeNodes.add(nid)
+
+      visibleEdges.forEach(e => {
+        if (e.source().id() === nid && !treeNodes.has(e.target().id())) {
+          queue.push(e.target().id())
+        }
+      })
+    }
+
+    if (treeNodes.size > 0) {
+      allTrees.push({ rootId, nodes: treeNodes })
+    }
+  })
+
+  console.log(`[runConceptLayout] Trees after split: ${allTrees.length}`)
+
+  // 2d. 每棵树独立跑 dagre LR
+  const treeBboxes = []
+
+  allTrees.forEach((tree, idx) => {
+    // 构建布局集合（该树的节点 + 内部边）
     let layoutCollection = cy.collection()
-    compCyNodes.forEach(n => { layoutCollection = layoutCollection.union(n) })
-    copyNodes.forEach(n => {
-      const el = cy.getElementById(n.data.id)
+
+    tree.nodes.forEach(id => {
+      const el = cy.getElementById(id)
       if (el.length > 0) layoutCollection = layoutCollection.union(el)
     })
-    compEdgeList.forEach(e => {
-      if (e.edgeRef.style('display') !== 'none') {
-        layoutCollection = layoutCollection.union(e.edgeRef)
+
+    visibleEdges.forEach(e => {
+      const src = e.source().id()
+      const tgt = e.target().id()
+      if (tree.nodes.has(src) && tree.nodes.has(tgt)) {
+        layoutCollection = layoutCollection.union(e)
       }
     })
-    copyEdges.forEach(e => {
-      const el = cy.getElementById(e.data.id)
-      if (el.length > 0) layoutCollection = layoutCollection.union(el)
-    })
 
-    // 对该分量跑 dagre LR（先重置位置避免受之前布局影响）
+    if (layoutCollection.nodes().length === 0) {
+      treeBboxes.push({ x1: 0, y1: 0, x2: 0, y2: 0, w: 0, h: 0 })
+      return
+    }
+
+    // 重置位置并跑 dagre
     layoutCollection.nodes().forEach(n => n.position({ x: 0, y: 0 }))
     layoutCollection.layout({
       name: 'dagre',
       rankDir: 'LR',
-      rankSep: 70,
-      nodeSep: 30,
-      edgeSep: 8,
-      padding: 8,
+      rankSep: 80,
+      nodeSep: 40,
+      edgeSep: 10,
+      padding: 10,
       fit: false,
       animate: false,
     }).run()
 
-    // 手动计算节点 bbox（排除标签和边，只计算节点实际占用）
+    // 计算 bbox（节点实际尺寸）
     let minX = Infinity, maxX = -Infinity
     let minY = Infinity, maxY = -Infinity
     layoutCollection.nodes().forEach(n => {
       const x = n.position('x')
       const y = n.position('y')
-      // 节点尺寸（考虑卡片高度）
       const w = n.width() || 160
       const h = n.height() || n.data('cardHeight') || 80
       minX = Math.min(minX, x - w / 2)
@@ -498,33 +548,25 @@ export function runConceptLayout(cy) {
       minY = Math.min(minY, y - h / 2)
       maxY = Math.max(maxY, y + h / 2)
     })
-    const nodeBbox = { x1: minX, y1: minY, x2: maxX, y2: maxY, w: maxX - minX, h: maxY - minY }
-    compBboxes.push(nodeBbox)
-    compInfos.push({
-      nodeCount: compNodes.size,
-      copyCount: copyNodes.length,
-      w: nodeBbox.w,
-      h: nodeBbox.h,
-      raw: nodeBbox,
-    })
+
+    const bbox = { x1: minX, y1: minY, x2: maxX, y2: maxY, w: maxX - minX, h: maxY - minY }
+    treeBboxes.push(bbox)
+
+    console.log(`[runConceptLayout] Tree ${idx}: ${tree.nodes.size} nodes, h=${Math.round(bbox.h)}`)
   })
 
-  console.log('[runConceptLayout] Bboxes:', compInfos.map(c =>
-    `n=${c.nodeCount} h=${Math.round(c.h)}`
-  ).join(' | '))
+  // ===== 步骤3: 纵向堆叠所有树 =====
+  const order = allTrees.map((tree, i) => ({ i, count: tree.nodes.size }))
+    .sort((a, b) => b.count - a.count)
 
-  // ===== 步骤3: 纵向堆叠排列各分量 =====
-  // 按节点数从大到小排序（大的在上面）
-  const order = compInfos.map((info, i) => ({ i, ...info }))
-    .sort((a, b) => b.nodeCount - a.nodeCount)
-
-  const treeGap = 150
+  const treeGap = 100
   let currentY = 30
-  let maxW = 0
 
-  order.forEach(({ i: compIdx, w, h }) => {
-    const bbox = compBboxes[compIdx]
-    const compNodes = components[compIdx]
+  order.forEach(({ i: treeIdx }) => {
+    const tree = allTrees[treeIdx]
+    const bbox = treeBboxes[treeIdx]
+
+    if (bbox.h === 0) return
 
     const targetX = 30
     const targetY = currentY
@@ -532,35 +574,17 @@ export function runConceptLayout(cy) {
     const dx = targetX - bbox.x1
     const dy = targetY - bbox.y1
 
-    // 移动前记录一棵代表性节点的位置
-    const firstId = compNodes.values().next().value
-    const firstNode = firstId ? cy.getElementById(firstId) : null
-    const beforeY = firstNode && firstNode.length > 0 ? firstNode.position('y') : null
-
-    // 移动该分量所有节点和副本
-    compNodes.forEach(id => {
+    // 移动该树所有节点
+    tree.nodes.forEach(id => {
       const node = cy.getElementById(id)
       if (node.length > 0) {
         node.position('x', node.position('x') + dx)
         node.position('y', node.position('y') + dy)
       }
-      cy.nodes(`[originalId = "${id}"]`).forEach(copy => {
-        copy.position('x', copy.position('x') + dx)
-        copy.position('y', copy.position('y') + dy)
-      })
     })
 
-    // 移动后记录
-    const afterY = firstNode && firstNode.length > 0 ? firstNode.position('y') : null
-
-    // 更新下一个树的起始 Y
-    currentY = currentY + h + treeGap
-    maxW = Math.max(maxW, w)
-
-    console.log(`[runConceptLayout] Comp ${compIdx}: ${compNodes.size} nodes, y=${Math.round(targetY)}..${Math.round(currentY - treeGap)}`)
+    currentY = currentY + bbox.h + treeGap
   })
-
-  console.log(`[runConceptLayout] Total height: ${Math.round(currentY)}, maxW: ${Math.round(maxW)}, trees: ${order.length}`)
 
   // ===== 步骤4: 显示节点并计算全局 zoom =====
   connectedNodes.forEach(n => {
