@@ -495,40 +495,23 @@ export function runConceptLayout(cy) {
     })
   })
 
-  // ===== 步骤3: 二维网格排列各分量 =====
-  // 按节点数从大到小排序（大的先放，便于平衡）
+  // ===== 步骤3: 纵向堆叠排列各分量 =====
+  // 按节点数从大到小排序（大的在上面）
   const order = compInfos.map((info, i) => ({ i, ...info }))
     .sort((a, b) => b.nodeCount - a.nodeCount)
 
-  // 计算列宽（最大分量宽度 + 间距）
-  const maxCompW = Math.max(...compInfos.map(c => c.w), 200)
-  const colGap = 60
-  const colWidth = maxCompW + colGap
-
-  // 固定 3 列（确保不会单列堆叠）
-  const container = cy.container()
-  const containerW = container.clientWidth
-  const cols = Math.max(2, Math.min(3, Math.floor(containerW / colWidth)))
-
-  console.log(`[runConceptLayout] Grid: ${cols} cols, colWidth=${Math.round(colWidth)}, maxCompW=${Math.round(maxCompW)}`)
-
-  // 每列累积高度
-  const colHeights = new Array(cols).fill(0)
-  const rowGap = 40
+  const treeGap = 80
+  let currentY = 30
+  let maxW = 0
 
   order.forEach(({ i: compIdx, w, h }) => {
     const bbox = compBboxes[compIdx]
     const compNodes = components[compIdx]
 
-    // 选当前高度最小的列
-    let minCol = 0
-    for (let c = 1; c < cols; c++) {
-      if (colHeights[c] < colHeights[minCol]) minCol = c
-    }
-
-    // 目标位置
-    const targetX = minCol * colWidth + 30
-    const targetY = colHeights[minCol] + 30
+    // x 轴对齐到 30（所有树左边缘对齐）
+    // y 轴从 currentY 开始
+    const targetX = 30
+    const targetY = currentY
 
     const dx = targetX - bbox.x1
     const dy = targetY - bbox.y1
@@ -546,11 +529,14 @@ export function runConceptLayout(cy) {
       })
     })
 
-    // 更新列高度
-    colHeights[minCol] = targetY + h + rowGap
+    // 更新下一个树的起始 Y
+    currentY = currentY + h + treeGap
+    maxW = Math.max(maxW, w)
 
-    console.log(`[runConceptLayout] Comp ${compIdx}: ${compNodes.size} nodes, col=${minCol}, size=${Math.round(w)}x${Math.round(h)}`)
+    console.log(`[runConceptLayout] Comp ${compIdx}: ${compNodes.size} nodes, y=${Math.round(targetY)}, h=${Math.round(h)}, nextY=${Math.round(currentY)}`)
   })
+
+  console.log(`[runConceptLayout] Total height: ${Math.round(currentY)}, maxW: ${Math.round(maxW)}, trees: ${order.length}`)
 
   // ===== 步骤4: 显示节点并计算全局 zoom =====
   connectedNodes.forEach(n => {
@@ -582,10 +568,14 @@ export function runConceptLayout(cy) {
 
   console.log(`[runConceptLayout] Global: ${Math.round(totalW)} x ${Math.round(totalH)}`)
 
+  const containerW = container.clientWidth
   const containerH = container.clientHeight
-  const zoomByWidth = (containerW * 0.88) / totalW
-  const zoomByHeight = (containerH * 0.88) / totalH
-  const zoom = Math.min(zoomByWidth, zoomByHeight, 0.5)
+
+  // 纵向堆叠：宽度是瓶颈，优先 fit 宽度；高度方向可滚动
+  const zoomByWidth = (containerW * 0.85) / totalW
+  const zoom = Math.min(zoomByWidth, 0.5)
+  cy.zoom(Math.max(zoom, 0.1))
+  cy.pan({ x: 30, y: 30 })
   cy.zoom(Math.max(zoom, 0.1))
   cy.pan({ x: 30, y: 30 })
 
