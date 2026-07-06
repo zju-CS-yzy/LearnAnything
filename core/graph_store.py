@@ -1398,7 +1398,71 @@ class GraphStore:
 
                     RETURN ch.chunk_id, co.concept_id, r.description
 
-                    LIMIT {limit // len(rel_types) + 1}
+                    LIMIT {limit}
+
+                """)
+
+                while result.has_next():
+
+                    row = result.get_next()
+
+                    edges.append({
+
+                        "source": row[0],
+
+                        "target": row[1],
+
+                        "type": rel_type,
+
+                        "description": row[2] if row[2] else "",
+
+                    })
+
+            except Exception:
+
+                pass
+
+
+
+        return edges
+
+
+
+    def get_semantic_edges(self, limit: int = 200) -> List[Dict[str, Any]]:
+
+        """
+
+        获取语义层关系边（Chunk -> Concept）??
+
+        Args:
+
+            limit: 最大返回数??
+
+        Returns:
+
+            边列表，包含 source, target, type
+
+        """
+
+        conn = self._ensure_db()
+
+        edges = []
+
+
+
+        rel_types = ["DEFINES", "HAS_LAW", "APPLIES_TO", "EXTENDS"]
+
+        for rel_type in rel_types:
+
+            try:
+
+                result = self._execute(conn, f"""
+
+                    MATCH (ch:Chunk)-[r:{rel_type}]->(co:Concept)
+
+                    RETURN ch.chunk_id, co.concept_id, r.description
+
+                    LIMIT {limit}
 
                 """)
 
@@ -1464,7 +1528,7 @@ class GraphStore:
 
                     RETURN p.concept_id, c.concept_id, r.confidence
 
-                    LIMIT {limit // len(rel_types) + 1}
+                    LIMIT {limit}
 
                 """)
 
