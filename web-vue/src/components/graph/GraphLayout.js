@@ -492,28 +492,94 @@ export function runConceptLayout(cy) {
     treeBboxes.push(treeCollection.boundingBox())
   }
 
-  // ===== 步骤3: 按从上到下排列各棵树 =====
-  let currentY = 0
+  // ===== 步骤3: 二维网格排列各棵树 =====
+  console.log('[runConceptLayout] Tree count:', trees.length)
+
+  // 计算每棵树的 bbox 尺寸
+  const treeInfos = []
+  let maxTreeW = 0
   for (let i = 0; i < trees.length; i++) {
     const bbox = treeBboxes[i]
+    const w = bbox.w || (bbox.x2 - bbox.x1)
+    const h = bbox.h || (bbox.y2 - bbox.y1)
+    treeInfos.push({ w, h, bbox })
+    maxTreeW = Math.max(maxTreeW, w)
+  }
+
+  // 计算列数：根据容器宽度和最大树宽
+  const container = cy.container()
+  const containerW = container.clientWidth
+  const containerH = container.clientHeight
+  const colGap = 40
+  const colWidth = maxTreeW + colGap
+  const cols = Math.max(1, Math.min(4, Math.floor((containerW - 40) / colWidth)))
+  console.log(`[runConceptLayout] Grid: ${cols} cols, colWidth=${Math.round(colWidth)}`)
+
+  // 按列累积高度排列（每列独立累积）
+  const colHeights = new Array(cols).fill(0)
+  const rowGap = 30
+
+  for (let i = 0; i < trees.length; i++) {
     const treeNodeIds = trees[i]
     if (treeNodeIds.size === 0) continue
 
-    const dy = currentY - bbox.y1
+    const bbox = treeBboxes[i]
+    const info = treeInfos[i]
+
+    // 选择当前高度最小的列
+    let minCol = 0
+    for (let c = 1; c < cols; c++) {
+      if (colHeights[c] < colHeights[minCol]) minCol = c
+    }
+
+    const targetX = minCol * colWidth + 20  // 左边距 20
+    const targetY = colHeights[minCol] + 20  // 上边距 20
+
+    const dx = targetX - bbox.x1
+    const dy = targetY - bbox.y1
 
     treeNodeIds.forEach(id => {
       const node = cy.getElementById(id)
       if (node.length > 0) {
+        node.position('x', node.position('x') + dx)
         node.position('y', node.position('y') + dy)
       }
       const copies = cy.nodes(`[originalId = "${id}"]`)
       copies.forEach(copy => {
+        copy.position('x', copy.position('x') + dx)
         copy.position('y', copy.position('y') + dy)
       })
     })
 
-    currentY = currentY + (bbox.y2 - bbox.y1) + treeGap
+    // 更新该列高度
+    colHeights[minCol] = targetY + info.h + rowGap
+
+    console.log(`[runConceptLayout] Tree ${i}: nodes=${treeNodeIds.size}, placed at col=${minCol}, h=${Math.round(info.h)}`)
   }
+
+  // 计算整体 bbox 用于 zoom
+  let globalMinX = Infinity, globalMaxX = -Infinity
+  let globalMinY = Infinity, globalMaxY = -Infinity
+  treeNodes.forEach(n => {
+    const x = n.position('x')
+    const y = n.position('y')
+    globalMinX = Math.min(globalMinX, x)
+    globalMaxX = Math.max(globalMaxX, x)
+    globalMinY = Math.min(globalMinY, y)
+    globalMaxY = Math.max(globalMaxY, y)
+  })
+  cy.nodes('[isCopy = 1]').forEach(n => {
+    const x = n.position('x')
+    const y = n.position('y')
+    globalMinX = Math.min(globalMinX, x)
+    globalMaxX = Math.max(globalMaxX, x)
+    globalMinY = Math.min(globalMinY, y)
+    globalMaxY = Math.max(globalMaxY, y)
+  })
+  const totalW = globalMaxX - globalMinX
+  const totalH = globalMaxY - globalMinY
+
+  console.log(`[runConceptLayout] Global bbox: ${Math.round(totalW)} x ${Math.round(totalH)}`)
 
   // 显示所有树节点
   for (let i = 0; i < trees.length; i++) {
@@ -530,19 +596,13 @@ export function runConceptLayout(cy) {
     })
   }
 
-  // 固定 zoom
-  const allConnected = treeNodes.union(cy.nodes('[isCopy = 1]'))
-  const totalBbox = allConnected.boundingBox()
-  const container = cy.container()
-  const containerW = container.clientWidth
-  const containerH = container.clientHeight
-  // 优先 fit 宽度，垂直方向允许滚动
-  const zoomByWidth = (containerW * 0.85) / totalBbox.w
-  const zoom = Math.min(zoomByWidth, 0.5)
+  // 使用全局 bbox 计算 zoom
+  const zoomByWidth = (containerW * 0.9) / (totalW + 60)  // 留边距
+  const zoomByHeight = (containerH * 0.9) / (totalH + 60)
+  const zoom = Math.min(zoomByWidth, zoomByHeight, 0.5)
   cy.zoom(Math.max(zoom, 0.15))
-  // 水平居中，垂直对齐顶部留出边距
   cy.pan({
-    x: (containerW - totalBbox.w * cy.zoom()) / 2,
+    x: 30,
     y: 30
   })
 
