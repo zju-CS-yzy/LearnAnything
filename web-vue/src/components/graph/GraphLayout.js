@@ -485,15 +485,21 @@ export function runConceptLayout(cy) {
       animate: false,
     }).run()
 
-    const bbox = layoutCollection.boundingBox()
-    compBboxes.push(bbox)
+    // 只取节点的 boundingBox（排除边，边的曲线可能大幅扩展 bbox）
+    const nodeBbox = layoutCollection.nodes().boundingBox()
+    compBboxes.push(nodeBbox)
     compInfos.push({
       nodeCount: compNodes.size,
       copyCount: copyNodes.length,
-      w: bbox.x2 - bbox.x1,
-      h: bbox.y2 - bbox.y1,
+      w: nodeBbox.x2 - nodeBbox.x1,
+      h: nodeBbox.y2 - nodeBbox.y1,
+      raw: nodeBbox,
     })
   })
+
+  console.log('[runConceptLayout] Component bboxes:', compInfos.map(c =>
+    `nodes=${c.nodeCount} h=${Math.round(c.h)} y1=${Math.round(c.raw.y1)} y2=${Math.round(c.raw.y2)}`
+  ).join(' | '))
 
   // ===== 步骤3: 纵向堆叠排列各分量 =====
   // 按节点数从大到小排序（大的在上面）
@@ -508,13 +514,16 @@ export function runConceptLayout(cy) {
     const bbox = compBboxes[compIdx]
     const compNodes = components[compIdx]
 
-    // x 轴对齐到 30（所有树左边缘对齐）
-    // y 轴从 currentY 开始
     const targetX = 30
     const targetY = currentY
 
     const dx = targetX - bbox.x1
     const dy = targetY - bbox.y1
+
+    // 移动前记录一棵代表性节点的位置
+    const firstId = compNodes.values().next().value
+    const firstNode = firstId ? cy.getElementById(firstId) : null
+    const beforeY = firstNode && firstNode.length > 0 ? firstNode.position('y') : null
 
     // 移动该分量所有节点和副本
     compNodes.forEach(id => {
@@ -529,11 +538,17 @@ export function runConceptLayout(cy) {
       })
     })
 
+    // 移动后记录
+    const afterY = firstNode && firstNode.length > 0 ? firstNode.position('y') : null
+
     // 更新下一个树的起始 Y
     currentY = currentY + h + treeGap
     maxW = Math.max(maxW, w)
 
-    console.log(`[runConceptLayout] Comp ${compIdx}: ${compNodes.size} nodes, y=${Math.round(targetY)}, h=${Math.round(h)}, nextY=${Math.round(currentY)}`)
+    console.log(`[runConceptLayout] Comp ${compIdx}: ${compNodes.size} nodes, ` +
+      `bbox.y1=${Math.round(bbox.y1)}..y2=${Math.round(bbox.y2)} h=${Math.round(h)}, ` +
+      `targetY=${Math.round(targetY)}, dy=${Math.round(dy)}, ` +
+      `firstNode beforeY=${Math.round(beforeY||0)} afterY=${Math.round(afterY||0)}, nextY=${Math.round(currentY)}`)
   })
 
   console.log(`[runConceptLayout] Total height: ${Math.round(currentY)}, maxW: ${Math.round(maxW)}, trees: ${order.length}`)
