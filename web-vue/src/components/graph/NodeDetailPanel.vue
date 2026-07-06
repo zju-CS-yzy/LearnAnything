@@ -13,14 +13,23 @@
           <div class="info-value mono">{{ node.id }}</div>
         </div>
 
-        <div class="info-section">
+        <!-- 来源和页码（仅 chunk 节点显示） -->
+        <div v-if="isChunkNode" class="info-section">
           <div class="info-label">来源</div>
           <div class="info-value">{{ node.source || '-' }}</div>
         </div>
 
-        <div class="info-section">
+        <div v-if="isChunkNode" class="info-section">
           <div class="info-label">页码</div>
           <div class="info-value">{{ node.page_number || '-' }}</div>
+        </div>
+
+        <!-- 概念节点标识（非 chunk 节点显示） -->
+        <div v-if="!isChunkNode" class="info-section">
+          <div class="info-label">节点类型</div>
+          <div class="info-value">
+            <span class="type-badge" :class="'type-' + (node.type || 'concept')">{{ typeLabel(node.type) }}</span>
+          </div>
         </div>
 
         <div class="info-section">
@@ -134,8 +143,15 @@ function typeLabel(type) {
     'law': '规律',
     'application': '应用',
     'extension': '扩展',
+    'requirement': '需求',
+    'sub_requirement': '子需求',
+    'technology': '技术',
+    'sub_technology': '子技术',
+    'concept': '概念',
+    'child': '知识片段',
+    'parent': '父节点',
   }
-  return map[type] || type
+  return map[type] || type || '概念'
 }
 
 function relationLabel(relation) {
