@@ -293,7 +293,8 @@ export function runTreeLayout(cy) {
 // ========== 概念层 dagre 布局 ==========
 
 /**
- * 概念节点布局（dagre LR + 副本处理）
+ * 概念节点布局（全局 dagre TB + 副本处理）
+ * 策略：所有连通节点一起跑 dagre，dagre 自动处理 rank 分配
  */
 export function runConceptLayout(cy) {
   // 清除之前可能创建的副本
@@ -310,6 +311,7 @@ export function runConceptLayout(cy) {
     return t === 'SOLUTION' || t === 'DEPENDS_ON'
   })
 
+  // 收集边
   const edgeList = []
   semanticEdges.forEach(e => {
     edgeList.push({
@@ -320,16 +322,19 @@ export function runConceptLayout(cy) {
     })
   })
 
+  // 找出有连接的节点
   const connectedNodeIds = new Set()
   edgeList.forEach(e => {
     connectedNodeIds.add(e.source)
     connectedNodeIds.add(e.target)
   })
 
-  const treeNodes = allConceptNodes.filter(n => connectedNodeIds.has(n.id()))
+  const connectedNodes = allConceptNodes.filter(n => connectedNodeIds.has(n.id()))
   const orphanNodes = allConceptNodes.filter(n => !connectedNodeIds.has(n.id()))
 
-  // 隐藏 chunk 节点和 chunk 边
+  console.log(`[runConceptLayout] Connected: ${connectedNodes.length} nodes, ${edgeList.length} edges, Orphan: ${orphanNodes.length}`)
+
+  // 隐藏 chunk 节点和无关边
   cy.nodes().forEach(n => {
     const t = n.data('type')
     if (t === 'child' || t === 'parent' || t === 'markdown') {
@@ -343,273 +348,122 @@ export function runConceptLayout(cy) {
     }
   })
 
-  // ===== 步骤1: 分树 =====
+  // 先隐藏所有概念节点，只显示有连接的
+  allConceptNodes.forEach(n => n.style('display', 'none'))
+
+  // ===== 步骤1: 处理多入边节点（创建副本） =====
   const nodeInDegree = {}
   edgeList.forEach(e => {
     nodeInDegree[e.target] = (nodeInDegree[e.target] || 0) + 1
   })
 
-  const rootIds = new Set()
-  treeNodes.forEach(n => {
+  const copyNodes = []
+  const copyEdges = []
+
+  connectedNodes.forEach(n => {
     const nid = n.id()
-    if (!nodeInDegree[nid] || nodeInDegree[nid] === 0) {
-      rootIds.add(nid)
-    }
-  })
+    const deg = nodeInDegree[nid] || 0
+    if (deg <= 1) return
 
-  const trees = []
-  const assigned = new Set()
+    // 找出指向该节点的所有边（按源节点排序确保稳定）
+    const incoming = edgeList.filter(e => e.target === nid).sort((a, b) => a.source.localeCompare(b.source))
 
-  rootIds.forEach(rootId => {
-    const treeNodeIds = new Set()
-    const queue = [rootId]
+    for (let j = 1; j < incoming.length; j++) {
+      const copyId = `${nid}_copy${j}`
 
-    while (queue.length > 0) {
-      const nid = queue.shift()
-      if (treeNodeIds.has(nid)) continue
-      treeNodeIds.add(nid)
-
-      edgeList.forEach(e => {
-        if (e.source === nid && !treeNodeIds.has(e.target)) {
-          queue.push(e.target)
+      copyNodes.push({
+        data: {
+          id: copyId,
+          label: n.data('label'),
+          cardLabel: n.data('cardLabel'),
+          cardHeight: n.data('cardHeight'),
+          type: n.data('type'),
+          description: n.data('description'),
+          parent_hint: n.data('parent_hint'),
+          source_chunks: n.data('source_chunks'),
+          originalId: nid,
+          isCopy: '1',
         }
-        if (e.target === nid && !treeNodeIds.has(e.source)) {
-          queue.push(e.source)
+      })
+
+      // 隐藏原边，添加副本边
+      incoming[j].edgeRef.style('display', 'none')
+      copyEdges.push({
+        data: {
+          id: `${incoming[j].source}_${incoming[j].type}_${copyId}`,
+          source: incoming[j].source,
+          target: copyId,
+          type: incoming[j].type,
+          label: incoming[j].type === 'SOLUTION' ? '解决' : '依赖',
+          isCopyEdge: '1',
         }
       })
     }
-
-    trees.push(treeNodeIds)
-    treeNodeIds.forEach(id => assigned.add(id))
   })
 
-  const unassignedIds = new Set()
-  treeNodes.forEach(n => {
-    if (!assigned.has(n.id())) {
-      unassignedIds.add(n.id())
+  if (copyNodes.length > 0) cy.add(copyNodes)
+  if (copyEdges.length > 0) cy.add(copyEdges)
+
+  // ===== 步骤2: 收集所有要布局的节点和边 =====
+  let layoutCollection = cy.collection()
+
+  connectedNodes.forEach(n => { layoutCollection = layoutCollection.union(n) })
+  copyNodes.forEach(n => {
+    const el = cy.getElementById(n.data.id)
+    if (el.length > 0) layoutCollection = layoutCollection.union(el)
+  })
+
+  // 只收集仍然可见的边
+  edgeList.forEach(e => {
+    if (e.edgeRef.style('display') !== 'none') {
+      layoutCollection = layoutCollection.union(e.edgeRef)
     }
   })
-  if (unassignedIds.size > 0) {
-    trees.push(unassignedIds)
-  }
+  copyEdges.forEach(e => {
+    const el = cy.getElementById(e.data.id)
+    if (el.length > 0) layoutCollection = layoutCollection.union(el)
+  })
 
-  // ===== 步骤2: 对每棵树独立处理 =====
-  const treeBboxes = []
-  const treeGap = 30
+  console.log(`[runConceptLayout] Layout collection: ${layoutCollection.nodes().length} nodes, ${layoutCollection.edges().length} edges`)
 
-  for (let i = 0; i < trees.length; i++) {
-    const treeNodeIds = trees[i]
-    if (treeNodeIds.size === 0) continue
+  // ===== 步骤3: 全局 dagre 布局（TB 方向） =====
+  layoutCollection.layout({
+    name: 'dagre',
+    rankDir: 'TB',
+    rankSep: 80,
+    nodeSep: 40,
+    edgeSep: 15,
+    padding: 20,
+    fit: false,
+    animate: false,
+  }).run()
 
-    const treeCyNodes = []
-    treeNodeIds.forEach(id => {
-      const el = cy.getElementById(id)
-      if (el.length > 0) treeCyNodes.push(el)
-    })
+  // ===== 步骤4: 显示节点并设置视图 =====
+  connectedNodes.forEach(n => {
+    n.style('display', 'element')
+    n.style('opacity', 1)
+  })
+  cy.nodes('[isCopy = 1]').forEach(n => {
+    n.style('display', 'element')
+    n.style('opacity', 0.85)
+  })
 
-    const treeEdgeList = []
-    edgeList.forEach(e => {
-      if (treeNodeIds.has(e.source) && treeNodeIds.has(e.target)) {
-        treeEdgeList.push(e)
-      }
-    })
-
-    const treeCopyNodes = []
-    const treeCopyEdges = []
-
-    const treeInDegree = {}
-    treeEdgeList.forEach(e => {
-      treeInDegree[e.target] = (treeInDegree[e.target] || 0) + 1
-    })
-
-    treeNodeIds.forEach(nid => {
-      const edges = treeEdgeList.filter(e => e.target === nid)
-      if (edges.length <= 1) return
-
-      for (let j = 1; j < edges.length; j++) {
-        const copyId = `${nid}_copy${j}_tree${i}`
-        const originalNode = cy.getElementById(nid)
-
-        treeCopyNodes.push({
-          data: {
-            id: copyId,
-            label: originalNode.data('label'),
-            cardLabel: originalNode.data('cardLabel'),
-            cardHeight: originalNode.data('cardHeight'),
-            type: originalNode.data('type'),
-            description: originalNode.data('description'),
-            parent_hint: originalNode.data('parent_hint'),
-            source_chunks: originalNode.data('source_chunks'),
-            originalId: nid,
-            isCopy: '1',
-          }
-        })
-
-        edges[j].edgeRef.style('display', 'none')
-        treeCopyEdges.push({
-          data: {
-            id: `${edges[j].source}_${edges[j].type}_${copyId}`,
-            source: edges[j].source,
-            target: copyId,
-            type: edges[j].type,
-            label: edges[j].type === 'SOLUTION' ? '解决' : '依赖',
-            isCopyEdge: '1',
-          }
-        })
-      }
-    })
-
-    if (treeCopyNodes.length > 0) cy.add(treeCopyNodes)
-    if (treeCopyEdges.length > 0) cy.add(treeCopyEdges)
-
-    let treeCollection = cy.collection()
-    treeCyNodes.forEach(n => { treeCollection = treeCollection.union(n) })
-    treeCopyNodes.forEach(n => {
-      const el = cy.getElementById(n.data.id)
-      if (el.length > 0) treeCollection = treeCollection.union(el)
-    })
-    treeEdgeList.forEach(e => {
-      if (e.edgeRef.style('display') !== 'none') {
-        treeCollection = treeCollection.union(e.edgeRef)
-      }
-    })
-    treeCopyEdges.forEach(e => {
-      const el = cy.getElementById(e.data.id)
-      if (el.length > 0) treeCollection = treeCollection.union(el)
-    })
-
-    treeCollection.layout({
-      name: 'dagre',
-      rankDir: 'LR',
-      rankSep: 120,
-      nodeSep: 50,
-      edgeSep: 15,
-      padding: 15,
-      fit: false,
-      animate: false,
-    }).run()
-
-    treeBboxes.push(treeCollection.boundingBox())
-  }
-
-  // ===== 步骤3: 二维网格排列各棵树 =====
-  console.log('[runConceptLayout] Tree count:', trees.length)
-
-  // 计算每棵树的 bbox 尺寸
-  const treeInfos = []
-  let maxTreeW = 0
-  for (let i = 0; i < trees.length; i++) {
-    const bbox = treeBboxes[i]
-    const w = bbox.w || (bbox.x2 - bbox.x1)
-    const h = bbox.h || (bbox.y2 - bbox.y1)
-    treeInfos.push({ w, h, bbox })
-    maxTreeW = Math.max(maxTreeW, w)
-  }
-
-  // 计算列数：根据容器宽度和最大树宽
+  // 计算 bbox 并设置 zoom
+  const bbox = layoutCollection.boundingBox()
   const container = cy.container()
   const containerW = container.clientWidth
   const containerH = container.clientHeight
-  const colGap = 40
-  const colWidth = maxTreeW + colGap
-  const cols = Math.max(1, Math.min(4, Math.floor((containerW - 40) / colWidth)))
-  console.log(`[runConceptLayout] Grid: ${cols} cols, colWidth=${Math.round(colWidth)}`)
 
-  // 按列累积高度排列（每列独立累积）
-  const colHeights = new Array(cols).fill(0)
-  const rowGap = 30
+  console.log(`[runConceptLayout] BBox: ${Math.round(bbox.w)} x ${Math.round(bbox.h)}`)
 
-  for (let i = 0; i < trees.length; i++) {
-    const treeNodeIds = trees[i]
-    if (treeNodeIds.size === 0) continue
-
-    const bbox = treeBboxes[i]
-    const info = treeInfos[i]
-
-    // 选择当前高度最小的列
-    let minCol = 0
-    for (let c = 1; c < cols; c++) {
-      if (colHeights[c] < colHeights[minCol]) minCol = c
-    }
-
-    const targetX = minCol * colWidth + 20  // 左边距 20
-    const targetY = colHeights[minCol] + 20  // 上边距 20
-
-    const dx = targetX - bbox.x1
-    const dy = targetY - bbox.y1
-
-    treeNodeIds.forEach(id => {
-      const node = cy.getElementById(id)
-      if (node.length > 0) {
-        node.position('x', node.position('x') + dx)
-        node.position('y', node.position('y') + dy)
-      }
-      const copies = cy.nodes(`[originalId = "${id}"]`)
-      copies.forEach(copy => {
-        copy.position('x', copy.position('x') + dx)
-        copy.position('y', copy.position('y') + dy)
-      })
-    })
-
-    // 更新该列高度
-    colHeights[minCol] = targetY + info.h + rowGap
-
-    console.log(`[runConceptLayout] Tree ${i}: nodes=${treeNodeIds.size}, placed at col=${minCol}, h=${Math.round(info.h)}`)
-  }
-
-  // 计算整体 bbox 用于 zoom
-  let globalMinX = Infinity, globalMaxX = -Infinity
-  let globalMinY = Infinity, globalMaxY = -Infinity
-  treeNodes.forEach(n => {
-    const x = n.position('x')
-    const y = n.position('y')
-    globalMinX = Math.min(globalMinX, x)
-    globalMaxX = Math.max(globalMaxX, x)
-    globalMinY = Math.min(globalMinY, y)
-    globalMaxY = Math.max(globalMaxY, y)
-  })
-  cy.nodes('[isCopy = 1]').forEach(n => {
-    const x = n.position('x')
-    const y = n.position('y')
-    globalMinX = Math.min(globalMinX, x)
-    globalMaxX = Math.max(globalMaxX, x)
-    globalMinY = Math.min(globalMinY, y)
-    globalMaxY = Math.max(globalMaxY, y)
-  })
-  const totalW = globalMaxX - globalMinX
-  const totalH = globalMaxY - globalMinY
-
-  console.log(`[runConceptLayout] Global bbox: ${Math.round(totalW)} x ${Math.round(totalH)}`)
-
-  // 显示所有树节点
-  for (let i = 0; i < trees.length; i++) {
-    trees[i].forEach(id => {
-      const node = cy.getElementById(id)
-      if (node.length > 0) {
-        node.style('display', 'element')
-        node.style('opacity', 1)
-      }
-      cy.nodes(`[originalId = "${id}"]`).forEach(copy => {
-        copy.style('display', 'element')
-        copy.style('opacity', 1)
-      })
-    })
-  }
-
-  // 使用全局 bbox 计算 zoom
-  const zoomByWidth = (containerW * 0.9) / (totalW + 60)  // 留边距
-  const zoomByHeight = (containerH * 0.9) / (totalH + 60)
+  const zoomByWidth = (containerW * 0.9) / bbox.w
+  const zoomByHeight = (containerH * 0.9) / bbox.h
   const zoom = Math.min(zoomByWidth, zoomByHeight, 0.5)
-  cy.zoom(Math.max(zoom, 0.15))
-  cy.pan({
-    x: 30,
-    y: 30
-  })
+  cy.zoom(Math.max(zoom, 0.1))
+  cy.pan({ x: 30, y: 30 })
 
-  // 隐藏不在任何树中的孤立节点
-  if (orphanNodes.length > 0) {
-    orphanNodes.forEach(n => {
-      n.style('display', 'none')
-    })
-  }
+  // 隐藏孤立节点
+  orphanNodes.forEach(n => {
+    n.style('display', 'none')
+  })
 }
