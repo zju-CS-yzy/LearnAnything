@@ -395,7 +395,7 @@ export function runConceptLayout(cy) {
 
   // ===== 步骤2: 对每棵树独立处理 =====
   const treeBboxes = []
-  const treeGap = 80
+  const treeGap = 30
 
   for (let i = 0; i < trees.length; i++) {
     const treeNodeIds = trees[i]
@@ -546,30 +546,10 @@ export function runConceptLayout(cy) {
     y: 30
   })
 
-  // 孤立节点布局
+  // 隐藏不在任何树中的孤立节点
   if (orphanNodes.length > 0) {
-    let maxX = 0
-    allConnected.forEach(n => {
-      maxX = Math.max(maxX, n.position('x') + 100)
-    })
-
-    let orphanIdx = 0
-    const orphanCols = 6
-    const orphanGapX = 180
-    const orphanGapY = 50
-    const orphanStartX = maxX + 80
-    const orphanStartY = 50
-
     orphanNodes.forEach(n => {
-      const col = orphanIdx % orphanCols
-      const row = Math.floor(orphanIdx / orphanCols)
-      n.position({
-        x: orphanStartX + col * orphanGapX,
-        y: orphanStartY + row * orphanGapY
-      })
-      n.style('display', 'element')
-      n.style('opacity', 0.5)
-      orphanIdx++
+      n.style('display', 'none')
     })
   }
 }
