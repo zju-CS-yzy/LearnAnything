@@ -49,3 +49,7 @@ Thumbs.db
 # /tests/          - 测试用例
 # /knowledge_base/*.csv  - 概念数据（去重后的小文件）
 # ============================================
+
+/web-vue/node_modules/
+/web-vue/package-lock.json
+
