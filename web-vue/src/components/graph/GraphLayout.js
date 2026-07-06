@@ -568,14 +568,12 @@ export function runConceptLayout(cy) {
 
   console.log(`[runConceptLayout] Global: ${Math.round(totalW)} x ${Math.round(totalH)}`)
 
+  const container = cy.container()
   const containerW = container.clientWidth
-  const containerH = container.clientHeight
 
   // 纵向堆叠：宽度是瓶颈，优先 fit 宽度；高度方向可滚动
   const zoomByWidth = (containerW * 0.85) / totalW
   const zoom = Math.min(zoomByWidth, 0.5)
-  cy.zoom(Math.max(zoom, 0.1))
-  cy.pan({ x: 30, y: 30 })
   cy.zoom(Math.max(zoom, 0.1))
   cy.pan({ x: 30, y: 30 })
 
