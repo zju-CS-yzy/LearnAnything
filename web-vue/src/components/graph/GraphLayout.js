@@ -471,7 +471,8 @@ export function runConceptLayout(cy) {
       if (el.length > 0) layoutCollection = layoutCollection.union(el)
     })
 
-    // 对该分量跑 dagre LR（使用更紧的参数）
+    // 对该分量跑 dagre LR（先重置位置避免受之前布局影响）
+    layoutCollection.nodes().forEach(n => n.position({ x: 0, y: 0 }))
     layoutCollection.layout({
       name: 'dagre',
       rankDir: 'LR',
