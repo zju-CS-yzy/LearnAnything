@@ -287,7 +287,7 @@ async function loadAllNodes() {
     await nextTick()
     if (cy) {
       cy.resize()
-      cy.fit()
+      // 不调用 cy.fit() —— 布局函数已自行设置 zoom/pan
     }
 
     nodeCount.value = cy.nodes().length
