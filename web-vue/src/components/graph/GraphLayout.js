@@ -381,7 +381,7 @@ export function runConceptLayout(cy) {
     }
   })
 
-  console.log(`[runConceptLayout] Components: ${components.length}, nodes: ${connectedNodes.length}, edges: ${edgeList.length}`)
+  console.log(`[runConceptLayout] ${components.length} comps, ${connectedNodes.length} nodes, ${edgeList.length} edges`)
 
   // ===== 步骤2: 对每个连通分量独立处理（dagre LR + 副本） =====
   const compBboxes = []
@@ -471,32 +471,45 @@ export function runConceptLayout(cy) {
       if (el.length > 0) layoutCollection = layoutCollection.union(el)
     })
 
-    // 对该分量跑 dagre LR
+    // 对该分量跑 dagre LR（使用更紧的参数）
     layoutCollection.layout({
       name: 'dagre',
       rankDir: 'LR',
-      rankSep: 100,
-      nodeSep: 45,
-      edgeSep: 12,
-      padding: 12,
+      rankSep: 70,
+      nodeSep: 30,
+      edgeSep: 8,
+      padding: 8,
       fit: false,
       animate: false,
     }).run()
 
-    // 只取节点的 boundingBox（排除边，边的曲线可能大幅扩展 bbox）
-    const nodeBbox = layoutCollection.nodes().boundingBox()
+    // 手动计算节点 bbox（排除标签和边，只计算节点实际占用）
+    let minX = Infinity, maxX = -Infinity
+    let minY = Infinity, maxY = -Infinity
+    layoutCollection.nodes().forEach(n => {
+      const x = n.position('x')
+      const y = n.position('y')
+      // 节点尺寸（考虑卡片高度）
+      const w = n.width() || 160
+      const h = n.height() || n.data('cardHeight') || 80
+      minX = Math.min(minX, x - w / 2)
+      maxX = Math.max(maxX, x + w / 2)
+      minY = Math.min(minY, y - h / 2)
+      maxY = Math.max(maxY, y + h / 2)
+    })
+    const nodeBbox = { x1: minX, y1: minY, x2: maxX, y2: maxY, w: maxX - minX, h: maxY - minY }
     compBboxes.push(nodeBbox)
     compInfos.push({
       nodeCount: compNodes.size,
       copyCount: copyNodes.length,
-      w: nodeBbox.x2 - nodeBbox.x1,
-      h: nodeBbox.y2 - nodeBbox.y1,
+      w: nodeBbox.w,
+      h: nodeBbox.h,
       raw: nodeBbox,
     })
   })
 
-  console.log('[runConceptLayout] Component bboxes:', compInfos.map(c =>
-    `nodes=${c.nodeCount} h=${Math.round(c.h)} y1=${Math.round(c.raw.y1)} y2=${Math.round(c.raw.y2)}`
+  console.log('[runConceptLayout] Bboxes:', compInfos.map(c =>
+    `n=${c.nodeCount} h=${Math.round(c.h)}`
   ).join(' | '))
 
   // ===== 步骤3: 纵向堆叠排列各分量 =====
@@ -504,7 +517,7 @@ export function runConceptLayout(cy) {
   const order = compInfos.map((info, i) => ({ i, ...info }))
     .sort((a, b) => b.nodeCount - a.nodeCount)
 
-  const treeGap = 80
+  const treeGap = 150
   let currentY = 30
   let maxW = 0
 
@@ -543,10 +556,7 @@ export function runConceptLayout(cy) {
     currentY = currentY + h + treeGap
     maxW = Math.max(maxW, w)
 
-    console.log(`[runConceptLayout] Comp ${compIdx}: ${compNodes.size} nodes, ` +
-      `bbox.y1=${Math.round(bbox.y1)}..y2=${Math.round(bbox.y2)} h=${Math.round(h)}, ` +
-      `targetY=${Math.round(targetY)}, dy=${Math.round(dy)}, ` +
-      `firstNode beforeY=${Math.round(beforeY||0)} afterY=${Math.round(afterY||0)}, nextY=${Math.round(currentY)}`)
+    console.log(`[runConceptLayout] Comp ${compIdx}: ${compNodes.size} nodes, y=${Math.round(targetY)}..${Math.round(currentY - treeGap)}`)
   })
 
   console.log(`[runConceptLayout] Total height: ${Math.round(currentY)}, maxW: ${Math.round(maxW)}, trees: ${order.length}`)
@@ -561,22 +571,30 @@ export function runConceptLayout(cy) {
     n.style('opacity', 0.85)
   })
 
-  // 全局 bbox
+  // 全局 bbox（使用节点实际尺寸）
   let minX = Infinity, maxX = -Infinity
   let minY = Infinity, maxY = -Infinity
   connectedNodes.forEach(n => {
     const x = n.position('x')
     const y = n.position('y')
-    minX = Math.min(minX, x); maxX = Math.max(maxX, x)
-    minY = Math.min(minY, y); maxY = Math.max(maxY, y)
+    const w = n.width() || 160
+    const h = n.height() || n.data('cardHeight') || 80
+    minX = Math.min(minX, x - w / 2)
+    maxX = Math.max(maxX, x + w / 2)
+    minY = Math.min(minY, y - h / 2)
+    maxY = Math.max(maxY, y + h / 2)
   })
   cy.nodes('[isCopy = 1]').forEach(n => {
     const x = n.position('x')
     const y = n.position('y')
-    minX = Math.min(minX, x); maxX = Math.max(maxX, x)
-    minY = Math.min(minY, y); maxY = Math.max(maxY, y)
+    const w = n.width() || 160
+    const h = n.height() || n.data('cardHeight') || 80
+    minX = Math.min(minX, x - w / 2)
+    maxX = Math.max(maxX, x + w / 2)
+    minY = Math.min(minY, y - h / 2)
+    maxY = Math.max(maxY, y + h / 2)
   })
-  const totalW = maxX - minX + 200  // 加 padding
+  const totalW = maxX - minX + 100
   const totalH = maxY - minY + 100
 
   console.log(`[runConceptLayout] Global: ${Math.round(totalW)} x ${Math.round(totalH)}`)
