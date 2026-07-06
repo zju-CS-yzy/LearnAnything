@@ -293,8 +293,12 @@ export function runTreeLayout(cy) {
 // ========== 概念层 dagre 布局 ==========
 
 /**
- * 概念节点布局（全局 dagre TB + 副本处理）
- * 策略：所有连通节点一起跑 dagre，dagre 自动处理 rank 分配
+ * 概念节点布局（分连通分量 → 每分量 dagre LR → 二维网格排列）
+ * 
+ * 策略：
+ * 1. 正确识别连通分量（无向图 BFS，避免单节点假树）
+ * 2. 每个连通分量独立跑 dagre LR（树内从左向右生长）
+ * 3. 多棵树按网格排列（从上到下、从左到右，每棵树独立区域）
  */
 export function runConceptLayout(cy) {
   // 清除之前可能创建的副本
@@ -332,8 +336,6 @@ export function runConceptLayout(cy) {
   const connectedNodes = allConceptNodes.filter(n => connectedNodeIds.has(n.id()))
   const orphanNodes = allConceptNodes.filter(n => !connectedNodeIds.has(n.id()))
 
-  console.log(`[runConceptLayout] Connected: ${connectedNodes.length} nodes, ${edgeList.length} edges, Orphan: ${orphanNodes.length}`)
-
   // 隐藏 chunk 节点和无关边
   cy.nodes().forEach(n => {
     const t = n.data('type')
@@ -347,98 +349,210 @@ export function runConceptLayout(cy) {
       e.style('display', 'none')
     }
   })
-
-  // 先隐藏所有概念节点，只显示有连接的
+  // 先隐藏所有概念节点
   allConceptNodes.forEach(n => n.style('display', 'none'))
 
-  // ===== 步骤1: 处理多入边节点（创建副本） =====
-  const nodeInDegree = {}
-  edgeList.forEach(e => {
-    nodeInDegree[e.target] = (nodeInDegree[e.target] || 0) + 1
-  })
+  // ===== 步骤1: 正确识别连通分量（无向图 BFS） =====
+  const components = []
+  const visited = new Set()
 
-  const copyNodes = []
-  const copyEdges = []
+  connectedNodeIds.forEach(startId => {
+    if (visited.has(startId)) return
 
-  connectedNodes.forEach(n => {
-    const nid = n.id()
-    const deg = nodeInDegree[nid] || 0
-    if (deg <= 1) return
+    const comp = new Set()
+    const stack = [startId]
 
-    // 找出指向该节点的所有边（按源节点排序确保稳定）
-    const incoming = edgeList.filter(e => e.target === nid).sort((a, b) => a.source.localeCompare(b.source))
+    while (stack.length > 0) {
+      const nid = stack.pop()
+      if (comp.has(nid)) continue
+      comp.add(nid)
+      visited.add(nid)
 
-    for (let j = 1; j < incoming.length; j++) {
-      const copyId = `${nid}_copy${j}`
-
-      copyNodes.push({
-        data: {
-          id: copyId,
-          label: n.data('label'),
-          cardLabel: n.data('cardLabel'),
-          cardHeight: n.data('cardHeight'),
-          type: n.data('type'),
-          description: n.data('description'),
-          parent_hint: n.data('parent_hint'),
-          source_chunks: n.data('source_chunks'),
-          originalId: nid,
-          isCopy: '1',
+      edgeList.forEach(e => {
+        if (e.source === nid && !comp.has(e.target)) {
+          stack.push(e.target)
         }
-      })
-
-      // 隐藏原边，添加副本边
-      incoming[j].edgeRef.style('display', 'none')
-      copyEdges.push({
-        data: {
-          id: `${incoming[j].source}_${incoming[j].type}_${copyId}`,
-          source: incoming[j].source,
-          target: copyId,
-          type: incoming[j].type,
-          label: incoming[j].type === 'SOLUTION' ? '解决' : '依赖',
-          isCopyEdge: '1',
+        if (e.target === nid && !comp.has(e.source)) {
+          stack.push(e.source)
         }
       })
     }
-  })
 
-  if (copyNodes.length > 0) cy.add(copyNodes)
-  if (copyEdges.length > 0) cy.add(copyEdges)
-
-  // ===== 步骤2: 收集所有要布局的节点和边 =====
-  let layoutCollection = cy.collection()
-
-  connectedNodes.forEach(n => { layoutCollection = layoutCollection.union(n) })
-  copyNodes.forEach(n => {
-    const el = cy.getElementById(n.data.id)
-    if (el.length > 0) layoutCollection = layoutCollection.union(el)
-  })
-
-  // 只收集仍然可见的边
-  edgeList.forEach(e => {
-    if (e.edgeRef.style('display') !== 'none') {
-      layoutCollection = layoutCollection.union(e.edgeRef)
+    if (comp.size > 0) {
+      components.push(comp)
     }
   })
-  copyEdges.forEach(e => {
-    const el = cy.getElementById(e.data.id)
-    if (el.length > 0) layoutCollection = layoutCollection.union(el)
+
+  console.log(`[runConceptLayout] Components: ${components.length}, nodes: ${connectedNodes.length}, edges: ${edgeList.length}`)
+
+  // ===== 步骤2: 对每个连通分量独立处理（dagre LR + 副本） =====
+  const compBboxes = []
+  const compInfos = []
+
+  components.forEach((compNodes, compIdx) => {
+    if (compNodes.size === 0) return
+
+    // 收集该分量的节点和边
+    const compCyNodes = []
+    compNodes.forEach(id => {
+      const el = cy.getElementById(id)
+      if (el.length > 0) compCyNodes.push(el)
+    })
+
+    const compEdgeList = edgeList.filter(e =>
+      compNodes.has(e.source) && compNodes.has(e.target)
+    )
+
+    // 处理多入边节点（创建副本）
+    const compInDegree = {}
+    compEdgeList.forEach(e => {
+      compInDegree[e.target] = (compInDegree[e.target] || 0) + 1
+    })
+
+    const copyNodes = []
+    const copyEdges = []
+
+    compNodes.forEach(nid => {
+      const deg = compInDegree[nid] || 0
+      if (deg <= 1) return
+
+      const incoming = compEdgeList
+        .filter(e => e.target === nid)
+        .sort((a, b) => a.source.localeCompare(b.source))
+
+      for (let j = 1; j < incoming.length; j++) {
+        const copyId = `${nid}_copy${j}_c${compIdx}`
+        const originalNode = cy.getElementById(nid)
+
+        copyNodes.push({
+          data: {
+            id: copyId,
+            label: originalNode.data('label'),
+            cardLabel: originalNode.data('cardLabel'),
+            cardHeight: originalNode.data('cardHeight'),
+            type: originalNode.data('type'),
+            description: originalNode.data('description'),
+            parent_hint: originalNode.data('parent_hint'),
+            source_chunks: originalNode.data('source_chunks'),
+            originalId: nid,
+            isCopy: '1',
+          }
+        })
+
+        incoming[j].edgeRef.style('display', 'none')
+        copyEdges.push({
+          data: {
+            id: `${incoming[j].source}_${incoming[j].type}_${copyId}`,
+            source: incoming[j].source,
+            target: copyId,
+            type: incoming[j].type,
+            label: incoming[j].type === 'SOLUTION' ? '解决' : '依赖',
+            isCopyEdge: '1',
+          }
+        })
+      }
+    })
+
+    if (copyNodes.length > 0) cy.add(copyNodes)
+    if (copyEdges.length > 0) cy.add(copyEdges)
+
+    // 构建布局集合
+    let layoutCollection = cy.collection()
+    compCyNodes.forEach(n => { layoutCollection = layoutCollection.union(n) })
+    copyNodes.forEach(n => {
+      const el = cy.getElementById(n.data.id)
+      if (el.length > 0) layoutCollection = layoutCollection.union(el)
+    })
+    compEdgeList.forEach(e => {
+      if (e.edgeRef.style('display') !== 'none') {
+        layoutCollection = layoutCollection.union(e.edgeRef)
+      }
+    })
+    copyEdges.forEach(e => {
+      const el = cy.getElementById(e.data.id)
+      if (el.length > 0) layoutCollection = layoutCollection.union(el)
+    })
+
+    // 对该分量跑 dagre LR
+    layoutCollection.layout({
+      name: 'dagre',
+      rankDir: 'LR',
+      rankSep: 100,
+      nodeSep: 45,
+      edgeSep: 12,
+      padding: 12,
+      fit: false,
+      animate: false,
+    }).run()
+
+    const bbox = layoutCollection.boundingBox()
+    compBboxes.push(bbox)
+    compInfos.push({
+      nodeCount: compNodes.size,
+      copyCount: copyNodes.length,
+      w: bbox.x2 - bbox.x1,
+      h: bbox.y2 - bbox.y1,
+    })
   })
 
-  console.log(`[runConceptLayout] Layout collection: ${layoutCollection.nodes().length} nodes, ${layoutCollection.edges().length} edges`)
+  // ===== 步骤3: 二维网格排列各分量 =====
+  // 按节点数从大到小排序（大的先放，便于平衡）
+  const order = compInfos.map((info, i) => ({ i, ...info }))
+    .sort((a, b) => b.nodeCount - a.nodeCount)
 
-  // ===== 步骤3: 全局 dagre 布局（TB 方向） =====
-  layoutCollection.layout({
-    name: 'dagre',
-    rankDir: 'TB',
-    rankSep: 80,
-    nodeSep: 40,
-    edgeSep: 15,
-    padding: 20,
-    fit: false,
-    animate: false,
-  }).run()
+  // 计算列宽（最大分量宽度 + 间距）
+  const maxCompW = Math.max(...compInfos.map(c => c.w), 200)
+  const colGap = 60
+  const colWidth = maxCompW + colGap
 
-  // ===== 步骤4: 显示节点并设置视图 =====
+  // 固定 3 列（确保不会单列堆叠）
+  const container = cy.container()
+  const containerW = container.clientWidth
+  const cols = Math.max(2, Math.min(3, Math.floor(containerW / colWidth)))
+
+  console.log(`[runConceptLayout] Grid: ${cols} cols, colWidth=${Math.round(colWidth)}, maxCompW=${Math.round(maxCompW)}`)
+
+  // 每列累积高度
+  const colHeights = new Array(cols).fill(0)
+  const rowGap = 40
+
+  order.forEach(({ i: compIdx, w, h }) => {
+    const bbox = compBboxes[compIdx]
+    const compNodes = components[compIdx]
+
+    // 选当前高度最小的列
+    let minCol = 0
+    for (let c = 1; c < cols; c++) {
+      if (colHeights[c] < colHeights[minCol]) minCol = c
+    }
+
+    // 目标位置
+    const targetX = minCol * colWidth + 30
+    const targetY = colHeights[minCol] + 30
+
+    const dx = targetX - bbox.x1
+    const dy = targetY - bbox.y1
+
+    // 移动该分量所有节点和副本
+    compNodes.forEach(id => {
+      const node = cy.getElementById(id)
+      if (node.length > 0) {
+        node.position('x', node.position('x') + dx)
+        node.position('y', node.position('y') + dy)
+      }
+      cy.nodes(`[originalId = "${id}"]`).forEach(copy => {
+        copy.position('x', copy.position('x') + dx)
+        copy.position('y', copy.position('y') + dy)
+      })
+    })
+
+    // 更新列高度
+    colHeights[minCol] = targetY + h + rowGap
+
+    console.log(`[runConceptLayout] Comp ${compIdx}: ${compNodes.size} nodes, col=${minCol}, size=${Math.round(w)}x${Math.round(h)}`)
+  })
+
+  // ===== 步骤4: 显示节点并计算全局 zoom =====
   connectedNodes.forEach(n => {
     n.style('display', 'element')
     n.style('opacity', 1)
@@ -448,22 +562,33 @@ export function runConceptLayout(cy) {
     n.style('opacity', 0.85)
   })
 
-  // 计算 bbox 并设置 zoom
-  const bbox = layoutCollection.boundingBox()
-  const container = cy.container()
-  const containerW = container.clientWidth
+  // 全局 bbox
+  let minX = Infinity, maxX = -Infinity
+  let minY = Infinity, maxY = -Infinity
+  connectedNodes.forEach(n => {
+    const x = n.position('x')
+    const y = n.position('y')
+    minX = Math.min(minX, x); maxX = Math.max(maxX, x)
+    minY = Math.min(minY, y); maxY = Math.max(maxY, y)
+  })
+  cy.nodes('[isCopy = 1]').forEach(n => {
+    const x = n.position('x')
+    const y = n.position('y')
+    minX = Math.min(minX, x); maxX = Math.max(maxX, x)
+    minY = Math.min(minY, y); maxY = Math.max(maxY, y)
+  })
+  const totalW = maxX - minX + 200  // 加 padding
+  const totalH = maxY - minY + 100
+
+  console.log(`[runConceptLayout] Global: ${Math.round(totalW)} x ${Math.round(totalH)}`)
+
   const containerH = container.clientHeight
-
-  console.log(`[runConceptLayout] BBox: ${Math.round(bbox.w)} x ${Math.round(bbox.h)}`)
-
-  const zoomByWidth = (containerW * 0.9) / bbox.w
-  const zoomByHeight = (containerH * 0.9) / bbox.h
+  const zoomByWidth = (containerW * 0.88) / totalW
+  const zoomByHeight = (containerH * 0.88) / totalH
   const zoom = Math.min(zoomByWidth, zoomByHeight, 0.5)
   cy.zoom(Math.max(zoom, 0.1))
   cy.pan({ x: 30, y: 30 })
 
   // 隐藏孤立节点
-  orphanNodes.forEach(n => {
-    n.style('display', 'none')
-  })
+  orphanNodes.forEach(n => n.style('display', 'none'))
 }
