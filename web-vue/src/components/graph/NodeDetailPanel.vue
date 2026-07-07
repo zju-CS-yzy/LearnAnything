@@ -32,13 +32,8 @@
           </div>
         </div>
 
-        <div class="info-section">
-          <div class="info-label">内容预览</div>
-          <div class="info-text">{{ node.text || node.description || '（暂无内容）' }}</div>
-        </div>
-
-        <!-- 概念节点专属 -->
-        <div v-if="node.description && !node.text" class="info-section">
+        <!-- 概念描述 -->
+        <div v-if="node.description" class="info-section">
           <div class="info-label">概念描述</div>
           <div class="info-text">{{ node.description }}</div>
         </div>
@@ -48,16 +43,34 @@
           <div class="info-text">{{ node.parent_hint }}</div>
         </div>
 
-        <div v-if="sourceChunksArray.length > 0" class="info-section">
-          <div class="info-label">来源 Chunk ({{ sourceChunksArray.length }} 个)</div>
-          <div class="source-chunk-list">
-            <span
-              v-for="chunk in sourceChunksArray"
-              :key="chunk"
-              class="source-chunk-tag"
-              @click="$emit('navigate-to-chunk', chunk)"
-            >{{ chunk }}</span>
+        <!-- 来源引用（人类可读） -->
+        <div v-if="sourceRefsArray.length > 0" class="info-section">
+          <div class="info-label">来源引用 ({{ sourceRefsArray.length }} 个)</div>
+          <div class="source-ref-list">
+            <div
+              v-for="(ref, idx) in sourceRefsArray"
+              :key="idx"
+              class="source-ref-item"
+            >
+              <span class="source-ref-num">{{ idx + 1 }}.</span>
+              <span class="source-ref-text">{{ ref }}</span>
+            </div>
           </div>
+        </div>
+
+        <!-- 来源 Chunk ID（技术参考，折叠显示） -->
+        <div v-if="sourceChunksArray.length > 0" class="info-section">
+          <details class="source-chunk-details">
+            <summary class="source-chunk-summary">来源 Chunk ID ({{ sourceChunksArray.length }} 个)</summary>
+            <div class="source-chunk-list">
+              <span
+                v-for="chunk in sourceChunksArray"
+                :key="chunk"
+                class="source-chunk-tag"
+                @click="$emit('navigate-to-chunk', chunk)"
+              >{{ chunk }}</span>
+            </div>
+          </details>
         </div>
 
         <!-- 概念分解（仅 chunk 节点） -->
@@ -145,6 +158,19 @@ const props = defineProps({
 })
 
 defineEmits(['close', 'extract', 'expand', 'focus', 'navigate-to-chunk'])
+
+// 解析 source_refs（人类可读的来源引用字符串数组）
+const sourceRefsArray = computed(() => {
+  const refs = props.node?.source_refs
+  if (!refs) return []
+  if (Array.isArray(refs)) return refs
+  // 尝试 JSON 解析
+  try {
+    const parsed = JSON.parse(refs)
+    if (Array.isArray(parsed)) return parsed
+  } catch { /* ignore */ }
+  return []
+})
 
 // 解析 source_chunks（可能是数组或字符串）
 const sourceChunksArray = computed(() => {
@@ -277,6 +303,53 @@ function relationLabel(relation) {
 .source-chunk-tag:hover {
   background: var(--primary-color, #3498db);
   color: #fff;
+}
+
+/* 来源引用（人类可读） */
+.source-ref-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 4px;
+}
+
+.source-ref-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  padding: 6px 10px;
+  background: var(--bg-hover, #f8f9fa);
+  border-radius: 4px;
+  font-size: var(--font-size-sm);
+  line-height: 1.5;
+}
+
+.source-ref-num {
+  flex-shrink: 0;
+  font-weight: 600;
+  color: var(--primary-color, #3498db);
+  font-size: var(--font-size-xs);
+}
+
+.source-ref-text {
+  color: var(--text-secondary, #555);
+  word-break: break-all;
+}
+
+/* Chunk ID 折叠详情 */
+.source-chunk-details {
+  margin-top: 4px;
+}
+
+.source-chunk-summary {
+  font-size: var(--font-size-xs);
+  color: var(--text-muted, #7f8c8d);
+  cursor: pointer;
+  user-select: none;
+}
+
+.source-chunk-summary:hover {
+  color: var(--primary-color, #3498db);
 }
 
 .info-actions {

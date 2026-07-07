@@ -246,6 +246,7 @@ function initCy() {
       description: node.data('description') || '',
       parent_hint: node.data('parent_hint') || '',
       source_chunks: node.data('source_chunks') || '',
+      source_refs: node.data('source_refs') || [],
     }
     if (isChunkNodeType(nodeType)) {
       loadConcepts(node.id())
@@ -400,6 +401,7 @@ async function loadConceptNodes() {
           parent_hint: c.parent_hint || '',
           source_chunks: sourceChunks,
           source_chunk_count: sourceChunks.length,
+          source_refs: c.source_refs || [],
         }
       }
     })
