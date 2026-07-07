@@ -1345,6 +1345,32 @@ def get_chunk_concepts(subject: str, chunk_id: str):
         raise HTTPException(status_code=500, detail=f"获取概念失败: {str(e)}")
 
 
+def _get_chunk_meta(graph_store, chunk_id: str) -> dict:
+    """
+    查询 Chunk 节点的元数据，构建人类可读的来源引用。
+    
+    Returns:
+        {"source": 文件名, "heading_path": 章节路径, "page_number": 页码}
+        或 None（chunk 不存在）
+    """
+    try:
+        conn = graph_store._ensure_db()
+        result = conn.execute(f"""
+            MATCH (ch:Chunk {{chunk_id: '{chunk_id}'}})
+            RETURN ch.source, ch.heading_path, ch.page_number
+        """)
+        if result.has_next():
+            row = result.get_next()
+            return {
+                "source": row[0] or "",
+                "heading_path": row[1] or "",
+                "page_number": int(row[2]) if row[2] is not None else 0,
+            }
+    except Exception:
+        pass
+    return None
+
+
 @app.get("/api/knowledge-graph/{subject}/concepts")
 def list_graph_concepts(subject: str, limit: int = 2000):
     """
@@ -1382,16 +1408,59 @@ def list_graph_concepts(subject: str, limit: int = 2000):
 
         # 3. 合并：优先使用 KùzuDB 的 ID，从 CSV 补充额外字段
         concepts = []
+        # 预加载 chunk 元数据缓存（避免重复查询）
+        chunk_meta_cache = {}
+        
         for node in db_nodes:
             db_id = node["id"]
             csv_info = csv_data.get(db_id, {})
+            
+            # 解析 source_chunks（KùzuDB 中是 JSON 字符串）
+            source_chunks_raw = node.get("source_chunks", "") or csv_info.get("source_chunks", "")
+            source_chunk_ids = []
+            if source_chunks_raw:
+                try:
+                    parsed = json.loads(source_chunks_raw)
+                    if isinstance(parsed, list):
+                        source_chunk_ids = parsed
+                except (json.JSONDecodeError, TypeError):
+                    # 可能是逗号分隔的字符串
+                    source_chunk_ids = [s.strip() for s in str(source_chunks_raw).split(",") if s.strip()]
+            
+            # 构建人类可读的 source_refs
+            source_refs = []
+            for chunk_id in source_chunk_ids:
+                if chunk_id in chunk_meta_cache:
+                    meta = chunk_meta_cache[chunk_id]
+                else:
+                    # 查询 Chunk 节点获取元数据
+                    meta = _get_chunk_meta(graph_store, chunk_id)
+                    chunk_meta_cache[chunk_id] = meta
+                
+                if meta:
+                    ref_parts = []
+                    if meta.get("source"):
+                        ref_parts.append(meta["source"])
+                    if meta.get("heading_path"):
+                        ref_parts.append(meta["heading_path"])
+                    if meta.get("page_number") and meta["page_number"] > 0:
+                        ref_parts.append(f"第 {meta['page_number']} 页")
+                    
+                    if ref_parts:
+                        source_refs.append(" | ".join(ref_parts))
+                    else:
+                        source_refs.append(chunk_id)  # fallback
+                else:
+                    source_refs.append(chunk_id)  # fallback
+            
             concepts.append({
                 "id": db_id,
                 "name": node["name"] or csv_info.get("name", ""),
                 "type": node["type"] or csv_info.get("type", ""),
                 "description": csv_info.get("description", ""),
                 "parent_hint": csv_info.get("parent_hint", ""),
-                "source_chunks": csv_info.get("source_chunks", ""),
+                "source_chunks": source_chunk_ids,
+                "source_refs": source_refs,
             })
 
         # 4. 补充 CSV 中有但 KùzuDB 中没有的概念（孤立概念）
@@ -1404,7 +1473,8 @@ def list_graph_concepts(subject: str, limit: int = 2000):
                     "type": csv_info.get("type", ""),
                     "description": csv_info.get("description", ""),
                     "parent_hint": csv_info.get("parent_hint", ""),
-                    "source_chunks": csv_info.get("source_chunks", ""),
+                    "source_chunks": [],
+                    "source_refs": [],
                 })
 
         return {
