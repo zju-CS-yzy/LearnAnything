@@ -905,128 +905,183 @@ class GraphStore:
 
 
     def add_concepts(self, chunk_id: str, concepts: List[Dict[str, Any]]) -> int:
-
         """
-
-        为指??chunk 添加概念节点和语义关系??        同一 chunk 内同名概念自动去重（保留第一个）??
+        为指定 chunk 添加原始概念节点（ExtractedConcept）。
+        同一 chunk 内同名概念自动去重（保留第一个）。
 
         Args:
-
             chunk_id: 来源 chunk ID
-
-            concepts: 概念列表，每个包??name, concept_type, relation, description
-
-
+            concepts: 概念列表，每个包含 name, concept_type, relation, description, parent_hint
 
         Returns:
-
-            成功添加的概念数??        """
-
+            成功添加的概念数量
+        """
         conn = self._ensure_db()
-
         added = 0
 
-
-
-        # 同一 chunk 内按概念名称去重（保留第一个出现的??
+        # 同一 chunk 内按概念名称去重
         seen_names = set()
-
         unique_concepts = []
-
         for concept in concepts:
-
             name = concept.get("name", "").strip()
-
             if name and name not in seen_names:
-
                 seen_names.add(name)
-
                 unique_concepts.append(concept)
 
-
-
         for concept in unique_concepts:
-
             concept_name = self._escape_cypher_string(concept.get("name", ""))
-
             if not concept_name:
-
                 continue
 
+            import hashlib
+            name_hash = hashlib.md5(concept_name.encode("utf-8")).hexdigest()[:6]
+            extracted_id = self._escape_cypher_string(
+                concept.get("id", f"{chunk_id}_{name_hash}")
+            )
+            concept_type = self._escape_cypher_string(
+                concept.get("concept_type", "definition")
+            )
+            extract_role = self._escape_cypher_string(
+                concept.get("relation", "DEFINES")
+            )
+            description = self._escape_cypher_string(
+                concept.get("description", "")
+            )
+            parent_hint = self._escape_cypher_string(
+                concept.get("parent_hint", "")
+            )
 
-
-            concept_id = self._escape_cypher_string(concept.get("id", f"concept_{chunk_id}_{concept_name}"))
-
-            concept_type = self._escape_cypher_string(concept.get("concept_type", "definition"))
-
-            relation = self._escape_cypher_string(concept.get("relation", "DEFINES"))
-
-            description = self._escape_cypher_string(concept.get("description", ""))
-
-
-
-            # 1. 创建或合??Concept 节点
-
+            # 创建 ExtractedConcept 节点
             merge_cypher = f"""
-
-                MERGE (c:Concept {{
-
-                    concept_id: '{concept_id}',
-
-                    name: '{concept_name}',
-
-                    concept_type: '{concept_type}',
-
-                    source_chunk: '{chunk_id}'
-
+                MERGE (e:ExtractedConcept {{
+                    extracted_id: '{extracted_id}'
                 }})
-
+                ON CREATE SET
+                    e.name = '{concept_name}',
+                    e.concept_type = '{concept_type}',
+                    e.extract_role = '{extract_role}',
+                    e.description = '{description}',
+                    e.parent_hint = '{parent_hint}',
+                    e.source_chunk = '{chunk_id}'
+                ON MATCH SET
+                    e.name = '{concept_name}',
+                    e.concept_type = '{concept_type}',
+                    e.extract_role = '{extract_role}',
+                    e.description = '{description}',
+                    e.parent_hint = '{parent_hint}',
+                    e.source_chunk = '{chunk_id}'
             """
-
             try:
-
                 self._execute(conn, merge_cypher)
-
             except Exception as e:
-
-                print(f"[GraphStore] 创建概念节点失败 {concept_id}: {e}")
-
+                print(f"[GraphStore] 创建 ExtractedConcept 节点失败 {extracted_id}: {e}")
                 continue
 
-
-
-            # 2. 创建 Chunk -> Concept 的语义关??
+            # 创建 Chunk -> ExtractedConcept 的 HAS_CONCEPT 关系
             rel_cypher = f"""
-
-                MATCH (ch:Chunk {{chunk_id: '{chunk_id}'}}), (co:Concept {{concept_id: '{concept_id}'}})
-
-                CREATE (ch)-[:{relation}]->(co)
-
+                MATCH (ch:Chunk {{chunk_id: '{chunk_id}'}}),
+                      (e:ExtractedConcept {{extracted_id: '{extracted_id}'}})
+                MERGE (ch)-[:HAS_CONCEPT]->(e)
             """
-
             try:
-
                 self._execute(conn, rel_cypher)
-
                 added += 1
-
             except Exception as e:
+                print(f"[GraphStore] 创建 HAS_CONCEPT 关系失败: {e}")
 
-                print(f"[GraphStore] 创建关系失败 {relation}: {e}")
-
-
-
-        # 3. 将完整概念信息保存到 JSON（供去重器和连接器使用）
-
+        # 保存完整概念信息到 JSONL
         self._save_concept_details(chunk_id, concepts)
 
-
-
-        print(f"[GraphStore] ??chunk {chunk_id} 添加 {added} 个概??")
-
+        print(f"[GraphStore] 为 chunk {chunk_id} 添加 {added} 个 ExtractedConcept")
         return added
 
+    def add_canonical_concepts(
+        self,
+        canonical_concepts: List[Dict[str, Any]],
+        derived_from_map: Dict[str, str] = None,
+    ) -> int:
+        """
+        添加全局去重后的 canonical 概念节点。
+        同时建立 ExtractedConcept -> CanonicalConcept 的 DERIVED_FROM 关系。
 
+        Args:
+            canonical_concepts: 去重后的 canonical 概念列表
+            derived_from_map: {extracted_id: canonical_id} 映射，用于建立 DERIVED_FROM 边
+
+        Returns:
+            成功添加的 canonical 概念数量
+        """
+        conn = self._ensure_db()
+        added = 0
+
+        for cc in canonical_concepts:
+            canonical_id = self._escape_cypher_string(cc.get("id", ""))
+            name = self._escape_cypher_string(cc.get("name", ""))
+            if not canonical_id or not name:
+                continue
+
+            concept_type = self._escape_cypher_string(cc.get("concept_type", ""))
+            description = self._escape_cypher_string(cc.get("description", ""))
+            parent_hint = self._escape_cypher_string(cc.get("parent_hint", ""))
+
+            import json
+            aliases = json.dumps(cc.get("aliases", []), ensure_ascii=False)
+            source_chunks = json.dumps(cc.get("source_chunks", []), ensure_ascii=False)
+
+            type_votes = cc.get("type_votes", {})
+            if not type_votes:
+                type_votes = {concept_type: 1} if concept_type else {}
+            type_votes_json = json.dumps(type_votes, ensure_ascii=False)
+
+            # 创建 CanonicalConcept 节点
+            merge_cypher = f"""
+                MERGE (c:CanonicalConcept {{
+                    canonical_id: '{canonical_id}'
+                }})
+                ON CREATE SET
+                    c.name = '{name}',
+                    c.concept_type = '{concept_type}',
+                    c.description = '{description}',
+                    c.parent_hint = '{parent_hint}',
+                    c.aliases = '{aliases}',
+                    c.source_chunks = '{source_chunks}',
+                    c.type_votes = '{type_votes_json}'
+                ON MATCH SET
+                    c.name = '{name}',
+                    c.concept_type = '{concept_type}',
+                    c.description = '{description}',
+                    c.parent_hint = '{parent_hint}',
+                    c.aliases = '{aliases}',
+                    c.source_chunks = '{source_chunks}',
+                    c.type_votes = '{type_votes_json}'
+            """
+            try:
+                self._execute(conn, merge_cypher)
+                added += 1
+            except Exception as e:
+                print(f"[GraphStore] 创建 CanonicalConcept 节点失败 {canonical_id}: {e}")
+                continue
+
+        # 建立 DERIVED_FROM 关系
+        if derived_from_map:
+            derived_count = 0
+            for extracted_id, canonical_id in derived_from_map.items():
+                safe_eid = self._escape_cypher_string(extracted_id)
+                safe_cid = self._escape_cypher_string(canonical_id)
+                cypher = f"""
+                    MATCH (e:ExtractedConcept {{extracted_id: '{safe_eid}'}}),
+                          (c:CanonicalConcept {{canonical_id: '{safe_cid}'}})
+                    MERGE (e)-[:DERIVED_FROM]->(c)
+                """
+                try:
+                    self._execute(conn, cypher)
+                    derived_count += 1
+                except Exception as e:
+                    print(f"[GraphStore] 创建 DERIVED_FROM 失败 {extracted_id}->{canonical_id}: {e}")
+            print(f"[GraphStore] 建立 {derived_count} 条 DERIVED_FROM 关系")
+
+        print(f"[GraphStore] 添加 {added} 个 CanonicalConcept")
+        return added
 
     def _save_concept_details(self, chunk_id: str, concepts: List[Dict[str, Any]]):
 
