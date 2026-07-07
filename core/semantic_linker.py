@@ -452,7 +452,8 @@ class SemanticLinker:
 
     def _load_canonical_concepts(self) -> List[Dict[str, Any]]:
         """
-        加载所有 canonical 概念（从 CSV 文件，去重后的）。
+        加载所有 canonical 概念。
+        优先从 KùzuDB 读取，fallback 到 CSV。
 
         返回的概念包含:
         - id: canonical 概念 ID
@@ -460,10 +461,16 @@ class SemanticLinker:
         - type: 概念类型
         - description: 描述
         - aliases: 别名列表
-        - embedding: embedding 向量
+        - embedding: embedding 向量（实时计算）
         - parent_hint: parent_hint
         - source_chunks: 来源 chunk ID 列表
         """
+        # 1. 优先从 KùzuDB 读取
+        db_concepts = self._load_from_kuzudb()
+        if db_concepts:
+            return db_concepts
+
+        # 2. Fallback: 从 CSV 读取（兼容旧数据）
         csv_concepts = self._load_from_csv()
 
         merged = []
@@ -480,6 +487,52 @@ class SemanticLinker:
             })
 
         return merged
+
+    def _load_from_kuzudb(self) -> List[Dict[str, Any]]:
+        """
+        从 KùzuDB 读取 CanonicalConcept 节点。
+        embedding 需要实时计算（不在 KùzuDB 中存储）。
+        """
+        try:
+            nodes = self.graph_store.get_canonical_concepts(limit=10000)
+            if not nodes:
+                return []
+
+            # 为每个 canonical 概念计算 embedding
+            result = []
+            for node in nodes:
+                name = node.get("name", "")
+                if not name:
+                    continue
+
+                # 实时计算 embedding
+                try:
+                    emb = self._get_embedding(name)
+                except Exception:
+                    emb = None
+
+                # 解析 source_chunks（JSON 字符串）
+                source_chunks_raw = node.get("source_chunks", "[]")
+                try:
+                    source_chunks = json.loads(source_chunks_raw) if isinstance(source_chunks_raw, str) else source_chunks_raw
+                except json.JSONDecodeError:
+                    source_chunks = []
+
+                result.append({
+                    "id": node.get("id", ""),
+                    "name": name,
+                    "type": node.get("type", ""),
+                    "description": node.get("description", ""),
+                    "aliases": [],  # KùzuDB 中的 aliases 也是 JSON，需要解析
+                    "embedding": emb,
+                    "parent_hint": node.get("parent_hint", ""),
+                    "source_chunks": source_chunks,
+                })
+
+            return result
+        except Exception as e:
+            print(f"[SemanticLinker] 从 KùzuDB 读取 canonical 概念失败: {e}")
+            return []
 
     def _load_from_csv(self) -> Dict[str, Dict]:
         """
