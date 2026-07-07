@@ -117,6 +117,11 @@ class SemanticLinker:
         self.embedding_threshold = embedding_threshold
         self.llm_threshold = llm_threshold
 
+        # 初始化 embedding 服务
+        from core.embedding import EmbeddingManager
+        self.embeddings = EmbeddingManager()
+        self._embedding_cache = {}
+
     # ========== 核心 API ==========
 
     def link_all(self, paradigm: str = "engineering") -> Dict[str, Any]:
@@ -418,6 +423,20 @@ class SemanticLinker:
 
     # ========== 相似度计算 ==========
 
+    def _get_embedding(self, text: str) -> List[float]:
+        """获取文本的 embedding 向量。"""
+        if not text:
+            return [0.0] * 2048
+        try:
+            emb = self._embedding_cache.get(text)
+            if emb is not None:
+                return emb
+            emb = self.embeddings.embed_single(text)
+            self._embedding_cache[text] = emb
+            return emb
+        except Exception:
+            return [0.0] * 2048
+
     def _compute_similarity(self, parent: Dict, child: Dict) -> float:
         """
         计算两个概念的 embedding 相似度。
@@ -491,25 +510,32 @@ class SemanticLinker:
     def _load_from_kuzudb(self) -> List[Dict[str, Any]]:
         """
         从 KùzuDB 读取 CanonicalConcept 节点。
-        embedding 需要实时计算（不在 KùzuDB 中存储）。
+        embedding 使用批量计算（减少 API 调用次数）。
         """
         try:
             nodes = self.graph_store.get_canonical_concepts(limit=10000)
             if not nodes:
                 return []
 
-            # 为每个 canonical 概念计算 embedding
+            # 批量计算所有概念的 embedding
+            names = [n.get("name", "") for n in nodes if n.get("name", "").strip()]
+            if names:
+                try:
+                    embs = self.embeddings.embed(names)
+                    name_to_emb = {name: emb for name, emb in zip(names, embs)}
+                except Exception as e:
+                    print(f"[SemanticLinker] 批量 embedding 计算失败: {e}")
+                    name_to_emb = {}
+            else:
+                name_to_emb = {}
+
             result = []
             for node in nodes:
                 name = node.get("name", "")
                 if not name:
                     continue
 
-                # 实时计算 embedding
-                try:
-                    emb = self._get_embedding(name)
-                except Exception:
-                    emb = None
+                emb = name_to_emb.get(name)
 
                 # 解析 source_chunks（JSON 字符串）
                 source_chunks_raw = node.get("source_chunks", "[]")
@@ -518,12 +544,19 @@ class SemanticLinker:
                 except json.JSONDecodeError:
                     source_chunks = []
 
+                # 解析 aliases（JSON 字符串）
+                aliases_raw = node.get("aliases", "[]")
+                try:
+                    aliases = json.loads(aliases_raw) if isinstance(aliases_raw, str) else aliases_raw
+                except json.JSONDecodeError:
+                    aliases = []
+
                 result.append({
                     "id": node.get("id", ""),
                     "name": name,
                     "type": node.get("type", ""),
                     "description": node.get("description", ""),
-                    "aliases": [],  # KùzuDB 中的 aliases 也是 JSON，需要解析
+                    "aliases": aliases,
                     "embedding": emb,
                     "parent_hint": node.get("parent_hint", ""),
                     "source_chunks": source_chunks,
@@ -621,8 +654,8 @@ class SemanticLinker:
                 safe_id = esc(node_id)
                 safe_name = esc(node_name)
                 merge_node_cypher = f"""
-                    MERGE (c:Concept {{
-                        concept_id: '{safe_id}'
+                    MERGE (c:CanonicalConcept {{
+                        canonical_id: '{safe_id}'
                     }})
                     ON CREATE SET c.name = '{safe_name}'
                 """
@@ -637,8 +670,8 @@ class SemanticLinker:
             safe_relation = esc(edge['relation_type'])
             confidence = float(edge.get('confidence', 0.0))
             cypher = f"""
-                MATCH (p:Concept {{concept_id: '{safe_parent_id}'}}),
-                      (c:Concept {{concept_id: '{safe_child_id}'}})
+                MATCH (p:CanonicalConcept {{canonical_id: '{safe_parent_id}'}}),
+                      (c:CanonicalConcept {{canonical_id: '{safe_child_id}'}})
                 CREATE (p)-[:{safe_relation} {{confidence: {confidence}}}]->(c)
             """
             try:
