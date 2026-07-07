@@ -1528,7 +1528,7 @@ class GraphStore:
 
                     MATCH (p:CanonicalConcept)-[r:{rel_type}]->(c:CanonicalConcept)
 
-                    RETURN p.concept_id, c.concept_id, r.confidence
+                    RETURN p.canonical_id, c.canonical_id, r.confidence
 
                     LIMIT {limit}
 
