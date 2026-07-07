@@ -95,43 +95,25 @@ class ConceptDeduper:
             概念列表，每个包含 id, name, concept_type, source_chunk, relation, description, parent_hint
         """
         # 先获取所有 Concept 节点
-        nodes = self.graph_store.get_concept_nodes(limit=10000)
+        nodes = self.graph_store.get_extracted_concepts(limit=10000)
 
         # 从 JSONL 文件加载详细描述信息
         details = self.graph_store._load_concept_details()
 
-        # 为每个概念补充关系信息和详细描述
+        # 为每个 ExtractedConcept 补充 JSONL 中的详细描述
         concepts = []
         for node in nodes:
-            # 获取该概念关联的所有 chunks
-            chunk_concepts = self.graph_store.get_concepts_for_chunk(node.get("source_chunk", ""))
-            for cc in chunk_concepts:
-                if cc.get("name") == node.get("name"):
-                    concept_id = node.get("id", "")
-                    detail = details.get(concept_id, {})
-                    concepts.append({
-                        "id": concept_id,
-                        "name": node.get("name"),
-                        "concept_type": node.get("type", "definition"),
-                        "relation": cc.get("relation", "DEFINES"),
-                        "source_chunk": node.get("source_chunk", ""),
-                        "description": detail.get("description", cc.get("description", "")),
-                        "parent_hint": detail.get("parent_hint", ""),
-                    })
-                    break
-            else:
-                # 如果找不到对应关系，仍然保留
-                concept_id = node.get("id", "")
-                detail = details.get(concept_id, {})
-                concepts.append({
-                    "id": concept_id,
-                    "name": node.get("name"),
-                    "concept_type": node.get("type", "definition"),
-                    "relation": "DEFINES",
-                    "source_chunk": node.get("source_chunk", ""),
-                    "description": detail.get("description", ""),
-                    "parent_hint": detail.get("parent_hint", ""),
-                })
+            concept_id = node.get("id", "")
+            detail = details.get(concept_id, {})
+            concepts.append({
+                "id": concept_id,
+                "name": node.get("name"),
+                "concept_type": node.get("type", "definition"),
+                "extract_role": node.get("extract_role", "DEFINES"),
+                "source_chunk": node.get("source_chunk", ""),
+                "description": detail.get("description", node.get("description", "")),
+                "parent_hint": detail.get("parent_hint", node.get("parent_hint", "")),
+            })
 
         return concepts
 
@@ -251,11 +233,68 @@ class ConceptDeduper:
                 "embedding": canonical_embedding,
             })
 
-        # 5. 更新 KùzuDB（可选，后续实现）
-        # 注意：KùzuDB 的 MERGE 不支持修改已有节点 ID，需要删除后重建
-        # 当前版本先输出去重结果，不更新数据库（避免数据丢失风险）
+        # 5. 构建 canonical_concepts 列表（含 type_votes）
+        canonical_concepts = []
+        derived_from_map = {}  # {extracted_id: canonical_id}
 
-        # 同时保存 "原始名称 → canonical ID" 映射表（供 SemanticLinker 使用）
+        for canonical_name, merged_names in canonical_groups.items():
+            # 统计所有来源 chunks 和原始概念
+            source_chunks = set()
+            original_concepts = []  # 属于这个 canonical group 的所有原始概念
+            for c in all_concepts:
+                if c["name"] in merged_names:
+                    source_chunks.add(c["source_chunk"])
+                    original_concepts.append(c)
+                    # 建立 extracted_id -> canonical_id 映射
+                    derived_from_map[c["id"]] = self._generate_canonical_id(canonical_name)
+
+            # type_votes: 记录类型分布
+            type_counts = defaultdict(int)
+            for c in original_concepts:
+                type_counts[c["concept_type"]] += 1
+
+            # dominant type（投票制）
+            dominant_type = max(type_counts, key=type_counts.get) if type_counts else "definition"
+
+            canonical_id = self._generate_canonical_id(canonical_name)
+
+            # 收集所有描述（取最长的一个作为 canonical description）
+            all_descriptions = [c["description"] for c in original_concepts if c["description"]]
+            canonical_description = max(all_descriptions, key=len) if all_descriptions else ""
+
+            # 收集 parent_hint（取最常见的非空值）
+            hint_counts = defaultdict(int)
+            for c in original_concepts:
+                if c.get("parent_hint", "").strip():
+                    hint_counts[c["parent_hint"].strip()] += 1
+            canonical_hint = max(hint_counts, key=hint_counts.get) if hint_counts else ""
+
+            # 生成 canonical embedding
+            canonical_embedding = self._get_embedding(canonical_name)
+
+            canonical_concepts.append({
+                "id": canonical_id,
+                "name": canonical_name,
+                "aliases": merged_names,
+                "alias_count": len(merged_names),
+                "concept_type": dominant_type,
+                "type_votes": dict(type_counts),
+                "source_chunks": list(source_chunks),
+                "source_chunk_count": len(source_chunks),
+                "description": canonical_description,
+                "parent_hint": canonical_hint,
+                "embedding": canonical_embedding,
+            })
+
+        # 6. 写入 KùzuDB
+        print(f"[ConceptDeduper] 写入 {len(canonical_concepts)} 个 CanonicalConcept 到 KùzuDB...")
+        added = self.graph_store.add_canonical_concepts(
+            canonical_concepts,
+            derived_from_map=derived_from_map,
+        )
+        print(f"[ConceptDeduper] 成功写入 {added} 个 canonical 概念")
+
+        # 7. 保存 "原始名称 → canonical ID" 映射表（供 SemanticLinker 使用）
         self._save_name_mapping(canonical_map, canonical_groups)
 
         return canonical_concepts
