@@ -126,7 +126,6 @@
 
         <!-- 操作按钮 -->
         <div class="info-actions">
-          <button class="btn btn-sm btn-primary" @click="$emit('expand')">🔍 展开邻居</button>
           <button class="btn btn-sm" @click="$emit('focus')">🎯 聚焦</button>
         </div>
       </div>

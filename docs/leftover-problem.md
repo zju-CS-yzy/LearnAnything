@@ -2,6 +2,58 @@
 
 ---
 
+## 2026-07-07 新增/更新
+
+### ✅ 已完成
+
+#### 1. 四层数据模型 v2.0
+- **状态**: ✅ **已完成**
+- **Schema 变更**:
+  - Chunk -(HAS_CONCEPT)-> ExtractedConcept -(DERIVED_FROM)-> CanonicalConcept -(SOLUTION/DEPENDS_ON)-> CanonicalConcept
+  - 删除旧关系：REQUIRES/IMPLEMENTS/HAS_SUB/HAS_IMPL/DEFINES/HAS_LAW/APPLIES_TO/EXTENDS
+- **关键提交**: `2b61f42`, `41e90be`, `b8f453a`, `a559d86`, `3fb426c`, `2dd13d8`, `f71105c`
+- **数据**: 553 CanonicalConcept, 364 语义边 (SOLUTION 131 + DEPENDS_ON 233)
+
+#### 2. 详情面板来源引用
+- **状态**: ✅ **已完成**
+- **内容**: canonical 概念节点显示人类可读的来源引用（文件名|章节|页码），Chunk ID 折叠显示
+
+### 🔴 遗留问题
+
+#### LA-030: 部分 PDF 文档未提取出概念
+- **状态**: 🔴 **高优先级**
+- **描述**: generic_v1 学科导入了 4 篇文档（164 chunks），但概念提取只涉及 2 篇
+  - AI大模型公司项目落地实战.pdf (120 chunks) → 提取出概念
+  - AI大模型高校千行百业实战.pdf (40 chunks) → ❌ 未提取出任何概念
+  - Graph RAG前沿研究.pdf (2 chunks) → ❌ 未提取出任何概念
+- **根因**: 未知，需调查 SemanticExtractor 的提取逻辑或文档内容
+- **影响**: 图谱来源单一，知识覆盖不完整
+
+#### LA-031: PDF 导入缺少章节/页码信息
+- **状态**: 🔴 **高优先级**
+- **描述**: PDF 分块后 heading_path 为空，page_number 为 0，导致来源引用只有文件名
+- **根因**: 当前 PDF 文本提取只保留了纯文本，没有保留章节结构和页码
+- **影响**: 来源引用信息不完整，用户无法追溯到具体章节段落
+- **方向**: 需要重新设计 PDF 提取流程，保留 heading_path 和 page_number
+
+#### LA-032: 批量 embedding API 400 错误
+- **状态**: 🟡 **中优先级**
+- **描述**: SemanticLinker Stage 2/3（embedding 相似度 + LLM 确认）无法执行
+- **根因**: 智谱 embedding-3 API 批量请求返回 400
+- **影响**: Stage 1 (parent_hint) 已覆盖主要连接，Stage 2/3 可暂不处理
+
+#### LA-029 (更新): 概念节点详情来源信息
+- **状态**: ✅ **已修复**
+- **说明**: 详情面板已显示来源引用（文件名），但章节页码信息待 LA-031 解决后自动改善
+
+### ✅ 已解决并归档
+
+#### LA-028: 孤立概念过多 → 四层模型解决
+- **解决**: CanonicalConcept 层有 364 条语义边，无孤立节点
+- **归档**: 2026-07-07
+
+---
+
 ## 2026-07-06 新增/更新
 
 ### ✅ 已完成
