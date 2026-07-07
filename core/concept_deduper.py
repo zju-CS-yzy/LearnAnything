@@ -200,7 +200,7 @@ class ConceptDeduper:
             relation_counts = defaultdict(int)
             for c in all_concepts:
                 if c["name"] in merged_names:
-                    relation_counts[c["relation"]] += 1
+                    relation_counts[c.get("extract_role", "DEFINES")] += 1
             dominant_relation = max(relation_counts, key=relation_counts.get) if relation_counts else "DEFINES"
 
             canonical_id = self._generate_canonical_id(canonical_name)
@@ -218,20 +218,6 @@ class ConceptDeduper:
 
             # 生成 canonical embedding
             canonical_embedding = self._get_embedding(canonical_name)
-
-            canonical_concepts.append({
-                "id": canonical_id,
-                "name": canonical_name,
-                "aliases": merged_names,  # 所有被合并的别名
-                "alias_count": len(merged_names),
-                "concept_type": dominant_type,
-                "relation": dominant_relation,
-                "source_chunks": list(source_chunks),
-                "source_chunk_count": len(source_chunks),
-                "description": canonical_description,
-                "parent_hint": canonical_hint,
-                "embedding": canonical_embedding,
-            })
 
         # 5. 构建 canonical_concepts 列表（含 type_votes）
         canonical_concepts = []
@@ -377,7 +363,7 @@ class ConceptDeduper:
                     ";".join(aliases),
                     c["alias_count"],
                     c["concept_type"],
-                    c["relation"],
+                    c.get("extract_role", ""),
                     ",".join(source_chunks),
                     c["source_chunk_count"],
                     c.get("description", ""),
