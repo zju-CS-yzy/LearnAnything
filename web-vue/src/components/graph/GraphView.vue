@@ -373,19 +373,31 @@ async function loadConceptNodes() {
     }
     const data = await resp.json()
     const conceptNodes = (data.concepts || []).map(c => {
-      // 解析 source_chunks（可能是逗号分隔字符串或 JSON 字符串）
+      // 解析 source_chunks（后端返回的可能是数组、JSON 字符串或逗号分隔字符串）
       let sourceChunks = []
-      const sc = c.source_chunks || ''
-      if (sc) {
+      const sc = c.source_chunks || []
+      if (Array.isArray(sc)) {
+        sourceChunks = sc
+      } else if (typeof sc === 'string' && sc) {
         try {
-          // 尝试 JSON 解析
           const parsed = JSON.parse(sc)
-          if (Array.isArray(parsed)) {
-            sourceChunks = parsed
-          }
+          sourceChunks = Array.isArray(parsed) ? parsed : [sc]
         } catch {
-          // JSON 解析失败，按逗号分隔
           sourceChunks = sc.split(',').map(s => s.trim()).filter(Boolean)
+        }
+      }
+      
+      // 解析 source_refs（后端返回的可能是数组）
+      let sourceRefs = []
+      const sr = c.source_refs || []
+      if (Array.isArray(sr)) {
+        sourceRefs = sr
+      } else if (typeof sr === 'string' && sr) {
+        try {
+          const parsed = JSON.parse(sr)
+          sourceRefs = Array.isArray(parsed) ? parsed : [sr]
+        } catch {
+          sourceRefs = [sr]
         }
       }
       
@@ -401,7 +413,7 @@ async function loadConceptNodes() {
           parent_hint: c.parent_hint || '',
           source_chunks: sourceChunks,
           source_chunk_count: sourceChunks.length,
-          source_refs: c.source_refs || [],
+          source_refs: sourceRefs,
         }
       }
     })
