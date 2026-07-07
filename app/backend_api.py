@@ -1378,7 +1378,7 @@ def list_graph_concepts(subject: str, limit: int = 2000):
         # 2. 从 KùzuDB 读取概念节点（确保 ID 与边一致）
         graph_store = GraphStore(f"{subject}_v1")
         graph_store.init_schema()
-        db_nodes = graph_store.get_concept_nodes(limit=limit)
+        db_nodes = graph_store.get_canonical_concepts(limit=limit)
 
         # 3. 合并：优先使用 KùzuDB 的 ID，从 CSV 补充额外字段
         concepts = []

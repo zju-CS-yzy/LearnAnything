@@ -59,181 +59,88 @@ class GraphStore:
     # Schema 定义（Cypher DDL??
 
     SCHEMA_DEFINITIONS = [
-
-        # 节点类型
-
+        # Layer 1: Chunk 节点（文档片段）
         """CREATE NODE TABLE Chunk (
-
             chunk_id STRING,
-
             text STRING,
-
             heading_path STRING,
-
             source STRING,
-
             page_number INT64,
-
             chunk_type STRING,
-
             PRIMARY KEY(chunk_id)
-
         )""",
 
-        """CREATE NODE TABLE Concept (
-
-            concept_id STRING,
-
+        # Layer 2: ExtractedConcept 节点（原始概念，chunk 内去重）
+        """CREATE NODE TABLE ExtractedConcept (
+            extracted_id STRING,
             name STRING,
-
             concept_type STRING,
-
+            extract_role STRING,
+            description STRING,
+            parent_hint STRING,
             source_chunk STRING,
-
-            PRIMARY KEY(concept_id)
-
+            PRIMARY KEY(extracted_id)
         )""",
 
-        # 结构层关系（Phase 1：确定性关系）
+        # Layer 3: CanonicalConcept 节点（全局去重概念）
+        """CREATE NODE TABLE CanonicalConcept (
+            canonical_id STRING,
+            name STRING,
+            concept_type STRING,
+            description STRING,
+            parent_hint STRING,
+            aliases STRING,
+            source_chunks STRING,
+            type_votes STRING,
+            PRIMARY KEY(canonical_id)
+        )""",
 
+        # Layer 1 → Layer 1: 结构层关系（Phase 1：确定性关系）
         """CREATE REL TABLE BELONGS_TO (
-
             FROM Chunk TO Chunk,
-
             MANY_MANY
-
         )""",
-
         """CREATE REL TABLE HAS_PARENT (
-
             FROM Chunk TO Chunk,
-
             MANY_MANY
-
         )""",
-
         """CREATE REL TABLE ADJACENT_TO (
-
             FROM Chunk TO Chunk,
-
             source_page INT64,
-
             MANY_MANY
-
         )""",
 
-        # 语义层关系（Phase 2：LLM提取??    
-
-    """CREATE REL TABLE DEFINES (
-
-            FROM Chunk TO Concept,
-
+        # Layer 1 → Layer 2: Chunk 提取出的原始概念
+        """CREATE REL TABLE HAS_CONCEPT (
+            FROM Chunk TO ExtractedConcept,
             MANY_MANY
-
         )""",
 
-        """CREATE REL TABLE HAS_LAW (
-
-            FROM Chunk TO Concept,
-
+        # Layer 2 → Layer 3: 原始概念归属于全局 canonical 概念
+        """CREATE REL TABLE DERIVED_FROM (
+            FROM ExtractedConcept TO CanonicalConcept,
             MANY_MANY
-
         )""",
 
-        """CREATE REL TABLE APPLIES_TO (
-
-            FROM Chunk TO Concept,
-
-            MANY_MANY
-
-        )""",
-
-        """CREATE REL TABLE EXTENDS (
-
-            FROM Chunk TO Concept,
-
-            MANY_MANY
-
-        )""",
-
-        # 工程分解范式：Chunk -> Concept 关系
-
-        """CREATE REL TABLE REQUIRES (
-
-            FROM Chunk TO Concept,
-
-            MANY_MANY
-
-        )""",
-
-        """CREATE REL TABLE IMPLEMENTS (
-
-            FROM Chunk TO Concept,
-
-            MANY_MANY
-
-        )""",
-
-        """CREATE REL TABLE HAS_SUB (
-
-            FROM Chunk TO Concept,
-
-            MANY_MANY
-
-        )""",
-
-        """CREATE REL TABLE HAS_IMPL (
-
-            FROM Chunk TO Concept,
-
-            MANY_MANY
-
-        )""",
-
-        """CREATE REL TABLE PREREQUISITE (
-
-            FROM Concept TO Concept,
-
-            MANY_MANY
-
-        )""",
-
-        # 语义层：概念间连接（Phase 2.5: 全局语义推断??    
-
-    """CREATE REL TABLE SOLUTION (
-
-            FROM Concept TO Concept,
-
+        # Layer 3 → Layer 3: 语义连接（Phase 2.5: 全局语义推断）
+        """CREATE REL TABLE SOLUTION (
+            FROM CanonicalConcept TO CanonicalConcept,
             confidence DOUBLE,
-
             MANY_MANY
-
         )""",
-
         """CREATE REL TABLE DEPENDS_ON (
-
-            FROM Concept TO Concept,
-
+            FROM CanonicalConcept TO CanonicalConcept,
             confidence DOUBLE,
-
             MANY_MANY
-
         )""",
 
-        # 用户层关系（Phase 3：交互式??    
-
-    """CREATE REL TABLE USER_DEFINED (
-
+        # 用户层关系（Phase 3：交互式）
+        """CREATE REL TABLE USER_DEFINED (
             FROM Chunk TO Chunk,
-
             rel_type STRING,
-
             note STRING,
-
             MANY_MANY
-
         )""",
-
     ]
 
 
@@ -757,7 +664,7 @@ class GraphStore:
 
         # 节点统计
 
-        for label in ["Chunk", "Concept"]:
+        for label in ["Chunk", "ExtractedConcept", "CanonicalConcept"]:
 
             try:
 
@@ -775,7 +682,7 @@ class GraphStore:
 
         # 关系统计
 
-        for rel_type in ["BELONGS_TO", "HAS_PARENT", "ADJACENT_TO", "DEFINES", "REQUIRES", "SOLUTION", "DEPENDS_ON"]:
+        for rel_type in ["BELONGS_TO", "HAS_PARENT", "ADJACENT_TO", "HAS_CONCEPT", "DERIVED_FROM", "SOLUTION", "DEPENDS_ON", "USER_DEFINED"]:
 
             try:
 
@@ -1304,7 +1211,7 @@ class GraphStore:
 
 
 
-    def get_concept_nodes(self, limit: int = 500) -> List[Dict[str, Any]]:
+    def get_canonical_concepts(self, limit: int = 500) -> List[Dict[str, Any]]:
 
         """
 
@@ -1330,9 +1237,9 @@ class GraphStore:
 
             result = self._execute(conn, f"""
 
-                MATCH (c:Concept)
+                MATCH (c:CanonicalConcept)
 
-                RETURN c.concept_id, c.name, c.concept_type, c.source_chunk
+                RETURN c.canonical_id, c.name, c.concept_type, c.source_chunks
 
                 LIMIT {limit}
 
@@ -1363,6 +1270,42 @@ class GraphStore:
         return nodes
 
 
+
+    def get_extracted_concepts(self, limit: int = 10000) -> List[Dict[str, Any]]:
+        """
+        获取所有 ExtractedConcept 节点。
+
+        Args:
+            limit: 最大返回数量
+
+        Returns:
+            ExtractedConcept 节点列表
+        """
+        conn = self._ensure_db()
+        nodes = []
+
+        try:
+            result = self._execute(conn, f"""
+                MATCH (e:ExtractedConcept)
+                RETURN e.extracted_id, e.name, e.concept_type, e.extract_role,
+                       e.description, e.parent_hint, e.source_chunk
+                LIMIT {limit}
+            """)
+            while result.has_next():
+                row = result.get_next()
+                nodes.append({
+                    "id": row[0],
+                    "name": row[1],
+                    "type": row[2],
+                    "extract_role": row[3],
+                    "description": row[4],
+                    "parent_hint": row[5],
+                    "source_chunk": row[6],
+                })
+        except Exception as e:
+            print(f"[GraphStore] 获取 ExtractedConcept 失败: {e}")
+
+        return nodes
 
     def get_semantic_edges(self, limit: int = 200) -> List[Dict[str, Any]]:
 
@@ -1524,7 +1467,7 @@ class GraphStore:
 
                 result = self._execute(conn, f"""
 
-                    MATCH (p:Concept)-[r:{rel_type}]->(c:Concept)
+                    MATCH (p:CanonicalConcept)-[r:{rel_type}]->(c:CanonicalConcept)
 
                     RETURN p.concept_id, c.concept_id, r.confidence
 
