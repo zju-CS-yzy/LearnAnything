@@ -230,17 +230,17 @@ class GraphStore:
             force: 如果??True，删除已有数据库并重新创??        """
 
         if force and self.db_path.exists():
-
-            # 关闭连接后删??            self._db = None
-
+            # 关闭连接后删除
+            self._db = None
             self._conn = None
-
+            # 清除全局缓存中的旧 Database 实例
+            db_path_str = str(self.db_path)
+            with _db_cache_lock:
+                if db_path_str in _db_cache:
+                    del _db_cache[db_path_str]
             if self.db_path.is_dir():
-
                 shutil.rmtree(self.db_path)
-
             else:
-
                 self.db_path.unlink()
 
 
