@@ -106,6 +106,7 @@
         @extract="extractConcepts"
         @expand="expandNeighbors"
         @focus="focusNode"
+        @navigate-to-chunk="navigateToChunk"
       />
     </div>
 
@@ -139,9 +140,16 @@
             <div class="modal-label">别名</div>
             <div class="modal-aliases">{{ selectedConcept.aliases.join(' | ') }}</div>
           </div>
-          <div v-if="selectedConcept.source_chunks" class="modal-section">
-            <div class="modal-label">来源 Chunk</div>
-            <div class="modal-sources">{{ selectedConcept.source_chunk_count }} 个 chunk</div>
+          <div v-if="selectedConcept.source_chunks && selectedConcept.source_chunks.length > 0" class="modal-section">
+            <div class="modal-label">来源 Chunk ({{ selectedConcept.source_chunk_count }} 个)</div>
+            <div class="modal-source-list">
+              <span
+                v-for="chunk in selectedConcept.source_chunks"
+                :key="chunk"
+                class="modal-source-tag"
+                @click="navigateToChunk(chunk)"
+              >{{ chunk }}</span>
+            </div>
           </div>
         </div>
       </div>
@@ -364,6 +372,22 @@ async function loadConceptNodes() {
     }
     const data = await resp.json()
     const conceptNodes = (data.concepts || []).map(c => {
+      // 解析 source_chunks（可能是逗号分隔字符串或 JSON 字符串）
+      let sourceChunks = []
+      const sc = c.source_chunks || ''
+      if (sc) {
+        try {
+          // 尝试 JSON 解析
+          const parsed = JSON.parse(sc)
+          if (Array.isArray(parsed)) {
+            sourceChunks = parsed
+          }
+        } catch {
+          // JSON 解析失败，按逗号分隔
+          sourceChunks = sc.split(',').map(s => s.trim()).filter(Boolean)
+        }
+      }
+      
       const { cardLabel, cardHeight } = buildUMLCardLabel(c.name || '', c.type || 'concept', c.description || '')
       return {
         data: {
@@ -374,7 +398,8 @@ async function loadConceptNodes() {
           type: c.type || 'concept',
           description: c.description || '',
           parent_hint: c.parent_hint || '',
-          source_chunks: c.source_chunks || '',
+          source_chunks: sourceChunks,
+          source_chunk_count: sourceChunks.length,
         }
       }
     })
@@ -785,6 +810,22 @@ function showConceptDetail(concept) {
   showConceptModal.value = true
 }
 
+function navigateToChunk(chunkId) {
+  // 在图谱中高亮并定位到指定 chunk
+  if (!cy) return
+  const target = cy.getElementById(chunkId)
+  if (target.length > 0) {
+    cy.animate({
+      fit: { eles: target, padding: 100 },
+      duration: 500,
+    })
+    target.select()
+    showConceptModal.value = false
+  } else {
+    alert(`Chunk ${chunkId} 不在当前视图中`)
+  }
+}
+
 // ========== 生命周期 ==========
 onMounted(() => {
   initCy()
@@ -1103,6 +1144,29 @@ watch(currentSubject, () => {
 .modal-sources {
   font-size: var(--font-size-sm);
   color: var(--text-primary, #2c3e50);
+}
+
+.modal-source-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 4px;
+}
+
+.modal-source-tag {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: var(--font-size-xs);
+  background: var(--bg-hover, #f0f0f0);
+  color: var(--text-secondary, #555);
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.modal-source-tag:hover {
+  background: var(--primary-color, #3498db);
+  color: #fff;
 }
 
 .type-badge {
