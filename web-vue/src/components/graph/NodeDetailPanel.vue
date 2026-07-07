@@ -48,9 +48,16 @@
           <div class="info-text">{{ node.parent_hint }}</div>
         </div>
 
-        <div v-if="node.source_chunks" class="info-section">
-          <div class="info-label">来源 Chunk</div>
-          <div class="info-text mono">{{ node.source_chunks }}</div>
+        <div v-if="sourceChunksArray.length > 0" class="info-section">
+          <div class="info-label">来源 Chunk ({{ sourceChunksArray.length }} 个)</div>
+          <div class="source-chunk-list">
+            <span
+              v-for="chunk in sourceChunksArray"
+              :key="chunk"
+              class="source-chunk-tag"
+              @click="$emit('navigate-to-chunk', chunk)"
+            >{{ chunk }}</span>
+          </div>
         </div>
 
         <!-- 概念分解（仅 chunk 节点） -->
@@ -126,7 +133,9 @@
  * 显示选中节点的基本信息、概念分解、语义关联
  */
 
-defineProps({
+import { computed } from 'vue'
+
+const props = defineProps({
   node: { type: Object, default: null },
   concepts: { type: Array, default: () => [] },
   conceptsLoading: { type: Boolean, default: false },
@@ -135,7 +144,21 @@ defineProps({
   links: { type: Array, default: () => [] },
 })
 
-defineEmits(['close', 'extract', 'expand', 'focus'])
+defineEmits(['close', 'extract', 'expand', 'focus', 'navigate-to-chunk'])
+
+// 解析 source_chunks（可能是数组或字符串）
+const sourceChunksArray = computed(() => {
+  const sc = props.node?.source_chunks
+  if (!sc) return []
+  if (Array.isArray(sc)) return sc
+  // 尝试 JSON 解析
+  try {
+    const parsed = JSON.parse(sc)
+    if (Array.isArray(parsed)) return parsed
+  } catch { /* ignore */ }
+  // 按逗号分隔
+  return String(sc).split(',').map(s => s.trim()).filter(Boolean)
+})
 
 function typeLabel(type) {
   const map = {
@@ -190,18 +213,16 @@ function relationLabel(relation) {
   align-items: center;
   justify-content: space-between;
   margin-bottom: 16px;
-  padding-bottom: 12px;
-  border-bottom: 1px solid var(--border-color, #e0e0e0);
 }
 
 .info-header h3 {
-  margin: 0;
   font-size: var(--font-size-md);
+  margin: 0;
   color: var(--text-primary, #2c3e50);
 }
 
 .info-section {
-  margin-bottom: 14px;
+  margin-bottom: 12px;
 }
 
 .info-label {
@@ -235,6 +256,29 @@ function relationLabel(relation) {
   border-radius: 4px;
 }
 
+.source-chunk-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 4px;
+}
+
+.source-chunk-tag {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: var(--font-size-xs);
+  background: var(--bg-hover, #f0f0f0);
+  color: var(--text-secondary, #555);
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.source-chunk-tag:hover {
+  background: var(--primary-color, #3498db);
+  color: #fff;
+}
+
 .info-actions {
   display: flex;
   gap: 8px;
@@ -258,191 +302,96 @@ function relationLabel(relation) {
 .empty-text { font-size: var(--font-size-md); font-weight: 600; margin-bottom: 4px; }
 .empty-hint { font-size: var(--font-size-xs); }
 
-/* 概念分解 */
-.concept-section {
-  border-top: 1px dashed var(--border-color, #e0e0e0);
-  padding-top: 12px;
+.type-badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: var(--font-size-xs);
+  font-weight: 600;
 }
 
+.type-definition { background: #e8f4f8; color: #2980b9; }
+.type-law { background: #f0f8e8; color: #27ae60; }
+.type-application { background: #f8f0e8; color: #e67e22; }
+.type-extension { background: #f8e8f0; color: #8e44ad; }
+.type-requirement { background: #ffe8e8; color: #c0392b; }
+.type-sub_requirement { background: #fff0e8; color: #d35400; }
+.type-technology { background: #e8f0ff; color: #2980b9; }
+.type-sub_technology { background: #e8f8ff; color: #16a085; }
+.type-concept { background: #f0f0f0; color: #7f8c8d; }
+
+/* 概念分解 */
+.concept-section { margin-top: 16px; }
 .concept-label {
   display: flex;
   align-items: center;
-  gap: 8px;
+  justify-content: space-between;
 }
-
-.concept-actions { margin-bottom: 10px; }
-
-.concept-list {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.concept-item {
-  padding: 10px 12px;
-  border-radius: 6px;
-  border-left: 3px solid #3498db;
+.concept-actions { margin-top: 8px; }
+.concept-empty {
+  font-size: var(--font-size-sm);
+  color: var(--text-muted, #7f8c8d);
+  padding: 12px;
   background: var(--bg-hover, #f8f9fa);
-  transition: all 0.2s ease;
+  border-radius: 4px;
+  text-align: center;
 }
 
-.concept-item:hover {
-  background: var(--bg-active, #ecf0f1);
-  transform: translateX(2px);
+.concept-list { margin-top: 8px; }
+.concept-item {
+  padding: 8px 12px;
+  margin-bottom: 6px;
+  border-radius: 6px;
+  background: var(--bg-hover, #f8f9fa);
+  border-left: 3px solid #ccc;
 }
+.concept-item.relation-defines { border-left-color: #3498db; }
+.concept-item.relation-has_law { border-left-color: #27ae60; }
+.concept-item.relation-applies_to { border-left-color: #e67e22; }
+.concept-item.relation-extends { border-left-color: #8e44ad; }
 
 .concept-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
-  margin-bottom: 4px;
+  margin-bottom: 2px;
 }
-
-.concept-name {
-  font-weight: 600;
-  font-size: var(--font-size-sm);
-  color: var(--text-primary, #2c3e50);
-}
-
+.concept-name { font-weight: 600; font-size: var(--font-size-sm); }
 .concept-badge {
-  font-size: 10px;
-  padding: 2px 6px;
+  font-size: var(--font-size-xs);
+  padding: 1px 6px;
   border-radius: 3px;
-  background: #f0f0f0;
-  color: #666;
-  flex-shrink: 0;
+  background: #e0e0e0;
 }
-
-.concept-relation { margin-bottom: 4px; }
-
+.concept-relation { margin-top: 2px; }
 .relation-tag {
-  font-size: 11px;
-  color: var(--text-muted, #7f8c8d);
-  font-style: italic;
-}
-
-.concept-desc {
-  font-size: 12px;
-  color: var(--text-secondary, #555);
-  line-height: 1.4;
-  margin-top: 4px;
-}
-
-.concept-empty {
   font-size: var(--font-size-xs);
   color: var(--text-muted, #7f8c8d);
-  padding: 8px 0;
-  text-align: center;
-  font-style: italic;
+}
+.concept-desc {
+  font-size: var(--font-size-xs);
+  color: var(--text-secondary, #555);
+  margin-top: 4px;
+  line-height: 1.4;
 }
 
 /* 语义关联 */
-.concept-links {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-
+.concept-links { margin-top: 8px; }
 .concept-link-item {
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 6px 8px;
-  background: var(--bg-elevated, #f8f9fa);
-  border-radius: 4px;
-  font-size: var(--font-size-xs);
-}
-
-.link-direction {
-  font-weight: 700;
-  color: var(--text-secondary, #666);
-}
-
-.link-type {
-  padding: 2px 6px;
-  border-radius: 3px;
-  font-size: 10px;
-  font-weight: 600;
-}
-
-.link-type.link-solution {
-  background: #e67e22;
-  color: #fff;
-}
-
-.link-type.link-depends_on {
-  background: #9b59b6;
-  color: #fff;
-}
-
-.link-target {
-  color: var(--text-primary, #2c3e50);
-  font-weight: 500;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.spinner-inline {
-  display: inline-block;
-  width: 12px;
-  height: 12px;
-  border: 2px solid rgba(0, 0, 0, 0.1);
-  border-top-color: var(--accent-primary, #3498db);
-  border-radius: 50%;
-  animation: spin 0.8s linear infinite;
-}
-
-@keyframes spin {
-  to { transform: rotate(360deg); }
-}
-
-.btn {
-  padding: 6px 12px;
-  border: 1px solid var(--border-color, #ddd);
-  border-radius: 4px;
-  background: var(--bg-card, #fff);
-  color: var(--text-primary, #2c3e50);
+  padding: 4px 0;
   font-size: var(--font-size-sm);
-  cursor: pointer;
-  transition: all 0.2s;
 }
-
-.btn:hover {
-  background: var(--bg-hover, #f0f0f0);
-}
-
-.btn-primary {
-  background: var(--accent-primary, #3498db);
-  color: #fff;
-  border-color: var(--accent-primary, #3498db);
-}
-
-.btn-primary:hover {
-  background: #2980b9;
-}
-
-.btn:disabled {
-  opacity: 0.6;
-  cursor: not-allowed;
-}
-
-.btn-sm {
-  padding: 4px 10px;
+.link-direction { color: var(--text-muted, #7f8c8d); font-weight: 600; }
+.link-type {
   font-size: var(--font-size-xs);
+  padding: 1px 6px;
+  border-radius: 3px;
+  background: #e0e0e0;
 }
-
-.btn-icon {
-  background: none;
-  border: none;
-  font-size: var(--font-size-md);
-  cursor: pointer;
-  color: var(--text-muted, #7f8c8d);
-  padding: 4px;
-}
-
-.btn-icon:hover {
-  color: var(--text-primary, #2c3e50);
-}
+.link-solution { background: #e8f4f8; color: #2980b9; }
+.link-depends_on { background: #ffe8e8; color: #c0392b; }
+.link-target { color: var(--text-secondary, #555); }
 </style>
