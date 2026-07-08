@@ -294,15 +294,28 @@ export function runTreeLayout(cy) {
   if (allNodes.length > 0) {
     const bbox = allNodes.boundingBox()
     const container = cy.container()
-    const containerW = container.clientWidth
-    const containerH = container.clientHeight
+    const containerW = container.clientWidth || 800
+    const containerH = container.clientHeight || 600
 
-    const zoomByWidth = (containerW * 0.9) / bbox.w
-    const zoomByHeight = (containerH * 0.8) / bbox.h
+    // 防止 bbox 为 0 导致 zoom 为 Infinity
+    const bboxW = Math.max(bbox.w, 1)
+    const bboxH = Math.max(bbox.h, 1)
+
+    const zoomByWidth = (containerW * 0.9) / bboxW
+    const zoomByHeight = (containerH * 0.8) / bboxH
     const zoom = Math.min(zoomByWidth, zoomByHeight, 1.0)
 
-    cy.zoom(Math.max(zoom, 0.1))
-    cy.pan({ x: 30, y: 30 })
+    const finalZoom = Math.max(zoom, 0.1)
+    if (isFinite(finalZoom)) {
+      cy.zoom(finalZoom)
+      cy.pan({ x: 30, y: 30 })
+    } else {
+      console.warn('[runTreeLayout] Invalid zoom calculated, using default', { zoom, bboxW, bboxH, containerW, containerH })
+      cy.zoom(0.5)
+      cy.pan({ x: 30, y: 30 })
+    }
+  } else {
+    console.warn('[runTreeLayout] No nodes to layout')
   }
 }
 

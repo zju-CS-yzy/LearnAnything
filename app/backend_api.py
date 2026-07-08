@@ -1094,9 +1094,12 @@ def build_knowledge_graph(subject: str, body: Dict[str, Any] = None):
         # Phase 2: 如果传入了 paradigm（非默认 theory 或明确请求），自动执行语义层
         semantic_result = None
         dedupe_result = None
+        link_result = None
         if body.get("with_semantic", True):
             semantic_result = builder.extract_all_concepts()
             dedupe_result = builder.dedupe_concepts()
+            # Phase 2.5: 构建语义连接
+            link_result = builder.link_concepts(paradigm=paradigm)
 
         return {
             "subject": subject,
@@ -1104,6 +1107,7 @@ def build_knowledge_graph(subject: str, body: Dict[str, Any] = None):
             **result,
             "semantic": semantic_result,
             "dedupe": dedupe_result,
+            "link": link_result,
         }
     except Exception as e:
         import traceback
