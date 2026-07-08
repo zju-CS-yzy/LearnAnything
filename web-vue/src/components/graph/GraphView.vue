@@ -24,28 +24,12 @@
           <button class="btn btn-sm" @click="searchNode">搜索</button>
         </div>
         <div class="toolbar-group">
-          <button class="btn btn-sm" @click="showChunkView" title="文档视图">📄 文档</button>
           <button class="btn btn-sm" @click="showConceptView" title="概念视图">🧩 概念</button>
           <button class="btn btn-sm" @click="fitGraph" title="适应窗口">⬜ 适应</button>
           <button class="btn btn-sm" @click="resetLayout" title="重置布局">🔄 重置</button>
           <button class="btn btn-sm btn-primary" @click="openBuildOptions" :disabled="isBuilding">
             <span v-if="isBuilding" class="spinner-inline"></span>
             <span v-else>🏗️ 构建图谱</span>
-          </button>
-        </div>
-        <div class="toolbar-group">
-          <select v-model="selectedParadigm" class="paradigm-select" title="选择分解范式">
-            <option value="theory">理论归纳</option>
-            <option value="engineering">工程分解</option>
-            <option value="hierarchical">层级归纳</option>
-          </select>
-          <button class="btn btn-sm btn-secondary" @click="batchExtract" :disabled="isBatchExtracting">
-            <span v-if="isBatchExtracting" class="spinner-inline"></span>
-            <span v-else>🧠 批量提取</span>
-          </button>
-          <button class="btn btn-sm btn-secondary" @click="dedupeConcepts" :disabled="isDeduping">
-            <span v-if="isDeduping" class="spinner-inline"></span>
-            <span v-else>🔗 去重</span>
           </button>
         </div>
         <div class="toolbar-group">
@@ -206,11 +190,6 @@ const conceptsLoading = ref(false)
 const isExtracting = ref(false)
 const conceptNodeLinks = ref([])
 const selectedParadigm = ref('theory')
-
-// 批量提取和去重
-const isBatchExtracting = ref(false)
-const isDeduping = ref(false)
-const conceptTable = ref([])
 
 // 概念弹窗
 const selectedConcept = ref(null)
@@ -578,30 +557,6 @@ function resetLayout() {
   }
 }
 
-function showChunkView() {
-  cy.nodes('[isCopy = 1]').remove()
-  cy.edges('[isCopyEdge = 1]').remove()
-
-  cy.nodes().forEach(n => {
-    const t = n.data('type')
-    if (t === 'child' || t === 'parent' || t === 'markdown') {
-      n.style('display', 'element')
-      n.style('opacity', 1)
-    } else {
-      n.style('display', 'none')
-    }
-  })
-  cy.edges().forEach(e => {
-    const t = e.data('type')
-    if (t === 'BELONGS_TO' || t === 'ADJACENT_TO') {
-      e.style('display', 'element')
-    } else {
-      e.style('display', 'none')
-    }
-  })
-
-  runTreeLayout(cy)
-}
 
 function showConceptView() {
   // 先显示概念节点，隐藏 chunk 节点
@@ -753,51 +708,6 @@ async function extractConcepts() {
     alert('提取失败，请检查网络连接')
   } finally {
     isExtracting.value = false
-  }
-}
-
-async function batchExtract() {
-  isBatchExtracting.value = true
-  try {
-    const resp = await fetch(
-      `${window.location.origin}/api/knowledge-graph/${currentSubject.value}/build/semantic`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ paradigm: selectedParadigm.value }),
-      }
-    )
-    if (resp.ok) {
-      const data = await resp.json()
-      alert(`批量提取完成！处理了 ${data.chunks_processed} 个 chunk，成功 ${data.chunks_extracted} 个`)
-    } else {
-      alert(`批量提取失败: ${await resp.text()}`)
-    }
-  } catch (e) {
-    alert('批量提取失败')
-  } finally {
-    isBatchExtracting.value = false
-  }
-}
-
-async function dedupeConcepts() {
-  isDeduping.value = true
-  try {
-    const resp = await fetch(
-      `${window.location.origin}/api/knowledge-graph/${currentSubject.value}/dedupe`,
-      { method: 'POST' }
-    )
-    if (resp.ok) {
-      const data = await resp.json()
-      conceptTable.value = data.concepts || []
-      alert(`去重完成！${data.canonical_concepts || 0} 个去重后概念`)
-    } else {
-      alert(`去重失败: ${await resp.text()}`)
-    }
-  } catch (e) {
-    alert('去重失败')
-  } finally {
-    isDeduping.value = false
   }
 }
 
