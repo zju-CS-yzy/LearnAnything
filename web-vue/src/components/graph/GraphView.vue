@@ -242,6 +242,7 @@ function initCy() {
       chunk_type: node.data('type'),
       source: node.data('source'),
       page_number: node.data('page_number'),
+      heading_path: node.data('heading_path') || '',
       text: node.data('text') || '',
       description: node.data('description') || '',
       parent_hint: node.data('parent_hint') || '',
@@ -643,6 +644,7 @@ function searchNode() {
       type: first.data('type'),
       source: first.data('source'),
       page_number: first.data('page_number'),
+      heading_path: first.data('heading_path') || '',
       text: first.data('text') || '',
       description: first.data('description') || '',
     }
