@@ -55,7 +55,11 @@ PARADIGM_LEVELS = {
     },
     "theory": {
         "levels": ["definition", "law", "application", "extension"],
-        "transitions": {},  # 暂不支持理论归纳的全局连接
+        "transitions": {
+            ("definition", "law"): "DEPENDS_ON",      # 规律依赖于定义
+            ("law", "application"): "SOLUTION",       # 应用实现/验证规律
+            ("application", "extension"): "SOLUTION",  # 扩展基于应用
+        },
     },
     "hierarchical": {
         "levels": ["fact", "concept", "method", "evaluation"],

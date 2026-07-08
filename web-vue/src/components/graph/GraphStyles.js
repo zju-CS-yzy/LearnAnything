@@ -58,7 +58,7 @@ export function buildCyStyles() {
     },
     // ========== 概念节点样式（UML 类图卡片风格）==========
     {
-      selector: 'node[type="concept"], node[type="requirement"], node[type="sub_requirement"], node[type="technology"], node[type="sub_technology"]',
+      selector: 'node[type="concept"], node[type="requirement"], node[type="sub_requirement"], node[type="technology"], node[type="sub_technology"], node[type="definition"], node[type="law"], node[type="application"], node[type="extension"]',
       style: {
         'label': 'data(cardLabel)',
         'text-wrap': 'wrap',
@@ -94,9 +94,9 @@ export function buildCyStyles() {
         'border-color': '#2980b9',
       }
     },
-    // 通用概念
+    // 通用概念（含 Phase 2 提取的 definition/law/application/extension）
     {
-      selector: 'node[type="concept"]',
+      selector: 'node[type="concept"], node[type="definition"], node[type="law"], node[type="application"], node[type="extension"]',
       style: {
         'background-color': '#2ecc71',
         'border-color': '#27ae60',
