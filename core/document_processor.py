@@ -182,12 +182,15 @@ class DocumentProcessor:
         **核心改进**：
         - 先收集所有页面文本，全局分 Child chunk（跨页段落不会被切断）
         - 再按页码聚合 Parent chunk（每页一个 Parent，用于引用溯源）
+        - 提取标题结构（从书签/文本特征），填充 heading_path
         
         策略：
         1. 逐页提取文本，检测页面类型
-        2. 扫描件页面 OCR 处理
-        3. 公式密集型页面标记待处理
-        4. 所有页面文本收集后，调用 chunk_document 全局分块
+        2. 提取标题结构（TOC 或文本推断）
+        3. 扫描件页面 OCR 处理
+        4. 公式密集型页面标记待处理
+        5. 所有页面文本收集后，调用 chunk_document 全局分块
+        6. 为每个 chunk 填充 heading_path 和 page_number
         """
         doc = fitz.open(str(path))
         total_pages = len(doc)
@@ -195,8 +198,10 @@ class DocumentProcessor:
         formula_pages = []  # (img_bytes, metadata)
         vlm_pages = []      # (img_bytes, metadata, page_type)
         
-        # Step 1: 收集所有页面文本，同时渲染需要 VLM 的页面为图片
+        # === Step 1: 收集所有页面文本，同时提取标题结构 ===
         pages = []
+        # page_headings: {page_num: heading_path_string}
+        page_headings = self._extract_page_headings(doc)
         
         for page_num in range(total_pages):
             page = doc[page_num]
@@ -228,9 +233,8 @@ class DocumentProcessor:
                 # 文字型页面，直接加入
                 pages.append({"text": text, "metadata": page_meta})
         
-        doc.close()
-        
         # Step 2: 处理 OCR 页面（扫描件）
+        # 注意：doc 必须在 OCR/VLM 处理完成后才关闭，因为 page 对象需要有效的 doc 引用
         if ocr_pages:
             ocr_results = self._ocr_pdf_pages(ocr_pages)
             for ocr_text, ocr_meta in ocr_results:
@@ -249,37 +253,169 @@ class DocumentProcessor:
                 if text:
                     pages.append({"text": text, "metadata": meta})
         
+        # 所有 page 对象处理完成后，关闭 doc
+        doc.close()
+        
         # 按页码排序
         pages.sort(key=lambda p: p["metadata"].get("page_number", 0))
         
-        # Step 4: 全局 Parent-Child 双层分块
-        # 先全局分 Child（跨页段落不会被切断），再按页码聚合 Parent
+        # Step 5: 全局 Parent-Child 双层分块
         chunker = DocumentChunker()
         parent_chunks, child_chunks = chunker.chunk_document(
             pages,
-            document_name=metadata.get("source", path.name)  # 使用原始文件名，而非临时路径
+            document_name=metadata.get("source", path.name)
         )
         
-        # Step 5: 统一输出格式
+        # Step 6: 统一输出格式，填充 heading_path 和 page_number
         result = []
         
-        # Parent chunks
+        # Parent chunks: page_number 单值，heading_path 来自 page_headings
         for parent in parent_chunks:
+            page_num = parent["metadata"].get("page_number", 0)
+            heading_path = page_headings.get(page_num, "")
+            parent_meta = {
+                **parent.get("metadata", {}),
+                "page_number": page_num,
+                "heading_path": heading_path,
+            }
             result.append({
+                "id": parent.get("id", ""),
                 "text": parent["text"],
-                "metadata": {**metadata, **parent.get("metadata", {})},
+                "metadata": {**metadata, **parent_meta},
                 "source": metadata["source"],
             })
         
-        # Child chunks（每个子 chunk 包含 parent_ids 用于溯源）
+        # Child chunks: 取第一个页码作为 page_number，heading_path 来自该页
         for child in child_chunks:
+            page_nums = child["metadata"].get("page_numbers", [1])
+            first_page = page_nums[0] if page_nums else 1
+            heading_path = page_headings.get(first_page, "")
+            child_meta = {
+                **child.get("metadata", {}),
+                "page_number": first_page,
+                "heading_path": heading_path,
+                # 移除 page_numbers 列表，统一使用 page_number 单值
+            }
+            # 清理掉旧的 page_numbers 字段（如果存在）
+            child_meta.pop("page_numbers", None)
             result.append({
+                "id": child.get("id", ""),
                 "text": child["text"],
-                "metadata": {**metadata, **child.get("metadata", {})},
+                "metadata": {**metadata, **child_meta},
                 "source": metadata["source"],
             })
         
         return result
+
+    def _extract_page_headings(self, doc: fitz.Document) -> Dict[int, str]:
+        """
+        提取 PDF 每页对应的标题路径。
+        
+        优先使用 PDF 书签（TOC），否则从文本特征推断。
+        返回: {page_number: heading_path}
+        """
+        # 先尝试从 TOC 获取标题结构
+        toc = doc.get_toc()
+        if toc:
+            return self._build_headings_from_toc(toc)
+        
+        # 无 TOC，从每页文本推断标题
+        page_headings = {}
+        for page_num in range(len(doc)):
+            page = doc[page_num]
+            heading = self._infer_page_heading(page)
+            if heading:
+                page_headings[page_num + 1] = heading
+        
+        return page_headings
+
+    def _build_headings_from_toc(self, toc: List[tuple]) -> Dict[int, str]:
+        """
+        从 PDF TOC（书签）构建每页的标题路径。
+        
+        TOC 格式: [(level, title, page), ...]
+        返回: {page_number: "一级标题 > 二级标题 > ..."}
+        """
+        # 构建标题层级栈
+        heading_stack = []
+        page_headings = {}
+        
+        for level, title, page in toc:
+            # 维护层级栈：当前 level 时，弹出比它深的层级
+            while len(heading_stack) >= level:
+                heading_stack.pop()
+            heading_stack.append(title)
+            
+            # 该页及后续页（直到下一个标题页）都使用这个标题路径
+            heading_path = " > ".join(heading_stack)
+            page_headings[page] = heading_path
+        
+        # 填充空白页：没有明确标题的页，继承最近的标题
+        if page_headings:
+            max_page = max(page_headings.keys())
+            last_heading = ""
+            for p in range(1, max_page + 1):
+                if p in page_headings:
+                    last_heading = page_headings[p]
+                elif last_heading:
+                    page_headings[p] = last_heading
+        
+        return page_headings
+
+    def _infer_page_heading(self, page: fitz.Page) -> Optional[str]:
+        """
+        从单页文本推断标题。
+        
+        策略：
+        1. 优先取粗体/大号字体的第一行短文本
+        2. 回退到文本开头的短行（可能是标题）
+        3. 尝试检测数字编号标题（如 "1. 标题"、"一、标题"）
+        """
+        # 获取文本块及字体信息
+        blocks = page.get_text("dict").get("blocks", [])
+        
+        # 策略1: 找粗体/大号字体的短文本
+        best_candidate = None
+        best_size = 0
+        
+        for b in blocks:
+            if "lines" not in b:
+                continue
+            for line in b["lines"]:
+                for span in line["spans"]:
+                    text = span["text"].strip()
+                    if not text or len(text) > 60:
+                        continue
+                    
+                    font_name = span.get("font", "").lower()
+                    font_size = span.get("size", 0)
+                    
+                    # Bold 字体特征
+                    is_bold = any(kw in font_name for kw in ["bold", "heavy", "black", "hei", "shuhei", "puhuiti-h"])
+                    
+                    # 标题候选：粗体 + 相对较大字号（至少 10pt） + 短文本
+                    if is_bold and font_size >= 10 and len(text) >= 3:
+                        if font_size > best_size:
+                            best_size = font_size
+                            best_candidate = text
+        
+        if best_candidate:
+            return best_candidate
+        
+        # 策略2: 从文本开头找短行
+        text = page.get_text().strip()
+        lines = [l.strip() for l in text.split('\n') if l.strip()]
+        
+        for line in lines[:5]:  # 只看前 5 行
+            if len(line) < 60 and len(line) >= 3:
+                # 标题模式检测
+                if re.match(r'^(\d+[\.、\s]+|第[一二三四五六七八九十\d]+[章节篇]|\([\d一二三四五六七八九十]+\)|[一二三四五六七八九十]+[、．])', line):
+                    return line
+                # 纯文字短行（可能也是标题）
+                if not re.search(r'[，。；、]', line) and len(line) < 20:
+                    return line
+        
+        return None
 
     def _detect_page_type(self, page: fitz.Page, text: str) -> str:
         """

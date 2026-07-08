@@ -24,6 +24,11 @@
           <div class="info-value">{{ node.page_number || '-' }}</div>
         </div>
 
+        <div v-if="isChunkNode && node.heading_path" class="info-section">
+          <div class="info-label">章节路径</div>
+          <div class="info-value">{{ node.heading_path }}</div>
+        </div>
+
         <!-- 概念节点标识（非 chunk 节点显示） -->
         <div v-if="!isChunkNode" class="info-section">
           <div class="info-label">节点类型</div>
