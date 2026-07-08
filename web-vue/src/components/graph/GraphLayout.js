@@ -211,25 +211,40 @@ export function runTreeLayout(cy) {
   const treeGap = 120
 
   const subtreeHeight = {}
-  function calcHeight(nodeId) {
+  function calcHeight(nodeId, visiting = new Set()) {
+    // 循环引用保护：如果正在访问此节点，返回1避免无限递归
+    if (visiting.has(nodeId)) {
+      console.warn(`[runTreeLayout] Circular reference detected at ${nodeId}`)
+      return 1
+    }
     if (subtreeHeight[nodeId] !== undefined) return subtreeHeight[nodeId]
     const children = treeChildren[nodeId] || []
     if (children.length === 0) {
       subtreeHeight[nodeId] = 1
       return 1
     }
-    const count = children.reduce((sum, cid) => sum + calcHeight(cid), 0)
+    visiting.add(nodeId)
+    const count = children.reduce((sum, cid) => sum + calcHeight(cid, visiting), 0)
+    visiting.delete(nodeId)
     subtreeHeight[nodeId] = count
     return count
   }
 
   const positions = {}
-  function assignPos(nodeId, depth, startY) {
+  function assignPos(nodeId, depth, startY, visiting = new Set()) {
+    // 循环引用保护
+    if (visiting.has(nodeId)) {
+      positions[nodeId] = { x: depth * layerWidth, y: startY }
+      return startY + nodeGap
+    }
+    visiting.add(nodeId)
+
     const x = depth * layerWidth
     const children = treeChildren[nodeId] || []
 
     if (children.length === 0) {
       positions[nodeId] = { x, y: startY }
+      visiting.delete(nodeId)
       return startY + nodeGap
     }
 
@@ -237,7 +252,7 @@ export function runTreeLayout(cy) {
     const childCenters = []
 
     children.forEach(childId => {
-      const childEndY = assignPos(childId, depth + 1, currentY)
+      const childEndY = assignPos(childId, depth + 1, currentY, visiting)
       childCenters.push((currentY + childEndY - nodeGap) / 2)
       currentY = childEndY
     })
@@ -246,6 +261,7 @@ export function runTreeLayout(cy) {
     const lastY = childCenters[childCenters.length - 1]
     positions[nodeId] = { x, y: (firstY + lastY) / 2 }
 
+    visiting.delete(nodeId)
     return currentY
   }
 
