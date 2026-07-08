@@ -604,6 +604,25 @@ function showChunkView() {
 }
 
 function showConceptView() {
+  // 先显示概念节点，隐藏 chunk 节点
+  cy.nodes().forEach(n => {
+    const t = n.data('type')
+    if (t === 'child' || t === 'parent' || t === 'markdown') {
+      n.style('display', 'none')
+    } else {
+      n.style('display', 'element')
+      n.style('opacity', 1)
+    }
+  })
+  cy.edges().forEach(e => {
+    const t = e.data('type')
+    if (t === 'SOLUTION' || t === 'DEPENDS_ON') {
+      e.style('display', 'element')
+    } else {
+      e.style('display', 'none')
+    }
+  })
+  
   runConceptLayout(cy)
 }
 
