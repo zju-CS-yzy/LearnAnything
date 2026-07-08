@@ -633,6 +633,22 @@ export function runConceptLayout(cy) {
   cy.zoom(Math.max(zoom, 0.1))
   cy.pan({ x: 30, y: 30 })
 
-  // 隐藏孤立节点
-  orphanNodes.forEach(n => n.style('display', 'none'))
+  // 处理孤立节点：如果有语义边，只显示有连接的；如果没有语义边，将孤立节点排列成网格
+  if (edgeList.length > 0) {
+    // 有语义边：隐藏真正孤立的概念节点（保持现有行为）
+    orphanNodes.forEach(n => n.style('display', 'none'))
+  } else {
+    // 无语义边：将孤立概念节点排列成网格显示
+    console.log(`[runConceptLayout] No semantic edges, arranging ${orphanNodes.length} orphan nodes in grid`)
+    const cols = Math.max(1, Math.floor(containerW / 200))
+    const gapX = 180
+    const gapY = 120
+    orphanNodes.forEach((n, i) => {
+      const col = i % cols
+      const row = Math.floor(i / cols)
+      n.position({ x: 100 + col * gapX, y: 100 + row * gapY })
+      n.style('display', 'element')
+      n.style('opacity', 1)
+    })
+  }
 }
