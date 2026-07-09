@@ -255,6 +255,16 @@ class ConceptDeduper:
                     hint_counts[c["parent_hint"].strip()] += 1
             canonical_hint = max(hint_counts, key=hint_counts.get) if hint_counts else ""
 
+            # LA-035: 合并 media_refs（去重）
+            media_refs = []
+            seen_refs = set()
+            for c in original_concepts:
+                for ref in c.get("media_refs", []) or []:
+                    key = f"{ref.get('type', '')}:{ref.get('path', ref.get('description', '')[:50])}"
+                    if key not in seen_refs:
+                        seen_refs.add(key)
+                        media_refs.append(ref)
+
             # 生成 canonical embedding
             canonical_embedding = self._get_embedding(canonical_name)
 
@@ -269,6 +279,7 @@ class ConceptDeduper:
                 "source_chunk_count": len(source_chunks),
                 "description": canonical_description,
                 "parent_hint": canonical_hint,
+                "media_refs": media_refs,
                 "embedding": canonical_embedding,
             })
 

@@ -281,15 +281,21 @@ class SemanticExtractor:
         """获取当前范式支持的关系类型列表。"""
         return list(PARADIGMS.get(self.paradigm, PARADIGMS[_DEFAULT_PARADIGM]).get("relations", {}).keys())
 
-    def extract_concepts(self, chunk_text: str) -> List[Dict[str, Any]]:
+    def extract_concepts(self, chunk_text: str, media_context: List[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
         """
         从单个 chunk 文本中提取核心概念。
 
         Args:
             chunk_text: 知识片段的文本内容
+            media_context: 关联的多媒体信息（图片描述、表格、公式等）
+                [
+                    {"type": "image", "description": "..."},
+                    {"type": "table", "markdown": "..."},
+                    {"type": "formula", "latex": "..."},
+                ]
 
         Returns:
-            概念列表，每个包含 name, concept_type, relation, description
+            概念列表，每个包含 name, concept_type, relation, description, media_refs
 
         Raises:
             RuntimeError: LLM 不可用或解析失败
@@ -297,7 +303,18 @@ class SemanticExtractor:
         if not self.llm.available:
             raise RuntimeError("SemanticExtractor: LLM 不可用，请检查 DEEPSEEK_API_KEY 配置")
 
-        truncated_text = chunk_text[:3000] if len(chunk_text) > 3000 else chunk_text
+        # LA-035: 构建增强后的文本输入（包含多媒体上下文）
+        enhanced_text = chunk_text
+        if media_context:
+            for media in media_context:
+                if media["type"] == "image":
+                    enhanced_text += f"\n\n[图片描述] {media.get('description', '')}"
+                elif media["type"] == "table":
+                    enhanced_text += f"\n\n[表格数据]\n{media.get('markdown', '')}"
+                elif media["type"] == "formula":
+                    enhanced_text += f"\n\n[数学公式] {media.get('latex', '')}"
+
+        truncated_text = enhanced_text[:4000] if len(enhanced_text) > 4000 else enhanced_text
 
         messages = [
             {

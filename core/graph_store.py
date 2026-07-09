@@ -96,6 +96,7 @@ class GraphStore:
             aliases STRING,
             source_chunks STRING,
             type_votes STRING,
+            media_refs STRING,
             PRIMARY KEY(canonical_id)
         )""",
 
@@ -1105,6 +1106,10 @@ class GraphStore:
                 type_votes = {concept_type: 1} if concept_type else {}
             type_votes_json = json.dumps(type_votes, ensure_ascii=False)
 
+            # LA-035: 多媒体引用
+            media_refs = cc.get("media_refs", [])
+            media_refs_json = json.dumps(media_refs, ensure_ascii=False) if media_refs else ""
+
             # 创建 CanonicalConcept 节点
             merge_cypher = f"""
                 MERGE (c:CanonicalConcept {{
@@ -1117,7 +1122,8 @@ class GraphStore:
                     c.parent_hint = '{parent_hint}',
                     c.aliases = '{aliases}',
                     c.source_chunks = '{source_chunks}',
-                    c.type_votes = '{type_votes_json}'
+                    c.type_votes = '{type_votes_json}',
+                    c.media_refs = '{media_refs_json}'
                 ON MATCH SET
                     c.name = '{name}',
                     c.concept_type = '{concept_type}',
@@ -1125,7 +1131,8 @@ class GraphStore:
                     c.parent_hint = '{parent_hint}',
                     c.aliases = '{aliases}',
                     c.source_chunks = '{source_chunks}',
-                    c.type_votes = '{type_votes_json}'
+                    c.type_votes = '{type_votes_json}',
+                    c.media_refs = '{media_refs_json}'
             """
             try:
                 self._execute(conn, merge_cypher)
@@ -1365,7 +1372,7 @@ class GraphStore:
 
                 MATCH (c:CanonicalConcept)
 
-                RETURN c.canonical_id, c.name, c.concept_type, c.description, c.parent_hint, c.source_chunks
+                RETURN c.canonical_id, c.name, c.concept_type, c.description, c.parent_hint, c.source_chunks, c.media_refs
 
                 LIMIT {limit}
 
@@ -1374,6 +1381,20 @@ class GraphStore:
             while result.has_next():
 
                 row = result.get_next()
+
+                import json
+
+                media_refs = []
+
+                if row[6]:
+
+                    try:
+
+                        media_refs = json.loads(row[6])
+
+                    except:
+
+                        pass
 
                 nodes.append({
 
@@ -1388,6 +1409,8 @@ class GraphStore:
                     "parent_hint": row[4],
 
                     "source_chunks": row[5],
+
+                    "media_refs": media_refs,
 
                 })
 
