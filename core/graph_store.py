@@ -262,6 +262,10 @@ class GraphStore:
 
             print(f"[GraphStore] Schema already exists for {self.collection_name}")
 
+            # LA-035: 检查是否是旧版本 schema（缺少 media_refs 字段）
+
+            self._check_schema_version(conn)
+
             return
 
         except Exception:
@@ -283,6 +287,40 @@ class GraphStore:
                 # 某些关系表可能已存在，忽略错??
 
         print(f"[GraphStore] Schema created for {self.collection_name}")
+
+    def _check_schema_version(self, conn):
+
+        """
+
+        LA-035: 检查 schema 版本，如果旧版本则提示用户。
+
+        旧版本标志：CanonicalConcept 缺少 media_refs 字段。
+
+        """
+
+        try:
+
+            self._execute(conn, "MATCH (c:CanonicalConcept) RETURN c.media_refs LIMIT 1")
+
+        except Exception as e:
+
+            if "media_refs" in str(e):
+
+                print(f"[GraphStore] 旧版本 schema 检测到：{self.collection_name}")
+
+                print(f"[GraphStore] 建议：删除旧数据库并重新导入，或调用 init_schema(force=True)")
+
+        # 也检查 Chunk 是否有 media 相关字段（旧版本可能缺少）
+
+        try:
+
+            self._execute(conn, "MATCH (c:Chunk) RETURN c.image_path LIMIT 1")
+
+        except Exception as e:
+
+            if "image_path" in str(e):
+
+                print(f"[GraphStore] 旧版本 Chunk schema 检测到：{self.collection_name}")
 
 
 
@@ -1111,7 +1149,9 @@ class GraphStore:
             media_refs_json = json.dumps(media_refs, ensure_ascii=False) if media_refs else ""
 
             # 创建 CanonicalConcept 节点
-            merge_cypher = f"""
+            # LA-035: 兼容旧数据库（可能缺少 media_refs 字段）
+            # 先尝试完整写入，如果失败则降级到不含 media_refs
+            full_merge_cypher = f"""
                 MERGE (c:CanonicalConcept {{
                     canonical_id: '{canonical_id}'
                 }})
@@ -1134,12 +1174,41 @@ class GraphStore:
                     c.type_votes = '{type_votes_json}',
                     c.media_refs = '{media_refs_json}'
             """
+            fallback_merge_cypher = f"""
+                MERGE (c:CanonicalConcept {{
+                    canonical_id: '{canonical_id}'
+                }})
+                ON CREATE SET
+                    c.name = '{name}',
+                    c.concept_type = '{concept_type}',
+                    c.description = '{description}',
+                    c.parent_hint = '{parent_hint}',
+                    c.aliases = '{aliases}',
+                    c.source_chunks = '{source_chunks}',
+                    c.type_votes = '{type_votes_json}'
+                ON MATCH SET
+                    c.name = '{name}',
+                    c.concept_type = '{concept_type}',
+                    c.description = '{description}',
+                    c.parent_hint = '{parent_hint}',
+                    c.aliases = '{aliases}',
+                    c.source_chunks = '{source_chunks}',
+                    c.type_votes = '{type_votes_json}'
+            """
             try:
-                self._execute(conn, merge_cypher)
+                self._execute(conn, full_merge_cypher)
                 added += 1
             except Exception as e:
-                print(f"[GraphStore] 创建 CanonicalConcept 节点失败 {canonical_id}: {e}")
-                continue
+                if "media_refs" in str(e):
+                    try:
+                        self._execute(conn, fallback_merge_cypher)
+                        added += 1
+                    except Exception as e2:
+                        print(f"[GraphStore] 创建 CanonicalConcept 节点失败 {canonical_id}: {e2}")
+                        continue
+                else:
+                    print(f"[GraphStore] 创建 CanonicalConcept 节点失败 {canonical_id}: {e}")
+                    continue
 
         # 建立 DERIVED_FROM 关系
         if derived_from_map:
@@ -1367,52 +1436,53 @@ class GraphStore:
 
 
         try:
-
-            result = self._execute(conn, f"""
-
-                MATCH (c:CanonicalConcept)
-
-                RETURN c.canonical_id, c.name, c.concept_type, c.description, c.parent_hint, c.source_chunks, c.media_refs
-
-                LIMIT {limit}
-
-            """)
-
-            while result.has_next():
-
-                row = result.get_next()
-
-                import json
-
-                media_refs = []
-
-                if row[6]:
-
-                    try:
-
-                        media_refs = json.loads(row[6])
-
-                    except:
-
-                        pass
-
-                nodes.append({
-
-                    "id": row[0],
-
-                    "name": row[1],
-
-                    "type": row[2],
-
-                    "description": row[3],
-
-                    "parent_hint": row[4],
-
-                    "source_chunks": row[5],
-
-                    "media_refs": media_refs,
-
-                })
+            # LA-035: 兼容旧数据库（可能缺少 media_refs 字段）
+            try:
+                result = self._execute(conn, f"""
+                    MATCH (c:CanonicalConcept)
+                    RETURN c.canonical_id, c.name, c.concept_type, c.description, c.parent_hint, c.source_chunks, c.media_refs
+                    LIMIT {limit}
+                """)
+                while result.has_next():
+                    row = result.get_next()
+                    import json
+                    media_refs = []
+                    if row[6]:
+                        try:
+                            media_refs = json.loads(row[6])
+                        except:
+                            pass
+                    nodes.append({
+                        "id": row[0],
+                        "name": row[1],
+                        "type": row[2],
+                        "description": row[3],
+                        "parent_hint": row[4],
+                        "source_chunks": row[5],
+                        "media_refs": media_refs,
+                    })
+            except Exception as schema_e:
+                if "media_refs" in str(schema_e):
+                    # 旧数据库，回退到旧查询
+                    print(f"[GraphStore] 旧数据库兼容模式：{self.collection_name}")
+                    result = self._execute(conn, f"""
+                        MATCH (c:CanonicalConcept)
+                        RETURN c.canonical_id, c.name, c.concept_type, c.description, c.parent_hint, c.source_chunks
+                        LIMIT {limit}
+                    """)
+                    while result.has_next():
+                        row = result.get_next()
+                        nodes.append({
+                            "id": row[0],
+                            "name": row[1],
+                            "type": row[2],
+                            "description": row[3],
+                            "parent_hint": row[4],
+                            "source_chunks": row[5],
+                            "media_refs": [],
+                        })
+                else:
+                    raise
 
         except Exception as e:
 

@@ -1501,6 +1501,7 @@ def list_graph_concepts(subject: str, limit: int = 2000):
                 "parent_hint": csv_info.get("parent_hint", ""),
                 "source_chunks": source_chunk_ids,
                 "source_refs": source_refs,
+                "media_refs": node.get("media_refs", []),
             })
 
         # 4. 补充 CSV 中有但 KùzuDB 中没有的概念（孤立概念）
