@@ -102,14 +102,23 @@ export function buildCyStyles() {
         'border-color': '#27ae60',
       }
     },
-    // ========== 边样式 — 连接点系统（LA-034）==========
-    // BELONGS_TO: 文档树结构边，父→子，从父节点右侧出发到子节点左侧
+    // ========== 边样式 — 统一连接点系统（LA-034）==========
+    // 所有边统一规则：
+    // - 曲线类型：unbundled-bezier（自适应曲率，每条边独立计算控制点）
+    // - 源端点：右中（100% 50%）— 上层/父节点右侧
+    // - 目标端点：左中（0% 50%）— 下层/子节点左侧
+    {
+      selector: 'edge',
+      style: {
+        'curve-style': 'unbundled-bezier',
+        'source-endpoint': '100% 50%',
+        'target-endpoint': '0% 50%',
+      }
+    },
+    // BELONGS_TO: 文档树结构边
     {
       selector: 'edge[type="BELONGS_TO"]',
       style: {
-        'curve-style': 'bezier',
-        'source-endpoint': '100% 50%',
-        'target-endpoint': '0% 50%',
         'line-color': COLORS.belongs_to,
         'target-arrow-color': COLORS.belongs_to,
         'line-style': 'solid',
@@ -117,7 +126,7 @@ export function buildCyStyles() {
         'arrow-scale': 0.8,
       }
     },
-    // ADJACENT_TO: 相邻 chunk 边（双向），使用默认端点
+    // ADJACENT_TO: 相邻 chunk 边
     {
       selector: 'edge[type="ADJACENT_TO"]',
       style: {
@@ -128,18 +137,7 @@ export function buildCyStyles() {
         'arrow-scale': 0.8,
       }
     },
-    // 语义层连接边 — 概念依赖关系，源→目标，从左向右
-    {
-      selector: 'edge[type="SOLUTION"], edge[type="DEPENDS_ON"]',
-      style: {
-        'curve-style': 'bezier',
-        'source-endpoint': '100% 50%',
-        'target-endpoint': '0% 50%',
-        'target-arrow-shape': 'triangle',
-        'arrow-scale': 0.8,
-        'width': 1.5,
-      }
-    },
+    // SOLUTION: 概念层"解决"关系
     {
       selector: 'edge[type="SOLUTION"]',
       style: {
@@ -147,8 +145,11 @@ export function buildCyStyles() {
         'target-arrow-color': COLORS.solution,
         'line-style': 'solid',
         'width': 2,
+        'target-arrow-shape': 'triangle',
+        'arrow-scale': 0.8,
       }
     },
+    // DEPENDS_ON: 概念层"依赖"关系
     {
       selector: 'edge[type="DEPENDS_ON"]',
       style: {
@@ -156,15 +157,14 @@ export function buildCyStyles() {
         'target-arrow-color': COLORS.depends_on,
         'line-style': 'dashed',
         'width': 1.5,
+        'target-arrow-shape': 'triangle',
+        'arrow-scale': 0.8,
       }
     },
-    // DERIVED_FROM: ExtractedConcept → CanonicalConcept（向上聚合，从下往上）
+    // DERIVED_FROM: ExtractedConcept → CanonicalConcept
     {
       selector: 'edge[type="DERIVED_FROM"]',
       style: {
-        'curve-style': 'bezier',
-        'source-endpoint': '50% 0%',
-        'target-endpoint': '50% 100%',
         'line-color': '#9b59b6',
         'target-arrow-color': '#9b59b6',
         'line-style': 'dotted',
@@ -173,13 +173,10 @@ export function buildCyStyles() {
         'arrow-scale': 0.8,
       }
     },
-    // HAS_CONCEPT: Chunk → ExtractedConcept（从左到右）
+    // HAS_CONCEPT: Chunk → ExtractedConcept
     {
       selector: 'edge[type="HAS_CONCEPT"]',
       style: {
-        'curve-style': 'bezier',
-        'source-endpoint': '100% 50%',
-        'target-endpoint': '0% 50%',
         'line-color': '#1abc9c',
         'target-arrow-color': '#1abc9c',
         'line-style': 'solid',
