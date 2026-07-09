@@ -151,6 +151,28 @@ export function buildCyStyles() {
         'width': 1.5,
       }
     },
+    {
+      selector: 'edge[type="DERIVED_FROM"]',
+      style: {
+        'line-color': '#9b59b6',
+        'target-arrow-color': '#9b59b6',
+        'line-style': 'dotted',
+        'width': 1.5,
+        'target-arrow-shape': 'triangle',
+        'arrow-scale': 0.8,
+      }
+    },
+    {
+      selector: 'edge[type="HAS_CONCEPT"]',
+      style: {
+        'line-color': '#1abc9c',
+        'target-arrow-color': '#1abc9c',
+        'line-style': 'solid',
+        'width': 1.5,
+        'target-arrow-shape': 'triangle',
+        'arrow-scale': 0.8,
+      }
+    },
     // ========== 副本样式 ==========
     {
       selector: 'node[isCopy = 1]',
