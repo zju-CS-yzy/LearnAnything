@@ -99,7 +99,7 @@ export function getTypeLabel(type) {
 export function runTreeLayout(cy) {
   const chunkNodes = cy.nodes().filter(n => {
     const t = n.data('type')
-    return t === 'child' || t === 'markdown'
+    return t === 'child' || t === 'markdown' || t === 'image'
   })
   const chunkEdges = cy.edges().filter(e => {
     const t = e.data('type')
@@ -293,10 +293,29 @@ export function runTreeLayout(cy) {
     }
   })
 
+  // 5.5 为图片节点安排位置（放在所有文本树的右侧）
+  const imageNodes = cy.nodes().filter(n => n.data('type') === 'image')
+  if (imageNodes.length > 0) {
+    // 计算文本树的最右边界
+    let maxTreeX = 0
+    Object.values(positions).forEach(pos => {
+      maxTreeX = Math.max(maxTreeX, pos.x)
+    })
+    const imageStartX = maxTreeX + 250  // 在文本树右侧留 250px 间距
+    const imageGap = 80
+
+    imageNodes.forEach((imgNode, idx) => {
+      imgNode.position({
+        x: imageStartX,
+        y: 50 + idx * imageGap,
+      })
+    })
+  }
+
   // 6. 适应视图
   const allNodes = cy.nodes().filter(n => {
     const t = n.data('type')
-    return t === 'child' || t === 'markdown' || n.data('isCopy') === 1
+    return t === 'child' || t === 'markdown' || t === 'image' || n.data('isCopy') === 1
   })
 
   if (allNodes.length > 0) {
