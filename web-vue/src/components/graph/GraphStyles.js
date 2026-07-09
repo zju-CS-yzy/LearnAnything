@@ -102,7 +102,32 @@ export function buildCyStyles() {
         'border-color': '#27ae60',
       }
     },
-    // ========== 边样式 — 统一连接点系统（LA-034）==========
+    // ========== 图片节点样式（LA-035）==========
+    {
+      selector: 'node[chunkType="image"], node[?isImage]',
+      style: {
+        'label': '📷',
+        'font-size': '24px',
+        'text-valign': 'center',
+        'text-halign': 'center',
+        'color': '#fff',
+        'width': 40,
+        'height': 40,
+        'border-width': 2,
+        'border-color': '#e67e22',
+        'background-color': '#f39c12',
+        'shape': 'round-rectangle',
+        'corner-radius': 6,
+      }
+    },
+    // 图片节点高亮
+    {
+      selector: 'node[chunkType="image"]:selected, node[?isImage]:selected',
+      style: {
+        'border-width': 4,
+        'border-color': COLORS.selected,
+      }
+    },
     // 使用角度值精确固定在节点边界：
     // - 0deg = 12点钟方向（上中）
     // - 90deg = 3点钟方向（右中）← 源端点

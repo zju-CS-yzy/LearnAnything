@@ -227,6 +227,11 @@ function initCy() {
       parent_hint: node.data('parent_hint') || '',
       source_chunks: node.data('source_chunks') || '',
       source_refs: node.data('source_refs') || [],
+      // LA-035: 图片节点字段
+      image_path: node.data('image_path') || '',
+      thumbnail_path: node.data('thumbnail_path') || '',
+      width: node.data('width') || 0,
+      height: node.data('height') || 0,
     }
     if (isChunkNodeType(nodeType)) {
       loadConcepts(node.id())
@@ -303,10 +308,16 @@ async function loadChunkNodes() {
         id: n.id,
         label: generateNodeLabel(n.text, n.heading_path, n.id),
         type: n.chunk_type || 'child',
+        chunkType: n.chunk_type || 'child',
         source: n.source,
         page_number: n.page_number,
         text: n.text || '',
         heading_path: n.heading_path || '',
+        // LA-035: 图片字段
+        image_path: n.image_path || '',
+        thumbnail_path: n.thumbnail_path || '',
+        width: n.width || 0,
+        height: n.height || 0,
       }
     }))
     if (chunkNodes.length > 0 && cy) {

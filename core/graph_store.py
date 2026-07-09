@@ -67,6 +67,10 @@ class GraphStore:
             source STRING,
             page_number INT64,
             chunk_type STRING,
+            image_path STRING,
+            thumbnail_path STRING,
+            width INT64,
+            height INT64,
             PRIMARY KEY(chunk_id)
         )""",
 
@@ -378,6 +382,12 @@ class GraphStore:
 
 
 
+            # LA-035: 图片字段
+            image_path = self._escape_cypher_string(meta.get("image_path", ""))
+            thumbnail_path = self._escape_cypher_string(meta.get("thumbnail_path", ""))
+            width = meta.get("width", 0) or 0
+            height = meta.get("height", 0) or 0
+
             cypher = (
 
                 f"CREATE (c:Chunk {{"
@@ -392,7 +402,15 @@ class GraphStore:
 
                 f"page_number: {page_number},"
 
-                f"chunk_type: '{chunk_type}'"
+                f"chunk_type: '{chunk_type}',"
+
+                f"image_path: '{image_path}',"
+
+                f"thumbnail_path: '{thumbnail_path}',"
+
+                f"width: {width},"
+
+                f"height: {height}"
 
                 f"}})"
 
