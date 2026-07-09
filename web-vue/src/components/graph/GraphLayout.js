@@ -395,9 +395,11 @@ export function runConceptLayout(cy) {
   cy.nodes().filter(n => n.data('isCopy') === '1').remove()
   cy.edges().filter(e => e.data('isCopyEdge') === '1').remove()
 
+  // LA-035: 分离图片节点和概念节点
+  const imageNodes = cy.nodes().filter(n => n.data('type') === 'image')
   const allConceptNodes = cy.nodes().filter(n => {
     const t = n.data('type')
-    return t && t !== 'child' && t !== 'parent' && t !== 'markdown'
+    return t && t !== 'child' && t !== 'parent' && t !== 'markdown' && t !== 'image'
   })
 
   const semanticEdges = cy.edges().filter(e => {
@@ -739,6 +741,33 @@ export function runConceptLayout(cy) {
       n.position({ x: 100 + col * gapX, y: 100 + row * gapY })
       n.style('display', 'element')
       n.style('opacity', 1)
+    })
+  }
+
+  // LA-035: 图片节点布局 — 放在概念树下方
+  if (imageNodes.length > 0) {
+    console.log(`[runConceptLayout] Arranging ${imageNodes.length} image nodes below concept trees`)
+    // 计算概念树的最下边界
+    let maxConceptY = 0
+    connectedNodes.forEach(n => {
+      maxConceptY = Math.max(maxConceptY, n.position('y') + (n.height() || 80) / 2)
+    })
+    cy.nodes('[isCopy = 1]').forEach(n => {
+      maxConceptY = Math.max(maxConceptY, n.position('y') + (n.height() || 80) / 2)
+    })
+    // orphanNodes 如果在无语义边时已布局，也要考虑
+    orphanNodes.forEach(n => {
+      if (n.style('display') !== 'none') {
+        maxConceptY = Math.max(maxConceptY, n.position('y') + (n.height() || 80) / 2)
+      }
+    })
+
+    const imageStartY = maxConceptY + 80
+    const imageGap = 60
+    imageNodes.forEach((imgNode, idx) => {
+      imgNode.position({ x: 50 + idx * imageGap, y: imageStartY })
+      imgNode.style('display', 'element')
+      imgNode.style('opacity', 1)
     })
   }
 
