@@ -111,7 +111,7 @@ export function buildCyStyles() {
     {
       selector: 'edge',
       style: {
-        'curve-style': 'bezier',
+        'curve-style': 'unbundled-bezier',
         'source-endpoint': '90deg',
         'target-endpoint': '270deg',
       }
