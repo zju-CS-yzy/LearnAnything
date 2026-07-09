@@ -687,7 +687,7 @@ def import_text(request: ImportRequest):
 
     # 同时写入 KùzuDB 图数据库
     from core.graph_store import GraphStore
-    graph_store = GraphStore(request.subject)
+    graph_store = GraphStore(f"{request.subject}_v1")
     graph_store.init_schema()
     graph_store.add_chunk_nodes(docs)
     graph_store.build_belongs_to_relations()
@@ -761,7 +761,7 @@ def import_file(
                 # 同时写入 KùzuDB 图数据库
                 print(f"[ImportFile] Writing to KùzuDB...")
                 from core.graph_store import GraphStore
-                graph_store = GraphStore(subject)
+                graph_store = GraphStore(f"{subject}_v1")
                 graph_store.init_schema()
                 graph_store.add_chunk_nodes(chunks)
                 graph_store.build_belongs_to_relations()
