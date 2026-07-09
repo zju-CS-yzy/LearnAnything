@@ -325,6 +325,40 @@ export function runTreeLayout(cy) {
   } else {
     console.warn('[runTreeLayout] No nodes to layout')
   }
+
+  // 动态调整边曲率：根据源节点和目标节点的相对 y 位置
+  adjustEdgeCurvature(cy)
+}
+
+/**
+ * 根据源节点和目标节点的相对 y 位置动态调整边曲率方向
+ * - 目标更高（target.y < source.y）：向上凸（distance < 0）
+ * - 目标更低（target.y > source.y）：向下凸（distance > 0）
+ * - 大致相平：直线（distance = 0）
+ */
+function adjustEdgeCurvature(cy) {
+  const THRESHOLD = 5  // y 差值阈值，小于此值视为相平
+  const DISTANCE = 40  // 曲率幅度
+
+  cy.edges().forEach(edge => {
+    const source = edge.source()
+    const target = edge.target()
+    if (!source || !target || source.length === 0 || target.length === 0) return
+
+    const dy = target.position('y') - source.position('y')
+
+    let distance
+    if (Math.abs(dy) < THRESHOLD) {
+      distance = 0  // 相平 → 直线
+    } else if (dy < 0) {
+      distance = -DISTANCE  // 目标更高 → 向上凸
+    } else {
+      distance = DISTANCE  // 目标更低 → 向下凸
+    }
+
+    edge.style('control-point-distances', distance)
+    edge.style('control-point-weights', 0.5)
+  })
 }
 
 // ========== 概念层 dagre 布局 ==========
@@ -688,4 +722,7 @@ export function runConceptLayout(cy) {
       n.style('opacity', 1)
     })
   }
+
+  // 动态调整边曲率
+  adjustEdgeCurvature(cy)
 }
