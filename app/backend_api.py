@@ -1154,21 +1154,29 @@ def list_graph_nodes(subject: str, limit: int = 500):
         result = conn.execute(f"""
             MATCH (c:Chunk)
             WHERE c.chunk_type <> 'parent'
-            RETURN c.chunk_id, c.heading_path, c.source, c.page_number, c.chunk_type, c.text
+            RETURN c.chunk_id, c.heading_path, c.source, c.page_number, c.chunk_type, c.text,
+                   c.image_path, c.thumbnail_path, c.width, c.height
             LIMIT {limit}
         """)
 
         nodes = []
         while result.has_next():
             row = result.get_next()
-            nodes.append({
+            node = {
                 "id": row[0],
                 "heading_path": row[1] or "",
                 "source": row[2],
                 "page_number": row[3],
                 "chunk_type": row[4],
                 "text": row[5] or "",
-            })
+            }
+            # LA-035: 图片字段（仅图片节点）
+            if row[4] == 'image':
+                node["image_path"] = row[6] or ""
+                node["thumbnail_path"] = row[7] or ""
+                node["width"] = row[8] or 0
+                node["height"] = row[9] or 0
+            nodes.append(node)
 
         count_result = conn.execute("MATCH (c:Chunk) WHERE c.chunk_type <> 'parent' RETURN COUNT(c) AS cnt")
         total = count_result.get_next()[0] if count_result.has_next() else 0
@@ -1267,6 +1275,34 @@ def get_subgraph(subject: str, chunk_id: str, depth: int = 2):
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"子图查询失败: {str(e)}")
+
+
+# ==================== LA-035: 图片静态文件服务 ====================
+
+@app.get("/api/images/{subject}/{filename}")
+def get_image(subject: str, filename: str):
+    """
+    提供学科知识库中的图片文件访问。
+    
+    路径: /api/images/<subject>/<filename>
+    实际文件: knowledge_base/<subject>_v1_images/<filename>
+    """
+    from config.settings import KNOWLEDGE_BASE_DIR
+    
+    # 安全检查：防止目录遍历
+    safe_filename = Path(filename).name
+    
+    # 尝试 images 目录
+    img_path = KNOWLEDGE_BASE_DIR / f"{subject}_v1_images" / safe_filename
+    if img_path.exists():
+        return FileResponse(str(img_path))
+    
+    # 尝试 thumbnails 目录
+    thumb_path = KNOWLEDGE_BASE_DIR / f"{subject}_v1_thumbnails" / safe_filename
+    if thumb_path.exists():
+        return FileResponse(str(thumb_path))
+    
+    raise HTTPException(status_code=404, detail=f"图片不存在: {filename}")
 
 
 # ========== 知识图谱 API (Phase 2: 语义层) ==========

@@ -37,6 +37,31 @@
           </div>
         </div>
 
+        <!-- LA-035: 图片节点显示 -->
+        <div v-if="isImageNode" class="info-section image-section">
+          <div class="info-label">📷 图片内容</div>
+          <div class="image-preview">
+            <img
+              :src="thumbnailUrl"
+              :alt="node.text"
+              class="thumbnail-img"
+              @click="showFullImage = true"
+            />
+            <div class="image-meta">
+              <span v-if="node.width && node.height">{{ node.width }} × {{ node.height }}</span>
+              <a :href="imageUrl" target="_blank" class="image-link">查看原图 ↗</a>
+            </div>
+          </div>
+        </div>
+
+        <!-- 全屏图片弹窗 -->
+        <div v-if="showFullImage" class="image-modal" @click="showFullImage = false">
+          <div class="image-modal-content">
+            <img :src="imageUrl" :alt="node.text" />
+            <button class="modal-close" @click="showFullImage = false">✕</button>
+          </div>
+        </div>
+
         <!-- 概念描述 -->
         <div v-if="node.description" class="info-section">
           <div class="info-label">概念描述</div>
@@ -149,7 +174,7 @@
  * 显示选中节点的基本信息、概念分解、语义关联
  */
 
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
 
 const props = defineProps({
   node: { type: Object, default: null },
@@ -161,6 +186,47 @@ const props = defineProps({
 })
 
 defineEmits(['close', 'extract', 'expand', 'focus', 'navigate-to-chunk'])
+
+// LA-035: 图片弹窗状态
+const showFullImage = ref(false)
+
+// 判断是否为图片节点
+const isImageNode = computed(() => {
+  return props.node?.chunkType === 'image' || props.node?.type === 'image'
+})
+
+// 图片 URL（通过 API 访问）
+const imageUrl = computed(() => {
+  if (!isImageNode.value) return ''
+  const path = props.node?.image_path || props.node?.metadata?.image_path
+  if (!path) return ''
+  // path 格式: "<subject>_v1_images/filename.png"
+  const parts = path.split('/')
+  if (parts.length >= 2) {
+    const filename = parts[parts.length - 1]
+    // 从路径推断学科
+    const subject = parts[0].replace('_v1_images', '')
+    return `${window.location.origin}/api/images/${subject}/${filename}`
+  }
+  return ''
+})
+
+// 缩略图 URL
+const thumbnailUrl = computed(() => {
+  if (!isImageNode.value) return ''
+  const path = props.node?.thumbnail_path || props.node?.metadata?.thumbnail_path
+  if (!path) {
+    // 无缩略图则回退到原图
+    return imageUrl.value
+  }
+  const parts = path.split('/')
+  if (parts.length >= 2) {
+    const filename = parts[parts.length - 1]
+    const subject = parts[0].replace('_v1_thumbnails', '')
+    return `${window.location.origin}/api/images/${subject}/${filename}`
+  }
+  return imageUrl.value
+})
 
 // 解析 source_refs（人类可读的来源引用字符串数组）
 const sourceRefsArray = computed(() => {
@@ -483,4 +549,84 @@ function relationLabel(relation) {
 .link-derived_from { background: #f5e8ff; color: #8e44ad; }
 .link-has_concept { background: #e8fff5; color: #16a085; }
 .link-target { color: var(--text-secondary, #555); }
+
+/* LA-035: 图片节点样式 */
+.image-section { margin-top: 12px; }
+.image-preview {
+  margin-top: 8px;
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--bg-hover, #f8f9fa);
+  border: 1px solid var(--border-color, #e0e0e0);
+}
+.thumbnail-img {
+  width: 100%;
+  max-height: 200px;
+  object-fit: contain;
+  cursor: zoom-in;
+  display: block;
+}
+.thumbnail-img:hover {
+  opacity: 0.9;
+}
+.image-meta {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 6px 10px;
+  font-size: var(--font-size-xs);
+  color: var(--text-muted, #7f8c8d);
+}
+.image-link {
+  color: #3498db;
+  text-decoration: none;
+}
+.image-link:hover {
+  text-decoration: underline;
+}
+
+/* 全屏图片弹窗 */
+.image-modal {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.85);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  cursor: zoom-out;
+}
+.image-modal-content {
+  position: relative;
+  max-width: 90vw;
+  max-height: 90vh;
+}
+.image-modal-content img {
+  max-width: 100%;
+  max-height: 90vh;
+  object-fit: contain;
+  border-radius: 4px;
+}
+.modal-close {
+  position: absolute;
+  top: -40px;
+  right: 0;
+  background: rgba(255, 255, 255, 0.2);
+  border: none;
+  color: #fff;
+  font-size: 20px;
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.modal-close:hover {
+  background: rgba(255, 255, 255, 0.4);
+}
 </style>
