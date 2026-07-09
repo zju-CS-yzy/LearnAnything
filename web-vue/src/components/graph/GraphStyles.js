@@ -103,16 +103,17 @@ export function buildCyStyles() {
       }
     },
     // ========== 边样式 — 统一连接点系统（LA-034）==========
-    // 所有边统一规则：
-    // - 曲线类型：unbundled-bezier（自适应曲率，每条边独立计算控制点）
-    // - 源端点：右中（100% 50%）— 上层/父节点右侧
-    // - 目标端点：左中（0% 50%）— 下层/子节点左侧
+    // 使用角度值精确固定在节点边界：
+    // - 0deg = 12点钟方向（上中）
+    // - 90deg = 3点钟方向（右中）← 源端点
+    // - 180deg = 6点钟方向（下中）
+    // - 270deg = 9点钟方向（左中）← 目标端点
     {
       selector: 'edge',
       style: {
-        'curve-style': 'unbundled-bezier',
-        'source-endpoint': '100% 50%',
-        'target-endpoint': '0% 50%',
+        'curve-style': 'bezier',
+        'source-endpoint': '90deg',
+        'target-endpoint': '270deg',
       }
     },
     // BELONGS_TO: 文档树结构边
