@@ -706,11 +706,15 @@ class GraphStore:
 
         """
 
-        获取以指??chunk ??concept 为中心的子图（用于前端可视化）??
+        获取以指定 chunk 或 concept 为中心的子图（用于前端可视化）。
+
+        支持四层模型 v2.0: Chunk / ExtractedConcept / CanonicalConcept。
 
         Args:
 
-            chunk_id: 中心节点 ID（可以是 Chunk ??Concept??            depth: 遍历深度
+            chunk_id: 中心节点 ID（可以是 Chunk、ExtractedConcept 或 CanonicalConcept）
+
+            depth: 遍历深度
 
 
 
@@ -734,13 +738,9 @@ class GraphStore:
 
 
 
-        # 先尝试作??Chunk 查询，如果没有结果则作为 Concept 查询
+        # 尝试 Chunk
 
         center_node = None
-
-
-
-        # 尝试 Chunk
 
         result = self._execute(conn, f"""
 
@@ -774,15 +774,51 @@ class GraphStore:
 
 
 
-        # 如果未找到，尝试 Concept
+        # 尝试 CanonicalConcept（v2.0 主要节点类型）
 
         if not center_node:
 
             result = self._execute(conn, f"""
 
-                MATCH (c:Concept {{concept_id: '{safe_id}'}})
+                MATCH (c:CanonicalConcept {{canonical_id: '{safe_id}'}})
 
-                RETURN c.concept_id, c.name, c.concept_type, c.source_chunk
+                RETURN c.canonical_id, c.name, c.concept_type
+
+            """)
+
+            if result.has_next():
+
+                row = result.get_next()
+
+                center_node = {
+
+                    "id": row[0],
+
+                    "label": row[1] or row[0][:20],
+
+                    "type": row[2] or "concept",
+
+                    "chunk_type": row[2] or "concept",
+
+                    "text": "",
+
+                    "source": "",
+
+                    "page_number": None,
+
+                }
+
+
+
+        # 尝试 ExtractedConcept（v2.0 中间节点类型）
+
+        if not center_node:
+
+            result = self._execute(conn, f"""
+
+                MATCH (c:ExtractedConcept {{extracted_id: '{safe_id}'}})
+
+                RETURN c.extracted_id, c.name, c.concept_type, c.source_chunk
 
             """)
 
@@ -820,21 +856,27 @@ class GraphStore:
 
 
 
-        # 查询所有结构层关系（BELONGS_TO, ADJACENT_TO）和语义层关系（DEFINES, REQUIRES 等）
+        # 查询所有关系（结构层 + 语义层 v2.0）
 
-        rel_types = ["BELONGS_TO", "ADJACENT_TO", "DEFINES", "REQUIRES", "HAS_LAW", "APPLIES_TO", "EXTENDS", "IMPLEMENTS", "HAS_SUB", "HAS_IMPL"]
+        rel_types = ["BELONGS_TO", "ADJACENT_TO", "HAS_CONCEPT", "DERIVED_FROM", "SOLUTION", "DEPENDS_ON"]
 
         for rel_type in rel_types:
 
             try:
 
+                # 双向查询：中心节点可以是 source 或 target
+
                 result = self._execute(conn, f"""
 
                     MATCH (c)-[r:{rel_type}]-(n)
 
-                    WHERE c.chunk_id = '{safe_id}' OR c.concept_id = '{safe_id}'
+                    WHERE c.chunk_id = '{safe_id}' OR c.canonical_id = '{safe_id}' OR c.extracted_id = '{safe_id}'
 
-                    RETURN n.chunk_id, n.heading_path, n.chunk_type, n.text, n.concept_id, n.name, n.concept_type
+                    RETURN n.chunk_id, n.heading_path, n.chunk_type, n.text,
+
+                           n.canonical_id, n.name, n.concept_type,
+
+                           n.extracted_id
 
                 """)
 
@@ -842,7 +884,7 @@ class GraphStore:
 
                     row = result.get_next()
 
-                    nid = row[0] or row[4]  # chunk_id ??concept_id
+                    nid = row[0] or row[4] or row[7]  # chunk_id / canonical_id / extracted_id
 
                     if nid and nid not in nodes:
 
@@ -862,7 +904,23 @@ class GraphStore:
 
                             }
 
-                        else:  # Concept
+                        elif row[4]:  # CanonicalConcept
+
+                            nodes[nid] = {
+
+                                "id": nid,
+
+                                "label": row[5] or nid[:20],
+
+                                "type": row[6] or "concept",
+
+                                "chunk_type": row[6] or "concept",
+
+                                "text": "",
+
+                            }
+
+                        else:  # ExtractedConcept
 
                             nodes[nid] = {
 
@@ -897,10 +955,6 @@ class GraphStore:
 
 
         return {"nodes": list(nodes.values()), "edges": edges}
-
-
-
-    # ========== Phase 2: 语义????概念操作 ==========
 
 
 
@@ -1203,7 +1257,9 @@ class GraphStore:
 
         """
 
-        获取指定 chunk 关联的所有概念??
+        获取指定 chunk 关联的所有 ExtractedConcept。
+
+        四层模型 v2.0: Chunk -(HAS_CONCEPT)-> ExtractedConcept
 
         Args:
 
@@ -1213,7 +1269,7 @@ class GraphStore:
 
         Returns:
 
-            概念列表，每个包??id, name, type, relation, description
+            概念列表，每个包含 id, name, type, relation, description
 
         """
 
@@ -1223,42 +1279,39 @@ class GraphStore:
 
 
 
-        # 查询所有语义层关系（DEFINES, HAS_LAW, APPLIES_TO, EXTENDS??
-        rel_types = ["DEFINES", "HAS_LAW", "APPLIES_TO", "EXTENDS", "REQUIRES", "IMPLEMENTS", "HAS_SUB", "HAS_IMPL"]
+        # 查询 Chunk -> ExtractedConcept 的 HAS_CONCEPT 关系
 
-        for rel_type in rel_types:
+        try:
 
-            try:
+            result = self._execute(conn, f"""
 
-                result = self._execute(conn, f"""
+                MATCH (ch:Chunk {{chunk_id: '{chunk_id}'}})-[r:HAS_CONCEPT]->(co:ExtractedConcept)
 
-                    MATCH (ch:Chunk {{chunk_id: '{chunk_id}'}})-[r:{rel_type}]->(co:Concept)
+                RETURN co.extracted_id, co.name, co.concept_type, co.description
 
-                    RETURN co.concept_id, co.name, co.concept_type, co.description
+            """)
 
-                """)
+            while result.has_next():
 
-                while result.has_next():
+                row = result.get_next()
 
-                    row = result.get_next()
+                concepts.append({
 
-                    concepts.append({
+                    "id": row[0],
 
-                        "id": row[0],
+                    "name": row[1],
 
-                        "name": row[1],
+                    "type": row[2],
 
-                        "type": row[2],
+                    "relation": "HAS_CONCEPT",
 
-                        "relation": rel_type,
+                    "description": row[3] or "",
 
-                        "description": row[3] or "",
+                })
 
-                    })
+        except Exception:
 
-            except Exception:
-
-                pass
+            pass
 
 
 
@@ -1370,11 +1423,15 @@ class GraphStore:
 
         """
 
-        获取语义层关系边（Chunk -> Concept）??
+        获取语义层关系边（Chunk -> ExtractedConcept -> CanonicalConcept）。
+
+        四层模型 v2.0: Chunk -(HAS_CONCEPT)-> ExtractedConcept -(DERIVED_FROM)-> CanonicalConcept
 
         Args:
 
-            limit: 最大返回数??
+            limit: 最大返回数量
+
+
 
         Returns:
 
@@ -1388,105 +1445,75 @@ class GraphStore:
 
 
 
-        rel_types = ["DEFINES", "HAS_LAW", "APPLIES_TO", "EXTENDS"]
+        # 查询 Chunk -(HAS_CONCEPT)-> ExtractedConcept
 
-        for rel_type in rel_types:
+        try:
 
-            try:
+            result = self._execute(conn, f"""
 
-                result = self._execute(conn, f"""
+                MATCH (ch:Chunk)-[r:HAS_CONCEPT]->(co:ExtractedConcept)
 
-                    MATCH (ch:Chunk)-[r:{rel_type}]->(co:Concept)
+                RETURN ch.chunk_id, co.extracted_id
 
-                    RETURN ch.chunk_id, co.concept_id, r.description
+                LIMIT {limit}
 
-                    LIMIT {limit}
+            """)
 
-                """)
+            while result.has_next():
 
-                while result.has_next():
+                row = result.get_next()
 
-                    row = result.get_next()
+                edges.append({
 
-                    edges.append({
+                    "source": row[0],
 
-                        "source": row[0],
+                    "target": row[1],
 
-                        "target": row[1],
+                    "type": "HAS_CONCEPT",
 
-                        "type": rel_type,
+                    "description": "",
 
-                        "description": row[2] if row[2] else "",
+                })
 
-                    })
+        except Exception:
 
-            except Exception:
-
-                pass
+            pass
 
 
 
-        return edges
+        # 查询 ExtractedConcept -(DERIVED_FROM)-> CanonicalConcept
 
+        try:
 
+            result = self._execute(conn, f"""
 
-    def get_semantic_edges(self, limit: int = 200) -> List[Dict[str, Any]]:
+                MATCH (e:ExtractedConcept)-[r:DERIVED_FROM]->(c:CanonicalConcept)
 
-        """
+                RETURN e.extracted_id, c.canonical_id
 
-        获取语义层关系边（Chunk -> Concept）??
+                LIMIT {limit}
 
-        Args:
+            """)
 
-            limit: 最大返回数??
+            while result.has_next():
 
-        Returns:
+                row = result.get_next()
 
-            边列表，包含 source, target, type
+                edges.append({
 
-        """
+                    "source": row[0],
 
-        conn = self._ensure_db()
+                    "target": row[1],
 
-        edges = []
+                    "type": "DERIVED_FROM",
 
+                    "description": "",
 
+                })
 
-        rel_types = ["DEFINES", "HAS_LAW", "APPLIES_TO", "EXTENDS"]
+        except Exception:
 
-        for rel_type in rel_types:
-
-            try:
-
-                result = self._execute(conn, f"""
-
-                    MATCH (ch:Chunk)-[r:{rel_type}]->(co:Concept)
-
-                    RETURN ch.chunk_id, co.concept_id, r.description
-
-                    LIMIT {limit}
-
-                """)
-
-                while result.has_next():
-
-                    row = result.get_next()
-
-                    edges.append({
-
-                        "source": row[0],
-
-                        "target": row[1],
-
-                        "type": rel_type,
-
-                        "description": row[2] if row[2] else "",
-
-                    })
-
-            except Exception:
-
-                pass
+            pass
 
 
 

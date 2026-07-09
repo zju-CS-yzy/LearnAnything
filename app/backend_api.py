@@ -1461,7 +1461,7 @@ def list_graph_concepts(subject: str, limit: int = 2000):
                 "id": db_id,
                 "name": node["name"] or csv_info.get("name", ""),
                 "type": node["type"] or csv_info.get("type", ""),
-                "description": csv_info.get("description", ""),
+                "description": node.get("description") or csv_info.get("description", ""),
                 "parent_hint": csv_info.get("parent_hint", ""),
                 "source_chunks": source_chunk_ids,
                 "source_refs": source_refs,

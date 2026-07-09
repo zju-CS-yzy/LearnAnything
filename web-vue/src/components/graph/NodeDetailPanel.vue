@@ -115,13 +115,12 @@
           </div>
         </div>
 
-        <!-- 语义关联（仅概念节点） -->
-        <div v-if="!isChunkNode && links.length > 0" class="info-section concept-section">
+        <div v-if="!isChunkNode && dedupedLinks.length > 0" class="info-section concept-section">
           <div class="info-label concept-label">
             <span>🔗 语义关联</span>
           </div>
           <div class="concept-links">
-            <div v-for="(link, idx) in links" :key="idx" class="concept-link-item">
+            <div v-for="(link, idx) in dedupedLinks" :key="idx" class="concept-link-item">
               <span class="link-direction">{{ link.direction === 'out' ? '→' : '←' }}</span>
               <span class="link-type" :class="'link-' + link.type.toLowerCase()">{{ link.type }}</span>
               <span class="link-target">{{ link.targetName }}</span>
@@ -188,6 +187,17 @@ const sourceChunksArray = computed(() => {
   } catch { /* ignore */ }
   // 按逗号分隔
   return String(sc).split(',').map(s => s.trim()).filter(Boolean)
+})
+
+// 去重语义关联（相同 direction + type + targetName 只保留一条）
+const dedupedLinks = computed(() => {
+  const seen = new Set()
+  return props.links.filter(link => {
+    const key = `${link.direction}|${link.type}|${link.targetName}`
+    if (seen.has(key)) return false
+    seen.add(key)
+    return true
+  })
 })
 
 function typeLabel(type) {
@@ -470,5 +480,7 @@ function relationLabel(relation) {
 }
 .link-solution { background: #e8f4f8; color: #2980b9; }
 .link-depends_on { background: #ffe8e8; color: #c0392b; }
+.link-derived_from { background: #f5e8ff; color: #8e44ad; }
+.link-has_concept { background: #e8fff5; color: #16a085; }
 .link-target { color: var(--text-secondary, #555); }
 </style>

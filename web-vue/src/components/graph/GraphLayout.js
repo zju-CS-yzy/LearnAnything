@@ -40,23 +40,31 @@ export function generateNodeLabel(text, headingPath, fallback) {
 
 /**
  * UML 类图风格卡片标签构建
+ * 
+ * 修复 LA-033: 限制描述行数，调整 lineHeight 以匹配实际渲染
+ * 避免 description 过长导致 cardHeight 不足，文本溢出截断
  */
 export function buildUMLCardLabel(name, type, description) {
   const typeLabel = getTypeLabel(type)
-  const title = name.substring(0, 12)
-  const desc = description || ''
+  const title = name ? name.substring(0, 12) : '未命名'
+  
+  // 限制描述长度：最多 3 行，每行 15 字符 = 45 字符
+  const maxDescChars = 45
+  const descRaw = description || ''
+  const descTrimmed = descRaw.length > maxDescChars ? descRaw.substring(0, maxDescChars) + '...' : descRaw
+  
   const descLines = []
-  for (let i = 0; i < desc.length; i += 15) {
-    descLines.push(desc.substring(i, i + 15))
+  for (let i = 0; i < descTrimmed.length; i += 15) {
+    descLines.push(descTrimmed.substring(i, i + 15))
   }
   const descText = descLines.join('\n')
   const cardLabel = `${title}\n━━━━━━\n${typeLabel}\n━━━━━━\n${descText}`
 
-  // 计算高度
+  // 计算高度：lineHeight 18px 更贴近 12px 字体的实际渲染高度
   const fixedLines = 5
   const descLineCount = Math.max(descLines.length, 1)
   const totalLines = fixedLines + descLineCount - 1
-  const lineHeight = 16
+  const lineHeight = 18
   const padding = 36
   const cardHeight = Math.max(80, totalLines * lineHeight + padding)
 
