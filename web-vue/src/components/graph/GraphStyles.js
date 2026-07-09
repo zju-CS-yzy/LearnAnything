@@ -102,10 +102,14 @@ export function buildCyStyles() {
         'border-color': '#27ae60',
       }
     },
-    // ========== 边样式 ==========
+    // ========== 边样式 — 连接点系统（LA-034）==========
+    // BELONGS_TO: 文档树结构边，父→子，从父节点右侧出发到子节点左侧
     {
       selector: 'edge[type="BELONGS_TO"]',
       style: {
+        'curve-style': 'bezier',
+        'source-endpoint': '100% 50%',
+        'target-endpoint': '0% 50%',
         'line-color': COLORS.belongs_to,
         'target-arrow-color': COLORS.belongs_to,
         'line-style': 'solid',
@@ -113,6 +117,7 @@ export function buildCyStyles() {
         'arrow-scale': 0.8,
       }
     },
+    // ADJACENT_TO: 相邻 chunk 边（双向），使用默认端点
     {
       selector: 'edge[type="ADJACENT_TO"]',
       style: {
@@ -123,11 +128,13 @@ export function buildCyStyles() {
         'arrow-scale': 0.8,
       }
     },
-    // 语义层连接边
+    // 语义层连接边 — 概念依赖关系，源→目标，从左向右
     {
       selector: 'edge[type="SOLUTION"], edge[type="DEPENDS_ON"]',
       style: {
-        'curve-style': 'straight',
+        'curve-style': 'bezier',
+        'source-endpoint': '100% 50%',
+        'target-endpoint': '0% 50%',
         'target-arrow-shape': 'triangle',
         'arrow-scale': 0.8,
         'width': 1.5,
@@ -151,9 +158,13 @@ export function buildCyStyles() {
         'width': 1.5,
       }
     },
+    // DERIVED_FROM: ExtractedConcept → CanonicalConcept（向上聚合，从下往上）
     {
       selector: 'edge[type="DERIVED_FROM"]',
       style: {
+        'curve-style': 'bezier',
+        'source-endpoint': '50% 0%',
+        'target-endpoint': '50% 100%',
         'line-color': '#9b59b6',
         'target-arrow-color': '#9b59b6',
         'line-style': 'dotted',
@@ -162,9 +173,13 @@ export function buildCyStyles() {
         'arrow-scale': 0.8,
       }
     },
+    // HAS_CONCEPT: Chunk → ExtractedConcept（从左到右）
     {
       selector: 'edge[type="HAS_CONCEPT"]',
       style: {
+        'curve-style': 'bezier',
+        'source-endpoint': '100% 50%',
+        'target-endpoint': '0% 50%',
         'line-color': '#1abc9c',
         'target-arrow-color': '#1abc9c',
         'line-style': 'solid',
