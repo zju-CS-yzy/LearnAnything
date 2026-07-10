@@ -7,7 +7,7 @@
 
 支持的格式:
   - .txt, .md: 直接读取
-  - .pdf: PyMuPDF 提取文字型 / PaddleOCR 提取扫描件 / LA-035 图片提取
+  - .pdf: PyMuPDF 提取文字型 / PaddleOCR 提取扫描件 / LA-035 图片提取 / MinerU 结构化提取
   - .png, .jpg, .jpeg: PaddleOCR 提取文字 / pix2tex 提取公式
   - .docx: python-docx (后续支持)
 """
@@ -34,14 +34,38 @@ class DocumentProcessor:
         processor = DocumentProcessor()
         chunks = processor.process_file("path/to/chemistry_notes.pdf", subject="chemistry")
         # chunks: [{"text": str, "metadata": dict, "source": str}, ...]
+    
+    PDF 引擎选择:
+        - "pymupdf" (默认): 快速轻量，适合纯文字型 PDF
+        - "mineru": 结构化 Markdown 提取，适合含图片/公式/表格的 PDF
     """
 
-    def __init__(self, ocr_engine: str = "paddleocr", formula_engine: str = "pix2tex"):
+    def __init__(self, ocr_engine: str = "paddleocr", formula_engine: str = "pix2tex", pdf_engine: str = "pymupdf"):
+        """
+        Args:
+            ocr_engine: OCR 引擎（"paddleocr"）
+            formula_engine: 公式识别引擎（"pix2tex"）
+            pdf_engine: PDF 解析引擎（"pymupdf" | "mineru"）
+        """
         self.ocr_engine = ocr_engine
         self.formula_engine = formula_engine
+        self.pdf_engine = pdf_engine
         self._ocr = None
         self._formula_ocr = None
+        self._mineru_client = None  # LA-035: MinerU 客户端（懒加载）
         self.chunker = DocumentChunker()
+
+    def _get_mineru_client(self):
+        """延迟加载 MinerU 客户端"""
+        if self._mineru_client is None:
+            try:
+                from core.mineru_client import MinerUClient
+                self._mineru_client = MinerUClient()
+                print(f"[DocumentProcessor] MinerU client initialized: {self._mineru_client.version().split(chr(10))[0]}")
+            except Exception as e:
+                print(f"[DocumentProcessor] MinerU init failed: {e}")
+                self._mineru_client = None
+        return self._mineru_client
 
     def _get_ocr(self):
         """延迟加载 OCR 引擎"""
@@ -134,10 +158,64 @@ class DocumentProcessor:
 
     def _process_pdf(self, path: Path, metadata: Dict[str, Any], subject: str = "generic") -> List[Dict[str, Any]]:
         """
-        处理 PDF 文件（Parent-Child 双层分块，先全局分 Child 再按页码聚合 Parent）。
-        LA-035: 同时提取页面中的图片为独立 chunk。
+        处理 PDF 文件。
         
-        **核心改进**：
+        支持两种引擎:
+        - "pymupdf" (默认): 逐页提取文本 + 标题检测 + 图片提取 + 全局分块
+        - "mineru": 调用 MinerU CLI 输出结构化 Markdown，按标题层级分块
+        
+        LA-035: 同时提取页面中的图片为独立 chunk。
+        """
+        # ===== 引擎选择 =====
+        if self.pdf_engine == "mineru":
+            return self._process_pdf_mineru(path, metadata, subject)
+        
+        # ===== PyMuPDF 模式（默认）=====
+        return self._process_pdf_pymupdf(path, metadata, subject)
+    
+    def _process_pdf_mineru(self, path: Path, metadata: Dict[str, Any], subject: str = "generic") -> List[Dict[str, Any]]:
+        """
+        使用 MinerU CLI 解析 PDF，输出结构化 Markdown chunk。
+        
+        优势:
+        - 自动识别标题层级（## ### 等）
+        - 提取图片并保存到知识库
+        - 公式识别为 LaTeX
+        - 表格保留 Markdown 格式
+        
+        Args:
+            path: PDF 文件路径
+            metadata: 基础元数据
+            subject: 学科名称
+        
+        Returns:
+            标准格式 chunk 列表
+        """
+        client = self._get_mineru_client()
+        if client is None or not client.has_token():
+            print(f"[DocumentProcessor] MinerU 不可用，回退到 PyMuPDF")
+            return self._process_pdf_pymupdf(path, metadata, subject)
+        
+        print(f"[DocumentProcessor] 使用 MinerU 解析 PDF: {path.name}")
+        
+        try:
+            chunks = client.parse_pdf_to_chunks(
+                str(path),
+                subject=subject,
+                metadata=metadata,
+            )
+            print(f"[DocumentProcessor] MinerU 解析完成: {len(chunks)} chunks")
+            return chunks
+        except Exception as e:
+            print(f"[DocumentProcessor] MinerU 解析失败: {e}")
+            print(f"[DocumentProcessor] 回退到 PyMuPDF")
+            return self._process_pdf_pymupdf(path, metadata, subject)
+    
+    def _process_pdf_pymupdf(self, path: Path, metadata: Dict[str, Any], subject: str = "generic") -> List[Dict[str, Any]]:
+        """
+        使用 PyMuPDF 处理 PDF 文件（Parent-Child 双层分块，先全局分 Child 再按页码聚合 Parent）。
+        
+        **核心改进**:
         - 先收集所有页面文本，全局分 Child chunk（跨页段落不会被切断）
         - 再按页码聚合 Parent chunk（每页一个 Parent，用于引用溯源）
         - 提取标题结构（从书签/文本特征），填充 heading_path
