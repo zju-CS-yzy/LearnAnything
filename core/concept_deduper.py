@@ -113,6 +113,7 @@ class ConceptDeduper:
                 "source_chunk": node.get("source_chunk", ""),
                 "description": detail.get("description", node.get("description", "")),
                 "parent_hint": detail.get("parent_hint", node.get("parent_hint", "")),
+                "media_refs": node.get("media_refs", []),
             })
 
         return concepts

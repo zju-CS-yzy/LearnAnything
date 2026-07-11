@@ -112,7 +112,21 @@ class VLMClient:
 
         try:
             resp = requests.post(url, headers=headers, json=payload, timeout=120)
-            resp.raise_for_status()
+            
+            # LA-035: 打印详细业务错误码
+            if resp.status_code != 200:
+                try:
+                    error_data = resp.json()
+                    error_code = error_data.get("error", {}).get("code", "unknown")
+                    error_message = error_data.get("error", {}).get("message", resp.text[:200])
+                    print(f"[VLMClient] ERROR: API 返回错误 (HTTP {resp.status_code})")
+                    print(f"[VLMClient]   业务错误码: {error_code}")
+                    print(f"[VLMClient]   错误消息: {error_message}")
+                    print(f"[VLMClient]   模型: {self.MODEL}")
+                except Exception:
+                    print(f"[VLMClient] ERROR: API 返回错误 (HTTP {resp.status_code}): {resp.text[:200]}")
+                return None
+            
             data = resp.json()
             return data["choices"][0]["message"]["content"]
         except Exception as e:

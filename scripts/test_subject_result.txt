@@ -1,0 +1,111 @@
+总记录数: 92
+空 name: 0
+空 description: 0
+别名中找到: 数据检索
+  id=concept_canonical_8bedce4e54
+  name=检索
+  aliases=检索;检索技术;数据检索;关键词检索
+别名中找到: 文本分块
+  id=concept_canonical_f49fcc0f5c
+  name=文本分割
+  aliases=文本分割;文本分块
+别名中找到: 关键词检索
+  id=concept_canonical_8bedce4e54
+  name=检索
+  aliases=检索;检索技术;数据检索;关键词检索
+
+空 source_chunks: 0
+
+所有概念名称:
+  concept_canonical_508a19fde4: ChatPDF实现流程
+  concept_canonical_556c6735ac: 检索效果依赖问题
+  concept_canonical_dd2ae7226b: 检索增强多模态模型
+  concept_canonical_9fe7c05b22: Relevance Model (RM based)
+  concept_canonical_47a167947a: 生成答案
+  concept_canonical_ac61d93fb2: SFT
+  concept_canonical_ee0720ed34: 生成器模块
+  concept_canonical_a2428844d4: 超参数调优
+  concept_canonical_6512cedfd6: 向量存储
+  concept_canonical_64de761969: 数据提取
+  concept_canonical_8bedce4e54: 检索
+  concept_canonical_45396ed24f: 用户问题理解
+  concept_canonical_f5f8ef7f52: 评分板
+  concept_canonical_eec92b5ce6: Instruction Classifier
+  concept_canonical_434cd359a4: RAG好处
+  concept_canonical_c53eddddbd: Prompt Engineering
+  concept_canonical_5b9367227a: 上下文输入
+  concept_canonical_8001cd6041: 知识精炼
+  concept_canonical_9497589201: 意图理解模块
+  concept_canonical_f49fcc0f5c: 文本分割
+  concept_canonical_7cc882e80f: Timeliness Analysis
+  concept_canonical_737560491f: HyDE
+  concept_canonical_192c3b96e2: 多格式数据加载
+  concept_canonical_da673dc13f: 无法引用来源问题
+  concept_canonical_71aa853d5b: 筛选相关文本块
+  concept_canonical_560cc227e5: 时效性分析
+  concept_canonical_08abbbe259: embedding模型Tokens限制
+  concept_canonical_d9aba6c21e: 微调的百川LLM
+  concept_canonical_394efc0f1d: 大语言模型API
+  concept_canonical_eeae6793d9: 提示增强
+  concept_canonical_8ebf7fd1a6: Query Generator
+  concept_canonical_98250245cb: 子查询
+  concept_canonical_f51d4a6a47: 查询输出
+  concept_canonical_547c555f40: 信息利用黑盒问题
+  concept_canonical_f3a6178375: 百川大模型搜索增强系统
+  concept_canonical_8b0a5c6133: Intent understanding
+  concept_canonical_68f2c079e8: 发送上下文与问题
+  concept_canonical_e16bf849da: 检索器模块
+  concept_canonical_c8a859b0c0: 减少模型幻觉
+  concept_canonical_47e5952660: LLM不足
+  concept_canonical_7c60c0fb62: 查询轮换
+  concept_canonical_45c49e33f6: 向量相似度计算
+  concept_canonical_9704e0e0cb: LLM生成答案
+  concept_canonical_2fdd8ef72a: Search Enhanced Generator
+  concept_canonical_58244a7f58: 获得准确语义表示
+  concept_canonical_a53f5fef06: Relevance Model评分板
+  concept_canonical_8cedd79474: 向量相似度检索
+  concept_canonical_399c28421b: 外挂知识库
+  concept_canonical_44d914eb50: 检索增强生成流程
+  concept_canonical_4b2be937e0: 提高回答准确性
+  concept_canonical_8ba1f2c2d8: 相似性搜索
+  concept_canonical_7968236123: 向量化
+  concept_canonical_99a344d933: 向量化与索引创建
+  concept_canonical_1bae7d654e: 对齐检索模型输出和LLM偏好
+  concept_canonical_b3c04a4031: 文档文件夹
+  concept_canonical_0ece61c6d4: 指令意图理解
+  concept_canonical_60706add41: 数据索引
+  concept_canonical_3a3427f344: 精炼后增强提示
+  concept_canonical_e697c3ac8d: 指令分类器
+  concept_canonical_82b80f3258: 查询生成器
+  concept_canonical_b9dcd94454: 文本生成
+  concept_canonical_c9f7295d89: Web Search Plugin
+  concept_canonical_ae18cd97ed: 决定后续上下文内容
+  concept_canonical_60471b968c: 元数据过滤
+  concept_canonical_c7cd0b2a87: 全流程框架
+  concept_canonical_1cfec1bc87: 信息检索框架
+  concept_canonical_85396b671a: 评分结果
+  concept_canonical_7737e59254: 无差别检索效率问题
+  concept_canonical_d68b43d968: CM3 Transformer生成器
+  concept_canonical_fb6a72bbc3: RAG
+  concept_canonical_514c8f2046: 识别相关文本块
+  concept_canonical_b1bc596817: 协调查询和文档语义空间
+  concept_canonical_1eef8e110d: 大语言模型（LLM）
+  concept_canonical_d1a725fc8c: 文档分块
+  concept_canonical_b83f0d57b1: 增强搜索的LLM
+  concept_canonical_5b84bd005e: 结果增强
+  concept_canonical_e1356cf228: Knowledge Refinement
+  concept_canonical_52b7383189: 响应生成
+  concept_canonical_f982377d3b: 重排序
+  concept_canonical_b1d734a218: CLIP模型检索器
+  concept_canonical_409f811458: 语义完整性
+  concept_canonical_8aa9de4e72: 响应
+  concept_canonical_188f4991a8: Intelligent Search模块
+  concept_canonical_230b9057b4: 数据索引、检索和生成
+  concept_canonical_1fadb67321: Knowledge Database
+  concept_canonical_bcbc6fd370: RAG文本生成
+  concept_canonical_f8b36c4a9a: 嵌入API
+  concept_canonical_badef4014f: 搜索增强系统
+  concept_canonical_56b999b889: 图关系检索
+  concept_canonical_4dfe703640: 生成
+  concept_canonical_f7acc830e1: 检索增强生成（RAG）
+  concept_canonical_b369e3c8cc: 精准问答

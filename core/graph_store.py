@@ -83,6 +83,7 @@ class GraphStore:
             description STRING,
             parent_hint STRING,
             source_chunk STRING,
+            media_refs STRING,
             PRIMARY KEY(extracted_id)
         )""",
 
@@ -128,6 +129,11 @@ class GraphStore:
         )""",
 
         # Layer 3 → Layer 3: 语义连接（Phase 2.5: 全局语义推断）
+        """CREATE REL TABLE HAS_DETAIL (
+            FROM CanonicalConcept TO CanonicalConcept,
+            confidence DOUBLE,
+            MANY_MANY
+        )""",
         """CREATE REL TABLE SOLUTION (
             FROM CanonicalConcept TO CanonicalConcept,
             confidence DOUBLE,
@@ -1062,6 +1068,12 @@ class GraphStore:
                 concept.get("parent_hint", "")
             )
 
+            # LA-035: 多媒体引用
+            media_refs = concept.get("media_refs", [])
+            media_refs_json = self._escape_cypher_string(
+                json.dumps(media_refs, ensure_ascii=False) if media_refs else ""
+            )
+
             # 创建 ExtractedConcept 节点
             merge_cypher = f"""
                 MERGE (e:ExtractedConcept {{
@@ -1073,14 +1085,16 @@ class GraphStore:
                     e.extract_role = '{extract_role}',
                     e.description = '{description}',
                     e.parent_hint = '{parent_hint}',
-                    e.source_chunk = '{chunk_id}'
+                    e.source_chunk = '{chunk_id}',
+                    e.media_refs = '{media_refs_json}'
                 ON MATCH SET
                     e.name = '{concept_name}',
                     e.concept_type = '{concept_type}',
                     e.extract_role = '{extract_role}',
                     e.description = '{description}',
                     e.parent_hint = '{parent_hint}',
-                    e.source_chunk = '{chunk_id}'
+                    e.source_chunk = '{chunk_id}',
+                    e.media_refs = '{media_refs_json}'
             """
             try:
                 self._execute(conn, merge_cypher)
@@ -1508,23 +1522,56 @@ class GraphStore:
         nodes = []
 
         try:
-            result = self._execute(conn, f"""
-                MATCH (e:ExtractedConcept)
-                RETURN e.extracted_id, e.name, e.concept_type, e.extract_role,
-                       e.description, e.parent_hint, e.source_chunk
-                LIMIT {limit}
-            """)
-            while result.has_next():
-                row = result.get_next()
-                nodes.append({
-                    "id": row[0],
-                    "name": row[1],
-                    "type": row[2],
-                    "extract_role": row[3],
-                    "description": row[4],
-                    "parent_hint": row[5],
-                    "source_chunk": row[6],
-                })
+            # LA-035: 兼容旧数据库（可能缺少 media_refs 字段）
+            try:
+                result = self._execute(conn, f"""
+                    MATCH (e:ExtractedConcept)
+                    RETURN e.extracted_id, e.name, e.concept_type, e.extract_role,
+                           e.description, e.parent_hint, e.source_chunk, e.media_refs
+                    LIMIT {limit}
+                """)
+                while result.has_next():
+                    row = result.get_next()
+                    media_refs = []
+                    if row[7]:
+                        try:
+                            media_refs = json.loads(row[7])
+                        except:
+                            pass
+                    nodes.append({
+                        "id": row[0],
+                        "name": row[1],
+                        "type": row[2],
+                        "extract_role": row[3],
+                        "description": row[4],
+                        "parent_hint": row[5],
+                        "source_chunk": row[6],
+                        "media_refs": media_refs,
+                    })
+            except Exception as schema_e:
+                if "media_refs" in str(schema_e):
+                    # 旧数据库，回退到旧查询
+                    print(f"[GraphStore] 旧数据库兼容模式（ExtractedConcept）: {self.collection_name}")
+                    result = self._execute(conn, f"""
+                        MATCH (e:ExtractedConcept)
+                        RETURN e.extracted_id, e.name, e.concept_type, e.extract_role,
+                               e.description, e.parent_hint, e.source_chunk
+                        LIMIT {limit}
+                    """)
+                    while result.has_next():
+                        row = result.get_next()
+                        nodes.append({
+                            "id": row[0],
+                            "name": row[1],
+                            "type": row[2],
+                            "extract_role": row[3],
+                            "description": row[4],
+                            "parent_hint": row[5],
+                            "source_chunk": row[6],
+                            "media_refs": [],
+                        })
+                else:
+                    raise
         except Exception as e:
             print(f"[GraphStore] 获取 ExtractedConcept 失败: {e}")
 
@@ -1697,6 +1744,64 @@ class GraphStore:
         return edges
 
 
+
+
+    def add_has_detail_relations(self, relations: List[Dict[str, Any]]) -> int:
+        """
+        添加 HAS_DETAIL 关系（CanonicalConcept -> CanonicalConcept）。
+        LA-035 Phase 2.3: 语义聚合产生的层级关系。
+        Args:
+            relations: 关系列表，每个包含 {"from": canonical_id, "to": canonical_id, "confidence": float}
+        Returns:
+            成功创建的关系数量
+        """
+        conn = self._ensure_db()
+        created = 0
+        esc = self._escape_cypher_string
+        for rel in relations:
+            from_id = esc(rel.get("from", ""))
+            to_id = esc(rel.get("to", ""))
+            confidence = rel.get("confidence", 0.85)
+            if not from_id or not to_id or from_id == to_id:
+                continue
+            cypher = f"""
+                MATCH (a:CanonicalConcept {{canonical_id: '{from_id}'}}),
+                      (b:CanonicalConcept {{canonical_id: '{to_id}'}})
+                MERGE (a)-[:HAS_DETAIL {{confidence: {confidence}}}]->(b)
+            """
+            try:
+                self._execute(conn, cypher)
+                created += 1
+            except Exception as e:
+                print(f"[GraphStore] HAS_DETAIL failed {from_id}->{to_id}: {e}")
+        print(f"[GraphStore] Created {created} HAS_DETAIL relations")
+        return created
+
+    def get_has_detail_edges(self, limit: int = 500) -> List[Dict[str, Any]]:
+        """
+        获取 HAS_DETAIL 关系边。
+        Returns:
+            边列表，包含 source, target, type, confidence
+        """
+        conn = self._ensure_db()
+        edges = []
+        try:
+            result = self._execute(conn, f"""
+                MATCH (a:CanonicalConcept)-[r:HAS_DETAIL]->(b:CanonicalConcept)
+                RETURN a.canonical_id, b.canonical_id, r.confidence
+                LIMIT {limit}
+            """)
+            while result.has_next():
+                row = result.get_next()
+                edges.append({
+                    "source": row[0],
+                    "target": row[1],
+                    "type": "HAS_DETAIL",
+                    "confidence": row[2] if row[2] is not None else 0.85,
+                })
+        except Exception:
+            pass
+        return edges
 
     def close(self):
 

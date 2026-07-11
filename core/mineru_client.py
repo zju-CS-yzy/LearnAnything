@@ -254,30 +254,29 @@ class MinerUClient:
         # 3. 将 Markdown 中的图片引用路径替换为本地知识库路径
         markdown_text = self._replace_image_paths(markdown_text, copied_images)
         
-        # 4. 按标题层级分块（使用 MarkdownChunker）
+        # 4. 按标题层级分块（使用 MarkdownChunker v2.0）
         from core.markdown_chunker import MarkdownChunker
         
         chunker = MarkdownChunker()
-        parent_chunks, child_chunks = chunker.chunk_markdown(
+        chunks = chunker.chunk_markdown(
             markdown_text=markdown_text,
             source_metadata={**metadata, "subject": subject},
         )
         
-        # 合并为统一列表（parent 在前，children 跟随）
-        chunks = []
-        for parent in parent_chunks:
-            # 补充图片信息到 parent
-            parent["metadata"]["image_refs"] = [
-                copied_images.get(Path(ref["path"]).name, ref)
-                for ref in parent["metadata"].get("image_refs", [])
-                if Path(ref["path"]).name in copied_images
-            ]
-            chunks.append(parent)
-            
-            parent_id = parent["id"]
-            for child in child_chunks:
-                if child["metadata"].get("parent_id") == parent_id:
-                    chunks.append(child)
+        # 补充图片信息到 heading / document chunks
+        for chunk in chunks:
+            if chunk["metadata"]["chunk_type"] in ("heading", "document"):
+                chunk["metadata"]["image_refs"] = [
+                    copied_images.get(Path(ref["path"]).name, ref)
+                    for ref in chunk["metadata"].get("image_refs", [])
+                    if Path(ref["path"]).name in copied_images
+                ]
+        
+        # 5. 调用 ImageConceptExtractor 生成图片概念伪文本 chunks
+        # LA-035: 对含图片的 heading chunks 调用 VLM 生成描述，生成 image_pseudo chunks
+        from core.image_concept_extractor import ImageConceptExtractor
+        extractor = ImageConceptExtractor()
+        chunks = extractor.enrich_chunks_with_image_descriptions(chunks, subject=subject)
         
         return chunks
     

@@ -1,0 +1,109 @@
+[
+  {
+    "name": "Attention进阶面试题",
+    "features": [
+      "表格",
+      "公式",
+      "架构图"
+    ],
+    "path": "D:\\MyCS\\AI\\Project\\IWork\\yuque_download\\pdfs\\Attention 进阶面试题.pdf",
+    "mineru": {
+      "chars": 2657,
+      "chunks_estimated": 14,
+      "total_chars": 2657,
+      "total_lines": 100,
+      "headings": {
+        "h1": 0,
+        "h2": 13,
+        "h3": 0,
+        "samples_h2": [
+          "## 1 传统 Attention 存在哪些问题？",
+          "## 2 Attention 优化方向",
+          "## 3 Attention 变体有哪些？",
+          "## 4 Multi-Query Attention 篇",
+          "## 4.1 Multi-head Attention 存在什么问题？"
+        ]
+      },
+      "images": {
+        "count": 4,
+        "samples": [
+          "![](images/4acba349efc96e163a4eb69cc9bbd7d65fee0c16ae60d32f7f81ffbeccb7c67c.jpg)",
+          "![](images/5b9bc5db35c5a610be1f398e9e70376433c9b39395b262b1844672ff2262770e.jpg)",
+          "![](images/b3e02e7aa379e294b5d66594541c0c3197296113fe45a7a50b9f4197cd7fb74c.jpg)"
+        ]
+      },
+      "formulas": {
+        "block": 0,
+        "inline": 0,
+        "samples": []
+      },
+      "tables": {
+        "lines": 0,
+        "samples": []
+      },
+      "lists": {
+        "unordered": 0,
+        "ordered": 4
+      },
+      "code_blocks": 0
+    },
+    "pymupdf": {
+      "error": "'DocumentProcessor' object has no attribute '_get_ocr'"
+    }
+  },
+  {
+    "name": "RAG_Fusion",
+    "features": [
+      "流程图",
+      "列表",
+      "公式"
+    ],
+    "path": "D:\\MyCS\\AI\\Project\\LearnAnything\\knowledge_base\\generic\\raw\\RAG Fusion优化策略面试题.pdf",
+    "mineru": {
+      "chars": 4430,
+      "chunks_estimated": 19,
+      "total_chars": 4430,
+      "total_lines": 159,
+      "headings": {
+        "h1": 0,
+        "h2": 18,
+        "h3": 0,
+        "samples_h2": [
+          "## 一、RAG 有哪些优点？",
+          "## 二、RAG 存在哪些局限性？",
+          "## 三、为什么 需要 RAG-Fusion？",
+          "## 四、说一下 RAG-Fusion 核心技术？",
+          "## 五、说一下 RAG-Fusion 工作流程？"
+        ]
+      },
+      "images": {
+        "count": 3,
+        "samples": [
+          "![](images/91523325ff03f477f55efa72621acf8e6b9246cc95c42a2008d3e9f05ea64bb6.jpg)",
+          "![](images/1fda6d5b45099b136108c973a630e16818684b6d0f9ade88f7c1c8da105d86e5.jpg)",
+          "![](images/2f287808ab7aa3e7dff302453cea364ecd3e8d711a3c0be6056342b7d70f9b45.jpg)"
+        ]
+      },
+      "formulas": {
+        "block": 1,
+        "inline": 0,
+        "samples": [
+          "\nR R F s c o r e (d \\in D) = \\sum_ {r \\in R} \\frac {1}{k + r (d)},\n"
+        ]
+      },
+      "tables": {
+        "lines": 0,
+        "samples": []
+      },
+      "lists": {
+        "unordered": 15,
+        "ordered": 24
+      },
+      "code_blocks": 0
+    },
+    "pymupdf": {
+      "chunks": 18,
+      "chars": 10003
+    }
+  }
+]
