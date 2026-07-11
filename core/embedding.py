@@ -128,12 +128,31 @@ class ApiEmbeddingClient:
                     embeddings = [indexed.get(i, indexed.get(str(i), [])) for i in range(len(texts))]
                     return embeddings
 
+                # 400/500 等错误 -> 打印详细业务错误码
+                try:
+                    error_data = response.json()
+                    error_code = error_data.get("error", {}).get("code", "unknown")
+                    error_message = error_data.get("error", {}).get("message", response.text[:200])
+                    print(f"[Embedding] ERROR: API 返回错误 (HTTP {response.status_code})")
+                    print(f"[Embedding]   业务错误码: {error_code}")
+                    print(f"[Embedding]   错误消息: {error_message}")
+                    print(f"[Embedding]   请求模型: {self.model}")
+                    print(f"[Embedding]   请求文本数: {len(texts)}")
+                    print(f"[Embedding]   首条文本长度: {len(texts[0]) if texts else 0}")
+                except Exception:
+                    print(f"[Embedding] ERROR: API 返回错误 (HTTP {response.status_code}): {response.text[:200]}")
+
                 # 429 限流 -> 退避重试
                 if response.status_code == 429:
                     wait = 2 ** attempt
                     print(f"[Embedding] WARNING: 限流 (429)，等待 {wait}s 后重试 ({attempt}/{self.max_retries})")
                     time.sleep(wait)
                     continue
+
+                # 400 等客户端错误 -> 通常重试无用，但按配置重试
+                if response.status_code == 400:
+                    print(f"[Embedding] WARNING: 请求参数错误 (400)，通常重试无法解决")
+                    # 仍然尝试重试，但可能无效
 
                 # 其他错误 -> 直接抛出
                 response.raise_for_status()
@@ -156,17 +175,30 @@ class ApiEmbeddingClient:
         批量编码文本为 embedding 向量。
 
         智谱 API 单次最多支持约 100 条输入，超过则自动分片。
+        如果 API 调用失败，自动降级到 HashEmbeddingFunction。
         """
         if not texts:
             return []
 
-        BATCH_SIZE = 100  # 智谱 embedding API 建议的单批上限
+        BATCH_SIZE = 32  # 智谱 embedding-3 最大支持64条，保守用32
         all_embeddings = []
+        fallback = HashEmbeddingFunction(dim=self.dimensions)
 
         for i in range(0, len(texts), BATCH_SIZE):
             batch = texts[i : i + BATCH_SIZE]
-            embeddings = self._request(batch)
-            all_embeddings.extend(embeddings)
+            try:
+                embeddings = self._request(batch)
+                all_embeddings.extend(embeddings)
+            except Exception as e:
+                print(f"[Embedding] WARNING: API 批量调用失败，对 {len(batch)} 条文本使用降级 embedding")
+                print(f"[Embedding]   错误: {e}")
+                # 逐条降级
+                for text in batch:
+                    try:
+                        emb = fallback.encode([text])[0]
+                        all_embeddings.append(emb.tolist() if hasattr(emb, 'tolist') else emb)
+                    except Exception:
+                        all_embeddings.append([0.0] * self.dimensions)
 
         return all_embeddings
 

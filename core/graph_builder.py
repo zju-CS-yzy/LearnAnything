@@ -174,12 +174,29 @@ class GraphBuilder:
                 continue
 
             try:
-                # 提取概念
-                concepts = extractor.extract_concepts(chunk_text)
+                # LA-035: 获取 chunk 的多媒体上下文
+                chunk_meta = chunk.get("metadata", {})
+                media_context = []
+                if chunk_meta.get("media_refs"):
+                    media_context = chunk_meta["media_refs"]
+                
+                # 提取概念（传入多媒体上下文）
+                concepts = extractor.extract_concepts(chunk_text, media_context=media_context)
+
+                # LA-035: 为图片相关 chunk 的概念注入 parent_hint
+                chunk_type = chunk_meta.get("chunk_type", "") or chunk_meta.get("type", "")
+                heading_path = chunk_meta.get("heading_path", "")
+                if chunk_type in ("image", "image_pseudo") and heading_path:
+                    for c in concepts:
+                        if not c.get("parent_hint"):
+                            c["parent_hint"] = heading_path
 
                 # 写入 KùzuDB
                 for c in concepts:
                     c["id"] = extractor.generate_concept_id(c["name"], chunk_id)
+                    # LA-035: 将 media_refs 附加到概念
+                    if media_context:
+                        c["media_refs"] = media_context
 
                 added = self.graph_store.add_concepts(chunk_id, concepts)
 

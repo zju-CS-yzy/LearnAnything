@@ -62,7 +62,37 @@
           </div>
         </div>
 
-        <!-- 概念描述 -->
+        <div v-if="hasMedia" class="info-section media-section">
+          <div class="info-label">📷 关联媒体</div>
+          <div class="media-list">
+            <div
+              v-for="(ref, idx) in mediaRefs"
+              :key="idx"
+              class="media-item"
+            >
+              <!-- 图片 -->
+              <div v-if="ref.type === 'image'" class="media-image">
+                <img
+                  :src="getImageUrl(ref)"
+                  :alt="ref.description || ref.alt || '图片'"
+                  class="media-thumbnail"
+                  @click="openImageModal(ref)"
+                />
+                <div v-if="ref.description" class="media-caption">{{ ref.description }}</div>
+              </div>
+              <!-- 公式 -->
+              <div v-else-if="ref.type === 'formula'" class="media-formula">
+                <span class="formula-badge">公式</span>
+                <pre class="formula-content">{{ ref.description || 'LaTeX 公式' }}</pre>
+              </div>
+              <!-- 表格 -->
+              <div v-else-if="ref.type === 'table'" class="media-table">
+                <span class="table-badge">表格</span>
+                <div class="table-desc">{{ ref.description || '数据表格' }}</div>
+              </div>
+            </div>
+          </div>
+        </div>
         <div v-if="node.description" class="info-section">
           <div class="info-label">概念描述</div>
           <div class="info-text">{{ node.description }}</div>
@@ -227,6 +257,33 @@ const thumbnailUrl = computed(() => {
   }
   return imageUrl.value
 })
+
+// LA-035: media_refs 列表
+const mediaRefs = computed(() => {
+  const refs = props.node?.media_refs
+  if (!refs) return []
+  if (Array.isArray(refs)) return refs
+  try {
+    const parsed = JSON.parse(refs)
+    return Array.isArray(parsed) ? parsed : []
+  } catch { return [] }
+})
+
+const hasMedia = computed(() => mediaRefs.value.length > 0)
+
+function getImageUrl(ref) {
+  if (!ref || !ref.path) return ''
+  const path = ref.path
+  const filename = path.split('/').pop().split('\\').pop()
+  const subject = path.split('/')[0]?.replace('_v1_images', '') || 'generic'
+  return `${window.location.origin}/api/images/${subject}/${filename}`
+}
+
+function openImageModal(ref) {
+  if (ref && ref.path) {
+    window.open(getImageUrl(ref), '_blank')
+  }
+}
 
 // 解析 source_refs（人类可读的来源引用字符串数组）
 const sourceRefsArray = computed(() => {
@@ -552,6 +609,20 @@ function relationLabel(relation) {
 
 /* LA-035: 图片节点样式 */
 .image-section { margin-top: 12px; }
+
+/* LA-035: 多媒体列表样式 */
+.media-section { margin-top: 12px; }
+.media-list { display: flex; flex-direction: column; gap: 10px; }
+.media-item { border-radius: 8px; overflow: hidden; border: 1px solid var(--border-color, #e0e0e0); background: var(--bg-hover, #f8f9fa); }
+.media-thumbnail { width: 100%; max-height: 180px; object-fit: cover; cursor: zoom-in; display: block; }
+.media-thumbnail:hover { opacity: 0.9; }
+.media-caption { padding: 6px 10px; font-size: 11px; color: var(--text-muted, #7f8c8d); background: var(--bg-card, #fff); }
+.media-formula, .media-table { padding: 10px; }
+.formula-badge { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: bold; background: #f59e0b; color: #1e1e2e; margin-bottom: 6px; }
+.table-badge { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: bold; background: #3b82f6; color: #fff; margin-bottom: 6px; }
+.formula-content { font-family: monospace; font-size: 12px; color: var(--text-secondary, #555); white-space: pre-wrap; word-break: break-all; margin: 0; }
+.table-desc { font-size: 12px; color: var(--text-secondary, #555); }
+
 .image-preview {
   margin-top: 8px;
   border-radius: 8px;

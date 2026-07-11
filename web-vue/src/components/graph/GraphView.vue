@@ -405,6 +405,9 @@ async function loadConceptNodes() {
           source_chunks: sourceChunks,
           source_chunk_count: sourceChunks.length,
           source_refs: sourceRefs,
+          // LA-035: 多媒体引用
+          media_refs: c.media_refs || [],
+          has_media: (c.media_refs || []).length > 0,
         }
       }
     })

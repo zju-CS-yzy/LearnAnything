@@ -1,87 +1,122 @@
+# 遗留问题追踪 (Leftover Problem Tracker)
 
+## 2026-07-11 终版更新
 
 ---
 
-## 2026-07-09 新增/更新
+### ✅ 已完成（今日）
 
-### ✅ 已完成
-
-#### 1. LA-033 修复：v2.0 Schema 兼容
+#### LA-035 Phase 2.2+：MarkdownChunker v2.0 重写
 - **状态**: ✅ **已完成**
-- **根因**: 后端 `get_subgraph/get_concepts_for_chunk/get_semantic_edges` 使用旧 Schema（`Concept` 节点类型 + `DEFINES` 关系），与新 v2.0 Schema（`CanonicalConcept`/`ExtractedConcept` + `SOLUTION`/`DEPENDS_ON`/`DERIVED_FROM`）不兼容
-- **修复**:
-  - `graph_store.py`: 三个函数更新为 v2.0 Schema
-  - `backend_api.py`: `list_graph_concepts` 合并 KùzuDB 和 CSV 的 description
-  - `GraphStyles.js`: 添加 DERIVED_FROM/HAS_CONCEPT 边样式
-  - `NodeDetailPanel.vue`: 语义关联去重 + 新增边类型样式类
-- **关键提交**: `cb2d335`
+- **内容**: 按自然段分块 + 树形标题结构（支持 `#`~`######` 任意层级）
+- **修改文件**: `core/markdown_chunker.py`, `core/mineru_client.py`, `core/image_concept_extractor.py`
+- **设计文档**: `docs/design-markdown-chunk-semantic-aggregation.md` v2.0
 
-#### 2. LA-034 实现：贝塞尔曲线连接点系统
+#### LA-035-P4：media_refs 传递链修复
 - **状态**: ✅ **已完成**
-- **内容**:
-  - 统一端点规则：源节点右中（90deg）→ 目标节点左中（270deg）
-  - 曲线类型：unbundled-bezier（自适应曲率）
-  - 动态曲率调整：根据目标节点相对 y 位置自动凹凸方向
-- **提交序列**: `eeb0a6d` → `f3d4532` → `51ed14c` → `87318be` → `d98b347`
+- **内容**: ExtractedConcept + CanonicalConcept 两端接口匹配，确保传递链完整
+- **测试**: `tests/test_media_refs_chain.py` 通过
 
-#### 3. LA-035 Phase 1：PDF 图片提取与展示
+#### LA-035 Phase 2.3：语义聚合
 - **状态**: ✅ **已完成**
-- **内容**:
-  - `document_processor.py`: `_extract_pdf_page_images()` 提取 PDF 内嵌图片
-  - 保存路径：`knowledge_base/<subject>_v1_images/` + `_thumbnails/`
-  - `backend_api.py`: `/api/images/<subject>/<filename>` 静态文件路由
-  - 前端：图片节点样式（📷 橙色）+ 详情面板缩略图预览
-- **关键提交**: `19dcb93`, `2225b28`, `c918a63`
+- **内容**: HeadingChunk 聚合 ParagraphChunk 概念 → 主题概念 + HAS_DETAIL 层级关系
+- **实现文件**: `core/semantic_aggregator.py`
 
-#### 4. LA-035 Phase 2.1：CanonicalConcept 多媒体扩展 Schema + 数据层
+#### LA-035 Phase 3：图片概念与文本概念融合
 - **状态**: ✅ **已完成**
-- **内容**:
-  - `graph_store.py`: CanonicalConcept Schema 增加 `media_refs` 字段
-  - `add_canonical_concepts()`: 支持写入 media_refs JSON
-  - `get_canonical_concepts()`: 返回 media_refs 列表（兼容旧数据库回退）
-  - `concept_deduper.py`: 合并时聚合 media_refs（去重）
-  - `semantic_extractor.py`: 新增 `media_context` 参数支持多媒体上下文
-- **关键提交**: `f987636`, `584c3c0`
+- **内容**: 图片概念（image_pseudo chunks）+ 文本概念 → 去重合并 → 统一 CanonicalConcept
+- **关键验证**: 图片 VLM 描述 → image_pseudo chunk → 概念提取 → 去重合并 → media_refs 保留
 
-#### 5. 设计文档
-- **docs/design-image-semantic-classification.md**: 图片语义分类策略（含前人方案对比）
-- **docs/design-canonicalconcept-multimedia.md**: CanonicalConcept 多媒体扩展完整设计
+#### LA-035-P5：Pydantic 类型定义
+- **状态**: ✅ **已完成**
+- **内容**: `core/types.py` 定义所有核心类型的 Pydantic 模型，兼容旧 dict 访问方式
+- **测试**: `tests/test_pydantic_types.py` 通过
 
-### 🔄 进行中
+#### LA-035-P6：SemanticLinker P1 优化
+- **状态**: ✅ **已完成**
+- **内容**: 排除已有 HAS_DETAIL 关系的概念对，减少冗余 LLM 调用
 
-#### LA-035 Phase 2.2：图片概念提取流程
-- **状态**: 🔄 **待实现**
-- **内容**: 图片 → VLM 描述 → 伪文本 chunk → 概念提取 → 关联/合并到现有 CanonicalConcept
-- **设计文档**: `docs/design-canonicalconcept-multimedia.md`
-- **实施计划**:
-  - Phase 2.2（1-2 天）：图片/公式/表格 → VLM 描述 → 概念提取流程
-  - Phase 2.3（1 天）：节点创建/合并逻辑
-  - Phase 2.4（1 天）：前端展示优化
+#### LA-035-P7：前端多媒体展示
+- **状态**: ✅ **已完成**
+- **内容**: NodeDetailPanel.vue 详情面板展示图片/公式/表格
+- **修改文件**: `web-vue/src/components/graph/NodeDetailPanel.vue`, `GraphView.vue`
+
+#### LA-035-P8：PDF 默认引擎改为 MinerU
+- **状态**: ✅ **已完成**
+- **内容**: `core/document_processor.py` 默认 `pdf_engine="mineru"`
+- **效果**: 前端导入 PDF 自动使用 MinerU，支持图片 VLM 描述
+
+#### LA-035-P9：Embedding API 错误处理增强
+- **状态**: ✅ **已完成**
+- **内容**: `core/embedding.py` 打印详细业务错误码，批量失败时自动降级到 HashEmbedding
+
+---
 
 ### 🔴 遗留问题
 
-#### LA-030: 部分 PDF 文档未提取出概念
-- **状态**: ✅ **已解决**（7月9日确认）
-- **解决**: 重写 PDF 处理流程，所有 PDF 正常提取概念
-- **归档**: 2026-07-09
+#### LA-035-P10：图片缩略图显示
+- **状态**: 🔴 **新增（明日优先）**
+- **问题描述**: 基于图片提取的概念节点在 Cytoscape.js 图谱中与普通文本节点外观完全一致，没有缩略图标识。用户无法直观区分哪些是图片概念节点。
+- **期望效果**: 图片概念节点上显示图片缩略图作为节点背景或图标
+- **技术难点**: Cytoscape.js 对节点背景图片的支持方式
+- **修改范围**: `web-vue/src/components/graph/GraphView.vue`
+- **优先级**: P0
 
-#### LA-031: PDF 导入缺少章节/页码信息
-- **状态**: ✅ **已解决**（7月9日确认）
-- **解决**: `_extract_page_headings()` + 字段统一映射
-- **归档**: 2026-07-09
+#### LA-035-P11：多媒体chunk融合可视化
+- **状态**: 🔴 **新增（明日优先）**
+- **问题描述**: 公式图片与讨论该公式的文本chunk是否实现了语义融合，在前端完全看不出来。用户无法判断融合是否成功。
+- **期望效果**: 
+  - 融合后的概念节点有明确的"融合来源"标识（如"来自 2 个文本chunk + 1 个图片chunk"）
+  - 融合边（图片概念 → 文本概念）有特殊样式
+  - 点击融合节点可查看所有来源chunk的列表
+- **修改范围**: `web-vue/src/components/graph/` + 后端 API
+- **优先级**: P0
 
-#### LA-032: 批量 embedding API 400 错误
-- **状态**: 🟡 **保持**（Stage 1 parent_hint 已满足主要需求）
+#### LA-035-P12：上层chunk融合方案
+- **状态**: 🟡 **新增（待讨论）**
+- **问题描述**: MarkdownChunker v2.0 生成的多层chunk结构（Document → Heading L1 → Heading L2 → Paragraph）导致大量上层chunk出现。这些上层chunk（HeadingChunk）的内容是"标题 + 直接段落"，在概念提取时会产生与底层chunk重复或冲突的概念。
+- **需要讨论的问题**:
+  1. HeadingChunk 是否也需要提取概念？还是只作为聚合容器？
+  2. HeadingChunk 提取的概念与 ParagraphChunk 提取的概念如何处理重复？
+  3. 上层chunk的概念是否应该比下层chunk更"抽象"？
+  4. SemanticAggregator 的 HAS_DETAIL 关系是否已经足够？
+- **优先级**: P1
 
-#### LA-035: 图片chunk提取与嵌入
-- **状态**: 🔄 **Phase 2.1 完成，Phase 2.2 待实现**
-- **已完成**: Schema 扩展、旧数据库兼容、API 字段补全
-- **待实现**: 
-  - `document_processor.py`: 图片 chunk VLM 预处理（生成伪文本）
-  - `semantic_extractor.py`: 图片描述参与概念提取
-  - `concept_deduper.py`: 图片概念与文本概念融合
-  - 前端：概念节点展示关联媒体（📎 图标）
+#### LA-035-P13：批量测试更多 PDF
+- **状态**: 🔄 **待测试**
+- **内容**: 3-5 个不同特征 PDF（表格密集/公式密集/纯文字/扫描件）验证整体流程
+- **优先级**: P2
+
+#### LA-035-P14：两阶段提取优化
+- **状态**: 🔄 **待实现**
+- **内容**: SemanticExtractor 支持 nodes-first → edges-with-context 模式
+- **优先级**: P2
+
+#### LA-035-P15：YAML 模板配置
+- **状态**: 🟡 **低优先级**
+- **内容**: 将范式配置从代码硬编码改为 YAML 模板文件
+- **优先级**: P3
+
+#### LA-035-P16：Token 过期检测
+- **状态**: 🟡 **低优先级**
+- **内容**: MinerU Token 有效期管理，自动刷新提示
+- **优先级**: P3
+
+#### LA-035-P17：公式/表格提取增强
+- **状态**: 🟡 **低优先级**
+- **内容**: MinerU 已提取 LaTeX/Markdown 表格，可进一步用于概念提取
+- **优先级**: P3
 
 ---
 
-*记录日期：2026-07-09 23:10*
+### 明日计划（2026-07-12）
+
+| 优先级 | 任务 | 内容 |
+|:---|:---|:---|
+| P0 | LA-035-P10 | 图片缩略图显示（Cytoscape.js 节点背景图片） |
+| P0 | LA-035-P11 | 多媒体chunk融合可视化（融合来源标识 + 特殊边样式） |
+| P1 | LA-035-P12 | 讨论并确认上层chunk融合方案 |
+
+---
+
+*记录日期：2026-07-11 23:59*

@@ -40,12 +40,12 @@ class DocumentProcessor:
         - "mineru": 结构化 Markdown 提取，适合含图片/公式/表格的 PDF
     """
 
-    def __init__(self, ocr_engine: str = "paddleocr", formula_engine: str = "pix2tex", pdf_engine: str = "pymupdf"):
+    def __init__(self, ocr_engine: str = "paddleocr", formula_engine: str = "pix2tex", pdf_engine: str = "mineru"):
         """
         Args:
             ocr_engine: OCR 引擎（"paddleocr"）
             formula_engine: 公式识别引擎（"pix2tex"）
-            pdf_engine: PDF 解析引擎（"pymupdf" | "mineru"）
+            pdf_engine: PDF 解析引擎（"mineru" | "pymupdf"），默认 "mineru"
         """
         self.ocr_engine = ocr_engine
         self.formula_engine = formula_engine

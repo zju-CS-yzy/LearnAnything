@@ -33,7 +33,7 @@ Phase 2 核心模块：在去重后的概念空间中建立跨文档/跨 chunk �
 
 import csv
 import json
-from typing import List, Dict, Any, Optional, Tuple
+from typing import List, Dict, Any, Optional, Tuple, Set
 
 import numpy as np
 from core.graph_store import GraphStore
@@ -162,7 +162,11 @@ class SemanticLinker:
         edges_stage1 = self._stage1_parent_hint_match(level_groups, config)
 
         # 4. 阶段2+3: embedding 初筛 + LLM 确认（排除已有连接的节点对）
+        # LA-035 Phase 3: 同时排除已建立 HAS_DETAIL 关系的概念对
         existing_pairs = {(e["parent_id"], e["child_id"]) for e in edges_stage1}
+        has_detail_pairs = self._get_has_detail_pairs()
+        existing_pairs.update(has_detail_pairs)
+        
         edges_stage23 = self._stage23_embedding_then_llm(
             level_groups, config, existing_pairs
         )
@@ -180,6 +184,28 @@ class SemanticLinker:
             "paradigm": paradigm,
             "concept_count": len(concepts),
         }
+
+    # ========== 辅助: 获取已有 HAS_DETAIL 关系对 ==========
+
+    def _get_has_detail_pairs(self) -> Set[Tuple[str, str]]:
+        """
+        获取数据库中已有的 HAS_DETAIL 关系对。
+        
+        LA-035 Phase 3: 语义聚合阶段建立的 HAS_DETAIL 关系
+        不应被 SemanticLinker 的 embedding+LLM 阶段重复评估。
+        
+        Returns:
+            {(source_canonical_id, target_canonical_id), ...}
+        """
+        try:
+            edges = self.graph_store.get_has_detail_edges(limit=5000)
+            pairs = {(e["source"], e["target"]) for e in edges}
+            if pairs:
+                print(f"[SemanticLinker] 已有 HAS_DETAIL 关系对: {len(pairs)}")
+            return pairs
+        except Exception as e:
+            print(f"[SemanticLinker] 获取 HAS_DETAIL 关系对失败: {e}")
+            return set()
 
     # ========== 阶段1: parent_hint 精确匹配 ==========
 

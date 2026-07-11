@@ -66,8 +66,9 @@ class ImageConceptExtractor:
         for chunk in chunks:
             result.append(chunk)
             
-            # 只处理 TitleChunk（图片通常嵌入在标题下）
-            if chunk.get("metadata", {}).get("chunk_type") != "title":
+            # 处理 heading / document 类型的 chunk 中的图片（v2.0 用 "heading"，兼容旧数据 "title"）
+            chunk_type = chunk.get("metadata", {}).get("chunk_type", "")
+            if chunk_type not in ("heading", "document", "title"):
                 continue
             
             image_refs = chunk.get("metadata", {}).get("image_refs", [])
@@ -104,6 +105,7 @@ class ImageConceptExtractor:
                     img_ref=img_ref,
                     description=description,
                     img_idx=img_idx,
+                    kb_path=img_path,
                 )
                 result.append(pseudo_chunk)
         
@@ -205,6 +207,7 @@ class ImageConceptExtractor:
         img_ref: Dict[str, Any],
         description: str,
         img_idx: int,
+        kb_path: Optional[Path] = None,
     ) -> Dict[str, Any]:
         """创建图片"伪文本 chunk"。"""
         parent_id = parent_chunk["id"]
@@ -218,6 +221,14 @@ class ImageConceptExtractor:
         # 构建伪文本：图片描述 + 元信息
         pseudo_text = f"[图片 - {heading}]\n{description}"
         
+        # LA-035: 使用 KB 中的实际路径，保留原始信息
+        media_ref = dict(img_ref)  # 复制，避免修改原始
+        if kb_path and kb_path.exists():
+            media_ref["path"] = str(kb_path)
+            # 推断缩略图路径
+            thumb_path = str(kb_path).replace("_v1_images/", "_v1_thumbnails/")
+            media_ref["thumbnail_path"] = thumb_path
+        
         return {
             "id": pseudo_id,
             "text": pseudo_text,
@@ -226,7 +237,7 @@ class ImageConceptExtractor:
                 "chunk_type": "image_pseudo",
                 "parent_id": parent_id,
                 "heading_path": heading,
-                "media_refs": [img_ref],
+                "media_refs": [media_ref],
                 "description_source": "vlm",
                 "description_length": len(description),
             },
