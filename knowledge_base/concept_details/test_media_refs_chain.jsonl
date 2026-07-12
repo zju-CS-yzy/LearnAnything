@@ -1,2 +1,0 @@
-{"chunk_id": "test_chunk_001", "concepts": [{"id": "test_concept_001", "name": "Transformer", "concept_type": "definition", "relation": "DEFINES", "description": "基于自注意力机制的深度学习架构", "parent_hint": "深度学习"}, {"id": "test_concept_002", "name": "自注意力机制", "concept_type": "definition", "relation": "DEFINES", "description": "允许模型同时关注所有输入元素的机制", "parent_hint": "Transformer"}]}
-{"chunk_id": "test_chunk_002", "concepts": [{"id": "test_concept_003", "name": "RNN", "concept_type": "definition", "relation": "DEFINES", "description": "循环神经网络，用于序列建模", "parent_hint": "神经网络"}]}

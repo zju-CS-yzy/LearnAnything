@@ -1669,6 +1669,44 @@ def api_get_subject_meta(subject_id: str):
     return meta
 
 
+# ========== LA-035: 媒体文件静态服务 ==========
+
+@app.get("/api/media/{path:path}")
+def serve_media(path: str):
+    """
+    提供知识库中的图片等媒体文件的静态访问。
+    
+    路径中的正斜杠会被还原为系统路径分隔符，
+    确保 Windows 路径也能正确解析。
+    """
+    from urllib.parse import unquote
+    import os
+    from config.settings import KNOWLEDGE_BASE_DIR
+    
+    # 解码 URL 编码
+    decoded_path = unquote(path)
+    
+    # 替换 URL 正斜杠为系统路径分隔符
+    normalized_path = decoded_path.replace('/', os.sep)
+    
+    # 构建完整路径
+    full_path = KNOWLEDGE_BASE_DIR / normalized_path
+    
+    # 安全检查：确保路径在知识库目录内（防止目录遍历攻击）
+    try:
+        full_path = full_path.resolve()
+        kb_root = KNOWLEDGE_BASE_DIR.resolve()
+        if not str(full_path).startswith(str(kb_root)):
+            raise HTTPException(status_code=403, detail="Forbidden: path outside knowledge base")
+    except Exception:
+        raise HTTPException(status_code=403, detail="Forbidden: invalid path")
+    
+    if full_path.exists() and full_path.is_file():
+        return FileResponse(full_path)
+    
+    raise HTTPException(status_code=404, detail=f"File not found: {path}")
+
+
 # ========== 静态前端文件 ==========
 # 如果 web 目录存在且包含 index.html，挂载静态文件服务
 # 否则保留 root() 路由返回 API 信息

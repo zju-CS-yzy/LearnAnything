@@ -138,6 +138,13 @@
         </div>
       </div>
     </div>
+
+    <!-- LA-035-P10: 悬浮预览卡片 -->
+    <GraphNodeTooltip
+      v-model:visible="tooltipVisible"
+      :node="tooltipNode"
+      :position="tooltipPosition"
+    />
   </div>
 </template>
 
@@ -151,6 +158,7 @@ import { runTreeLayout, runConceptLayout, generateNodeLabel, buildUMLCardLabel }
 import NodeDetailPanel from './NodeDetailPanel.vue'
 import BuildOptions from './BuildOptions.vue'
 import ConceptTable from './ConceptTable.vue'
+import GraphNodeTooltip from './GraphNodeTooltip.vue'
 
 cytoscape.use(cola)
 cytoscape.use(dagre)
@@ -195,6 +203,12 @@ const selectedParadigm = ref('theory')
 const selectedConcept = ref(null)
 const showConceptModal = ref(false)
 
+// LA-035-P10: 悬浮预览卡片状态
+const tooltipVisible = ref(false)
+const tooltipNode = ref(null)
+const tooltipPosition = ref({ x: 0, y: 0 })
+let tooltipTimer = null
+
 // ========== 初始化 Cytoscape ==========
 function initCy() {
   if (!cyContainer.value) return
@@ -232,6 +246,8 @@ function initCy() {
       thumbnail_path: node.data('thumbnail_path') || '',
       width: node.data('width') || 0,
       height: node.data('height') || 0,
+      // LA-035-P11: 多媒体引用（详情面板显示）
+      media_refs: node.data('media_refs') || [],
     }
     if (isChunkNodeType(nodeType)) {
       loadConcepts(node.id())
@@ -242,9 +258,49 @@ function initCy() {
     highlightNeighbors(node)
   })
 
+  // LA-035-P10: 鼠标悬停显示预览卡片（仅概念节点）
+  cy.on('mouseover', 'node', (e) => {
+    const node = e.target
+    const nodeType = node.data('type') || ''
+    // 只对概念节点显示 tooltip
+    if (['child', 'parent', 'markdown'].includes(nodeType)) return
+
+    if (tooltipTimer) clearTimeout(tooltipTimer)
+
+    const rp = node.renderedPosition()
+    const containerRect = cy.container().getBoundingClientRect()
+    tooltipPosition.value = {
+      x: containerRect.left + rp.x,
+      y: containerRect.top + rp.y,
+    }
+
+    tooltipNode.value = {
+      id: node.id(),
+      label: node.data('label'),
+      name: node.data('label'),
+      type: nodeType,
+      description: node.data('description') || '',
+      source_chunks: node.data('source_chunks') || [],
+      media_refs: node.data('media_refs') || [],
+    }
+    tooltipVisible.value = true
+  })
+
+  cy.on('mouseout', 'node', (e) => {
+    const node = e.target
+    const nodeType = node.data('type') || ''
+    if (['child', 'parent', 'markdown'].includes(nodeType)) return
+
+    // 延迟关闭，允许鼠标移入 tooltip
+    tooltipTimer = setTimeout(() => {
+      tooltipVisible.value = false
+    }, 200)
+  })
+
   cy.on('tap', (e) => {
     if (e.target === cy) {
       selectedNode.value = null
+      tooltipVisible.value = false
       clearHighlight()
     }
   })
@@ -391,14 +447,56 @@ async function loadConceptNodes() {
           sourceRefs = [sr]
         }
       }
-      
-      const { cardLabel, cardHeight } = buildUMLCardLabel(c.name || '', c.type || 'concept', c.description || '')
+
+      // LA-035-P10: 解析 media_refs，计算内容类型和边框颜色
+      const mediaRefs = c.media_refs || []
+      let hasImage = false
+      let hasTable = false
+      let hasFormula = false
+      mediaRefs.forEach(ref => {
+        const t = (ref.type || ref.media_type || '').toLowerCase()
+        if (t.includes('image') || t.includes('图片') || t.includes('fig')) hasImage = true
+        else if (t.includes('table') || t.includes('表格') || t.includes('tab')) hasTable = true
+        else if (t.includes('formula') || t.includes('公式') || t.includes('math') || t.includes('equation')) hasFormula = true
+        else hasImage = true // 默认归类为图片
+      })
+
+      // 根据媒体类型确定边框颜色
+      const typeBorderColors = {
+        'requirement': '#c0392b',
+        'sub_requirement': '#c0392b',
+        'technology': '#2980b9',
+        'sub_technology': '#2980b9',
+        'concept': '#27ae60',
+        'definition': '#27ae60',
+        'law': '#27ae60',
+        'application': '#27ae60',
+        'extension': '#27ae60',
+      }
+      // 媒体类型优先：有图片→橙色，有表格→蓝色，有公式→紫色，多种→灰色
+      let borderColor = typeBorderColors[c.type || 'concept'] || '#27ae60'
+      if (mediaRefs.length > 1 && [hasImage, hasTable, hasFormula].filter(Boolean).length > 1) {
+        borderColor = '#7f8c8d' // 多种混合 → 灰色
+      } else if (hasImage) {
+        borderColor = '#e67e22' // 图片 → 橙色
+      } else if (hasTable) {
+        borderColor = '#3498db' // 表格 → 蓝色
+      } else if (hasFormula) {
+        borderColor = '#9b59b6' // 公式 → 紫色
+      }
+
+      // 根据内容多少计算节点宽度
+      const { cardLabel, cardHeight, nodeWidth } = buildUMLCardLabel(
+        c.name || '', c.type || 'concept', c.description || '', mediaRefs
+      )
       return {
         data: {
           id: c.id,
           label: c.name,
           cardLabel: cardLabel,
           cardHeight: cardHeight,
+          nodeWidth: nodeWidth,
+          borderColor: borderColor,
           type: c.type || 'concept',
           description: c.description || '',
           parent_hint: c.parent_hint || '',
@@ -406,8 +504,11 @@ async function loadConceptNodes() {
           source_chunk_count: sourceChunks.length,
           source_refs: sourceRefs,
           // LA-035: 多媒体引用
-          media_refs: c.media_refs || [],
-          has_media: (c.media_refs || []).length > 0,
+          media_refs: mediaRefs,
+          has_media: mediaRefs.length > 0,
+          hasImage: hasImage,
+          hasTable: hasTable,
+          hasFormula: hasFormula,
         }
       }
     })

@@ -143,7 +143,7 @@ class GraphBuilder:
 
         流程：
         1. 从 SQLite 向量库读取所有 chunk
-        2. 对每个 chunk 调用 SemanticExtractor 提取概念
+        2. 按 heading_path 分组，同一 heading 的 chunk 批量提取
         3. 将概念写入 KùzuDB
         4. 记录质量评估分数
         """
@@ -155,62 +155,180 @@ class GraphBuilder:
 
         # 获取所有 chunk
         all_chunks = self.vector_store.list_all(limit=10000)
+        
+        # LA-035-P11: 调试打印 - 查看所有 chunk 的类型分布
+        chunk_type_counts = {}
+        for c in all_chunks:
+            ct = c.get("metadata", {}).get("chunk_type", "") or c.get("metadata", {}).get("type", "unknown")
+            chunk_type_counts[ct] = chunk_type_counts.get(ct, 0) + 1
+        print(f"[GraphBuilder] 向量存储中所有 chunk 类型分布: {chunk_type_counts}")
+        
+        # 检查是否有图片相关的 chunk — 放宽识别条件
+        image_chunks = [c for c in all_chunks if c.get("metadata", {}).get("chunk_type", "") in ("image", "image_pseudo", "text_image") or c.get("metadata", {}).get("image_refs", [])]
+        print(f"[GraphBuilder] 找到 {len(image_chunks)} 个图片相关 chunk")
+        for ic in image_chunks[:3]:
+            ic_meta = ic.get("metadata", {})
+            print(f"  - {ic['id']}: type={ic_meta.get('chunk_type')}, text_len={len(ic.get('text', ''))}, has_media_refs={bool(ic_meta.get('media_refs'))}, image_refs_count={len(ic_meta.get('image_refs', []))}")
+        
+        # LA-035-P11: 对图片 chunk 调用 VLM 生成描述，使其可提取概念
+        if image_chunks:
+            print(f"[GraphBuilder] 为 {len(image_chunks)} 个图片 chunk 生成 VLM 描述...")
+            from core.vlm_client import VLMClient
+            vlm = VLMClient()
+            
+            if vlm.available:
+                for chunk in image_chunks:
+                    chunk_meta = chunk.get("metadata", {})
+                    img_refs = chunk_meta.get("image_refs", []) or chunk_meta.get("media_refs", [])
+                    
+                    if not img_refs:
+                        print(f"[GraphBuilder] ⚠️ 图片 chunk 无图片引用: {chunk['id']}")
+                        continue
+                    
+                    # 构建完整路径（取第一个图片）
+                    from config.settings import KNOWLEDGE_BASE_DIR
+                    img_path = img_refs[0].get("path", "")
+                    if not img_path:
+                        print(f"[GraphBuilder] ⚠️ 图片 chunk 无 path: {chunk['id']}")
+                        continue
+                    
+                    full_path = KNOWLEDGE_BASE_DIR / img_path
+                    
+                    if not full_path.exists():
+                        print(f"[GraphBuilder] ⚠️ 图片文件不存在: {full_path}")
+                        continue
+                    
+                    try:
+                        # 调用 VLM 生成描述
+                        description = vlm.analyze_image(str(full_path), task="describe")
+                        
+                        if description and description.strip():
+                            # 将 VLM 描述附加到 chunk text 中
+                            chunk["text"] = f"[图片内容]\n{description}\n\n[原始占位] {chunk.get('text', '')}"
+                            chunk["metadata"]["vlm_description"] = description
+                            print(f"[GraphBuilder] ✅ 图片 chunk VLM 描述生成成功: {chunk['id']}, desc_len={len(description)}")
+                        else:
+                            print(f"[GraphBuilder] ⚠️ 图片 chunk VLM 描述为空: {chunk['id']}")
+                    
+                    except Exception as e:
+                        print(f"[GraphBuilder] ❌ 图片 chunk VLM 描述生成失败 {chunk['id']}: {e}")
+            else:
+                print(f"[GraphBuilder] ⚠️ VLM 不可用，跳过图片 chunk 描述生成")
+        
         child_chunks = [c for c in all_chunks if c.get("metadata", {}).get("type", "child") != "parent"]
 
         if not child_chunks:
             return {"status": "empty", "message": "没有 chunk 可供提取"}
 
         print(f"[GraphBuilder] 开始提取 {len(child_chunks)} 个 chunk 的概念 (paradigm={self.paradigm})...")
+        print(f"[GraphBuilder] 使用小批量提取：同一 heading 内的 chunk 合并提取")
+
+        # LA-035-P11: 按 heading_path 分组 chunk
+        heading_groups = {}
+        skipped_empty_text = 0
+        skipped_empty_text_image = 0
+        for chunk in child_chunks:
+            chunk_meta = chunk.get("metadata", {})
+            heading_path = chunk_meta.get("heading_path", "")
+            if heading_path not in heading_groups:
+                heading_groups[heading_path] = []
+            heading_groups[heading_path].append(chunk)
+
+        print(f"[GraphBuilder] 共 {len(heading_groups)} 个 heading 组")
 
         extracted_count = 0
         failed_count = 0
         quality_scores = []
 
-        for chunk in child_chunks:
-            chunk_id = chunk["id"]
-            chunk_text = chunk.get("text", "")
+        # 按 heading 组批量提取
+        for heading_path, chunks in heading_groups.items():
+            # 准备批量提取的输入
+            batch_chunks = []
+            for chunk in chunks:
+                chunk_id = chunk["id"]
+                chunk_text = chunk.get("text", "")
+                chunk_meta = chunk.get("metadata", {})
+                chunk_type = chunk_meta.get("chunk_type", "") or chunk_meta.get("type", "")
 
-            if not chunk_text.strip():
+                # LA-035-P11: 调试 - 记录被过滤的图片 chunk
+                if not chunk_text.strip():
+                    skipped_empty_text += 1
+                    if chunk_type in ("image", "image_pseudo", "text_image"):
+                        skipped_empty_text_image += 1
+                        print(f"[GraphBuilder] ⚠️ 图片 chunk 因 text 为空被过滤: {chunk_id}, type={chunk_type}, image_path={chunk_meta.get('image_path', 'N/A')}")
+                    continue
+
+                # LA-035-P11: 多媒体上下文 — 统一从多种来源提取
+                media_context = self._normalize_media_refs(chunk_meta)
+                
+                # 调试打印图片 chunk 的 media_context
+                if chunk_type in ("image", "image_pseudo") and media_context:
+                    print(f"[GraphBuilder] ✅ 图片 chunk 进入提取流程: {chunk_id}, media_refs_count={len(media_context)}")
+
+                batch_chunks.append({
+                    "id": chunk_id,
+                    "text": chunk_text,
+                    "media_context": media_context,
+                })
+
+            if not batch_chunks:
                 continue
 
             try:
-                # LA-035: 获取 chunk 的多媒体上下文
-                chunk_meta = chunk.get("metadata", {})
-                media_context = []
-                if chunk_meta.get("media_refs"):
-                    media_context = chunk_meta["media_refs"]
-                
-                # 提取概念（传入多媒体上下文）
-                concepts = extractor.extract_concepts(chunk_text, media_context=media_context)
+                # 批量提取（小批量：同一 heading 的 chunk 一起提取）
+                batch_results = extractor.extract_concepts_batch_v2(
+                    batch_chunks,
+                    max_tokens_per_batch=3000,
+                )
 
-                # LA-035: 为图片相关 chunk 的概念注入 parent_hint
-                chunk_type = chunk_meta.get("chunk_type", "") or chunk_meta.get("type", "")
-                heading_path = chunk_meta.get("heading_path", "")
-                if chunk_type in ("image", "image_pseudo") and heading_path:
+                # 处理每个 chunk 的结果
+                for chunk in chunks:
+                    chunk_id = chunk["id"]
+                    chunk_meta = chunk.get("metadata", {})
+                    chunk_type = chunk_meta.get("chunk_type", "") or chunk_meta.get("type", "")
+                    heading_path = chunk_meta.get("heading_path", "")
+                    
+                    # 如果这个 chunk 因为 text 为空被跳过了，不处理
+                    chunk_text = chunk.get("text", "")
+                    if not chunk_text.strip():
+                        continue
+                    
+                    media_context = self._normalize_media_refs(chunk_meta)
+
+                    concepts = batch_results.get(chunk_id, [])
+                    
+                    # 调试打印图片 chunk 提取结果
+                    if chunk_type in ("image", "image_pseudo", "text_image"):
+                        print(f"[GraphBuilder] 图片 chunk 提取结果: {chunk_id}, concepts_count={len(concepts)}, media_refs_count={len(media_context)}")
+                        for c in concepts:
+                            print(f"  - 概念: {c.get('name')}, media_refs_added={bool(media_context)}")
+
+                    # 为图片相关 chunk 的概念注入 parent_hint
+                    if chunk_type in ("image", "image_pseudo", "text_image") and heading_path:
+                        for c in concepts:
+                            if not c.get("parent_hint"):
+                                c["parent_hint"] = heading_path
+
+                    # 写入 KùzuDB
                     for c in concepts:
-                        if not c.get("parent_hint"):
-                            c["parent_hint"] = heading_path
+                        c["id"] = extractor.generate_concept_id(c["name"], chunk_id)
+                        if media_context:
+                            c["media_refs"] = media_context
 
-                # 写入 KùzuDB
-                for c in concepts:
-                    c["id"] = extractor.generate_concept_id(c["name"], chunk_id)
-                    # LA-035: 将 media_refs 附加到概念
-                    if media_context:
-                        c["media_refs"] = media_context
+                    added = self.graph_store.add_concepts(chunk_id, concepts)
 
-                added = self.graph_store.add_concepts(chunk_id, concepts)
-
-                if added > 0:
-                    extracted_count += 1
-                    # 质量评估（可选，只评估部分 chunk 以节省 API 调用）
-                    if extracted_count <= 10:  # 前10个 chunk 评估质量
-                        quality_result = evaluator.evaluate(chunk_text)
-                        quality_scores.append(quality_result["overall_score"])
+                    if added > 0:
+                        extracted_count += 1
+                        if extracted_count <= 10:
+                            quality_result = evaluator.evaluate(chunk.get("text", ""))
+                            quality_scores.append(quality_result["overall_score"])
 
             except Exception as e:
-                failed_count += 1
+                failed_count += len(batch_chunks)
                 if failed_count <= 5:
-                    print(f"[GraphBuilder] 提取失败 {chunk_id}: {e}")
+                    print(f"[GraphBuilder] heading 提取失败 [{heading_path[:50]}]: {e}")
+        
+        print(f"[GraphBuilder] 调试总结: skipped_empty_text={skipped_empty_text}, skipped_empty_text_image={skipped_empty_text_image}")
 
         avg_quality = sum(quality_scores) / len(quality_scores) if quality_scores else 0.0
 
@@ -221,7 +339,51 @@ class GraphBuilder:
             "chunks_failed": failed_count,
             "avg_quality_score": round(avg_quality, 3),
             "quality_scores": quality_scores,
+            "heading_groups": len(heading_groups),
         }
+
+    def _normalize_media_refs(self, chunk_meta: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """
+        统一从 chunk 元数据中提取 media_refs。
+
+        支持多种来源（按优先级）：
+        1. media_refs（已标准化格式）
+        2. image_refs（MarkdownChunker 输出，需转换）
+        3. image_path / thumbnail_path（DocumentProcessor 图片 chunk）
+
+        返回统一的 media_refs 列表。
+        """
+        # 1. 已标准化的 media_refs
+        media_refs = chunk_meta.get("media_refs", []) or []
+        if media_refs:
+            return media_refs
+
+        # 2. image_refs（MarkdownChunker 格式）
+        image_refs = chunk_meta.get("image_refs", []) or []
+        if image_refs:
+            normalized = []
+            for ref in image_refs:
+                normalized.append({
+                    "type": ref.get("type", "image"),
+                    "path": ref.get("path", ""),
+                    "caption": ref.get("alt", ""),
+                })
+            return normalized
+
+        # 3. image_path / thumbnail_path（DocumentProcessor 图片 chunk）
+        image_path = chunk_meta.get("image_path", "")
+        thumbnail_path = chunk_meta.get("thumbnail_path", "")
+        if image_path:
+            return [{
+                "type": "image",
+                "path": image_path,
+                "thumbnail_path": thumbnail_path,
+                "caption": chunk_meta.get("text", "")[:100] or "",
+                "width": chunk_meta.get("width", 0) or 0,
+                "height": chunk_meta.get("height", 0) or 0,
+            }]
+
+        return []
 
     def dedupe_concepts(self) -> Dict[str, Any]:
         """

@@ -39,36 +39,76 @@ export function generateNodeLabel(text, headingPath, fallback) {
 }
 
 /**
- * UML 类图风格卡片标签构建
+ * UML 类图风格卡片标签构建（LA-035-P10 增强版）
+ * 
+ * 新增：mediaRefs 参数，在卡片底部生成内容类型标签行
+ * 标签行用 ASCII 边框模拟便签效果：
+ *   ┌──────────────┐
+ *   │ 图片×2 表格×1 │  ← 底部标签行
+ *   └──────────────┘
  * 
  * 修复 LA-033: 限制描述行数，调整 lineHeight 以匹配实际渲染
  * 避免 description 过长导致 cardHeight 不足，文本溢出截断
  */
-export function buildUMLCardLabel(name, type, description) {
+export function buildUMLCardLabel(name, type, description, mediaRefs) {
   const typeLabel = getTypeLabel(type)
-  const title = name ? name.substring(0, 12) : '未命名'
+  const title = name || '未命名'
   
-  // 限制描述长度：最多 3 行，每行 15 字符 = 45 字符
-  const maxDescChars = 45
+  // 描述完整显示，最多 10 行防止极端情况，每行 18 字符
+  const maxDescLines = 10
+  const charsPerLine = 18
   const descRaw = description || ''
-  const descTrimmed = descRaw.length > maxDescChars ? descRaw.substring(0, maxDescChars) + '...' : descRaw
-  
   const descLines = []
-  for (let i = 0; i < descTrimmed.length; i += 15) {
-    descLines.push(descTrimmed.substring(i, i + 15))
+  for (let i = 0; i < descRaw.length && descLines.length < maxDescLines; i += charsPerLine) {
+    descLines.push(descRaw.substring(i, i + charsPerLine))
   }
   const descText = descLines.join('\n')
-  const cardLabel = `${title}\n━━━━━━\n${typeLabel}\n━━━━━━\n${descText}`
 
-  // 计算高度：lineHeight 18px 更贴近 12px 字体的实际渲染高度
+  // 计算媒体标签行
+  let tagLine = ''
+  let tagLineCount = 0
+  if (mediaRefs && mediaRefs.length > 0) {
+    const counts = { image: 0, table: 0, formula: 0 }
+    mediaRefs.forEach(ref => {
+      const t = (ref.type || ref.media_type || '').toLowerCase()
+      if (t.includes('image') || t.includes('图片') || t.includes('fig')) counts.image++
+      else if (t.includes('table') || t.includes('表格') || t.includes('tab')) counts.table++
+      else if (t.includes('formula') || t.includes('公式') || t.includes('math') || t.includes('equation')) counts.formula++
+      else counts.image++
+    })
+    const parts = []
+    if (counts.image > 0) parts.push(`图片×${counts.image}`)
+    if (counts.table > 0) parts.push(`表格×${counts.table}`)
+    if (counts.formula > 0) parts.push(`公式×${counts.formula}`)
+    if (parts.length > 0) {
+      tagLine = parts.join(' ')
+      tagLineCount = 3
+    }
+  }
+
+  let cardLabel = `${title}\n━━━━━━\n${typeLabel}\n━━━━━━\n${descText}`
+  if (tagLine) {
+    const padLen = Math.max(tagLine.length + 2, 8)
+    const top = '┌' + '─'.repeat(padLen) + '┐'
+    const mid = '│ ' + tagLine.padEnd(padLen - 1, ' ') + '│'
+    const bot = '└' + '─'.repeat(padLen) + '┘'
+    cardLabel += `\n${top}\n${mid}\n${bot}`
+  }
+
   const fixedLines = 5
   const descLineCount = Math.max(descLines.length, 1)
-  const totalLines = fixedLines + descLineCount - 1
+  const totalLines = fixedLines + descLineCount - 1 + tagLineCount
   const lineHeight = 18
   const padding = 36
   const cardHeight = Math.max(80, totalLines * lineHeight + padding)
 
-  return { cardLabel, cardHeight }
+  // 根据最长行计算宽度
+  const allLines = cardLabel.split('\n')
+  let maxChars = 0
+  allLines.forEach(line => { maxChars = Math.max(maxChars, line.length) })
+  const nodeWidth = Math.max(160, Math.min(300, maxChars * 12 + 32))
+
+  return { cardLabel, cardHeight, nodeWidth }
 }
 
 /**
@@ -507,6 +547,8 @@ export function runConceptLayout(cy) {
             label: originalNode.data('label'),
             cardLabel: originalNode.data('cardLabel'),
             cardHeight: originalNode.data('cardHeight'),
+            nodeWidth: originalNode.data('nodeWidth') || 160,
+            borderColor: originalNode.data('borderColor') || '#27ae60',
             type: originalNode.data('type'),
             description: originalNode.data('description'),
             parent_hint: originalNode.data('parent_hint'),
@@ -741,6 +783,26 @@ export function runConceptLayout(cy) {
       n.position({ x: 100 + col * gapX, y: 100 + row * gapY })
       n.style('display', 'element')
       n.style('opacity', 1)
+    })
+  }
+
+  // LA-035-P11: 处理非概念 chunk 节点（heading/paragraph/document）—— 排列成网格避免重叠
+  const nonConceptChunkNodes = cy.nodes().filter(n => {
+    const t = n.data('type')
+    return t === 'heading' || t === 'paragraph' || t === 'document'
+  })
+  if (nonConceptChunkNodes.length > 0) {
+    console.log(`[runConceptLayout] Arranging ${nonConceptChunkNodes.length} non-concept chunk nodes in grid`)
+    const chunkCols = Math.max(1, Math.floor(containerW / 220))
+    const chunkGapX = 200
+    const chunkGapY = 100
+    nonConceptChunkNodes.forEach((n, i) => {
+      const col = i % chunkCols
+      const row = Math.floor(i / chunkCols)
+      // 放在概念树下方，避免重叠
+      n.position({ x: 50 + col * chunkGapX, y: totalH + 50 + row * chunkGapY })
+      n.style('display', 'element')
+      n.style('opacity', 0.7)  // 半透明，表示是辅助节点
     })
   }
 
