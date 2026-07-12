@@ -1,1 +1,0 @@
-{"chunk_id": "test_chunk_1", "concepts": [{"id": "", "name": "测试概念A", "concept_type": "requirement", "relation": "DEFINES", "description": "描述A", "parent_hint": ""}, {"id": "", "name": "测试概念B", "concept_type": "technology", "relation": "IMPLEMENTS", "description": "描述B", "parent_hint": "测试概念A"}]}

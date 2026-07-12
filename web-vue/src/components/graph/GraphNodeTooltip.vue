@@ -1,0 +1,355 @@
+<template>
+  <Teleport to="body">
+    <Transition name="tooltip-fade">
+      <div
+        v-if="visible && node"
+        class="graph-node-tooltip"
+        :style="tooltipStyle"
+        @mouseenter="onTooltipEnter"
+        @mouseleave="onTooltipLeave"
+      >
+        <!-- 头部：名称 + 类型 -->
+        <div class="tooltip-header">
+          <h4 class="tooltip-title">{{ node.label || node.name || '未命名' }}</h4>
+          <span class="tooltip-type-badge" :class="'type-' + (node.type || 'concept')">
+            {{ typeLabel(node.type) }}
+          </span>
+        </div>
+
+        <!-- 描述 -->
+        <div v-if="node.description" class="tooltip-section">
+          <div class="tooltip-label">描述</div>
+          <div class="tooltip-description">{{ node.description }}</div>
+        </div>
+
+        <!-- 来源 Chunk -->
+        <div v-if="node.source_chunks && node.source_chunks.length > 0" class="tooltip-section">
+          <div class="tooltip-label">
+            来源片段 ({{ node.source_chunks.length }} 个)
+          </div>
+          <div class="tooltip-source-list">
+            <span
+              v-for="chunk in node.source_chunks.slice(0, 5)"
+              :key="chunk"
+              class="tooltip-source-tag"
+            >{{ chunk.slice(0, 16) }}{{ chunk.length > 16 ? '...' : '' }}</span>
+            <span v-if="node.source_chunks.length > 5" class="tooltip-more">
+              +{{ node.source_chunks.length - 5 }} 个
+            </span>
+          </div>
+        </div>
+
+        <!-- 关联媒体 -->
+        <div v-if="node.media_refs && node.media_refs.length > 0" class="tooltip-section">
+          <div class="tooltip-label">
+            关联媒体 ({{ node.media_refs.length }} 个)
+          </div>
+          <div class="tooltip-media-list">
+            <div
+              v-for="(ref, idx) in node.media_refs.slice(0, 6)"
+              :key="idx"
+              class="tooltip-media-item"
+            >
+              <!-- 图片缩略图 -->
+              <div
+                v-if="isImageType(ref)"
+                class="tooltip-media-thumb"
+              >
+                <img
+                  v-if="ref.thumbnail_path || ref.path"
+                  :src="getMediaUrl(ref.thumbnail_path || ref.path)"
+                  :alt="ref.caption || '图片'"
+                  @error="onImageError"
+                />
+                <div v-else class="tooltip-media-placeholder">
+                  {{ getMediaTypeLabel(ref) }}
+                </div>
+              </div>
+              <!-- 表格/公式占位 -->
+              <div v-else class="tooltip-media-text">
+                <span class="tooltip-media-icon">{{ getMediaIcon(ref) }}</span>
+                <span class="tooltip-media-caption">{{ ref.caption || getMediaTypeLabel(ref) }}</span>
+              </div>
+            </div>
+            <div v-if="node.media_refs.length > 6" class="tooltip-more">
+              +{{ node.media_refs.length - 6 }} 个媒体
+            </div>
+          </div>
+        </div>
+
+        <!-- 底部提示 -->
+        <div class="tooltip-footer">
+          点击节点查看详情
+        </div>
+      </div>
+    </Transition>
+  </Teleport>
+</template>
+
+<script setup>
+import { computed } from 'vue'
+
+const props = defineProps({
+  visible: { type: Boolean, default: false },
+  node: { type: Object, default: null },
+  position: { type: Object, default: () => ({ x: 0, y: 0 }) },
+})
+
+const emit = defineEmits(['update:visible'])
+
+// 防止 tooltip 内部鼠标进入时意外关闭
+let tooltipHover = false
+
+function onTooltipEnter() {
+  tooltipHover = true
+}
+
+function onTooltipLeave() {
+  tooltipHover = false
+  emit('update:visible', false)
+}
+
+// 计算 tooltip 位置：节点右侧偏移
+const tooltipStyle = computed(() => {
+  const offsetX = 20
+  const offsetY = -10
+  return {
+    left: `${props.position.x + offsetX}px`,
+    top: `${props.position.y + offsetY}px`,
+  }
+})
+
+function typeLabel(type) {
+  const map = {
+    'definition': '定义', 'law': '规律', 'application': '应用', 'extension': '扩展',
+    'requirement': '需求', 'sub_requirement': '子需求',
+    'technology': '技术', 'sub_technology': '子技术', 'concept': '概念',
+  }
+  return map[type] || type || '概念'
+}
+
+function isImageType(ref) {
+  const t = (ref.type || ref.media_type || '').toLowerCase()
+  return t.includes('image') || t.includes('图片') || t.includes('fig') ||
+    (!t.includes('table') && !t.includes('formula') && !t.includes('公式'))
+}
+
+function getMediaTypeLabel(ref) {
+  const t = (ref.type || ref.media_type || '').toLowerCase()
+  if (t.includes('table') || t.includes('表格')) return '表格'
+  if (t.includes('formula') || t.includes('公式') || t.includes('math')) return '公式'
+  return '图片'
+}
+
+function getMediaIcon(ref) {
+  const t = (ref.type || ref.media_type || '').toLowerCase()
+  if (t.includes('table') || t.includes('表格')) return '📊'
+  if (t.includes('formula') || t.includes('公式') || t.includes('math')) return '🧮'
+  return '🖼️'
+}
+
+function getMediaUrl(path) {
+  if (!path) return ''
+  if (path.startsWith('http')) return path
+  // LA-035: Windows 路径反斜杠替换为正斜杠，确保 URL 正确
+  const normalizedPath = path.replace(/\\/g, '/')
+  // 本地路径：通过后端静态文件服务
+  return `${window.location.origin}/api/media/${encodeURIComponent(normalizedPath)}`
+}
+
+function onImageError(e) {
+  e.target.style.display = 'none'
+  const placeholder = e.target.parentElement.querySelector('.tooltip-media-placeholder')
+  if (placeholder) placeholder.style.display = 'flex'
+}
+</script>
+
+<style scoped>
+.graph-node-tooltip {
+  position: fixed;
+  z-index: 9999;
+  min-width: 240px;
+  max-width: 340px;
+  background: var(--bg-card, #ffffff);
+  border: 1px solid var(--border-color, #e0e0e0);
+  border-radius: 12px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.15);
+  padding: 16px;
+  font-size: 13px;
+  color: var(--text-primary, #2c3e50);
+  pointer-events: auto;
+}
+
+/* 暗色主题适配 */
+@media (prefers-color-scheme: dark) {
+  .graph-node-tooltip {
+    background: #1e1e2e;
+    border-color: #3d3d5c;
+    color: #e0e0e0;
+  }
+}
+
+.tooltip-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 12px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--border-color, #eee);
+}
+
+.tooltip-title {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.4;
+  word-break: break-word;
+  flex: 1;
+}
+
+.tooltip-type-badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.type-concept, .type-definition, .type-law, .type-application, .type-extension {
+  background: rgba(46, 204, 113, 0.15);
+  color: #27ae60;
+}
+
+.type-requirement, .type-sub_requirement {
+  background: rgba(231, 76, 60, 0.15);
+  color: #c0392b;
+}
+
+.type-technology, .type-sub_technology {
+  background: rgba(52, 152, 219, 0.15);
+  color: #2980b9;
+}
+
+.tooltip-section {
+  margin-bottom: 12px;
+}
+
+.tooltip-label {
+  font-size: 11px;
+  color: var(--text-muted, #7f8c8d);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-bottom: 6px;
+}
+
+.tooltip-description {
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--text-secondary, #555);
+  word-break: break-word;
+}
+
+.tooltip-source-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.tooltip-source-tag {
+  display: inline-block;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 10px;
+  background: var(--bg-hover, #f0f0f0);
+  color: var(--text-secondary, #666);
+}
+
+.tooltip-media-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.tooltip-media-item {
+  flex-shrink: 0;
+}
+
+.tooltip-media-thumb {
+  width: 72px;
+  height: 72px;
+  border-radius: 6px;
+  overflow: hidden;
+  background: var(--bg-hover, #f5f5f5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.tooltip-media-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.tooltip-media-placeholder {
+  display: none;
+  width: 100%;
+  height: 100%;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  color: var(--text-muted, #999);
+}
+
+.tooltip-media-text {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 8px;
+  background: var(--bg-hover, #f5f5f5);
+  border-radius: 4px;
+  font-size: 12px;
+}
+
+.tooltip-media-icon {
+  font-size: 14px;
+}
+
+.tooltip-media-caption {
+  color: var(--text-secondary, #666);
+  max-width: 100px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tooltip-more {
+  font-size: 11px;
+  color: var(--text-muted, #999);
+  padding: 4px 0;
+}
+
+.tooltip-footer {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border-color, #eee);
+  font-size: 11px;
+  color: var(--text-muted, #999);
+  text-align: center;
+}
+
+/* 过渡动画 */
+.tooltip-fade-enter-active,
+.tooltip-fade-leave-active {
+  transition: opacity 0.2s ease, transform 0.2s ease;
+}
+
+.tooltip-fade-enter-from,
+.tooltip-fade-leave-to {
+  opacity: 0;
+  transform: translateY(4px);
+}
+</style>

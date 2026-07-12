@@ -431,10 +431,19 @@ class MinerUClient:
             table_lines = [line for line in content.split("\n") if line.strip().startswith("|")]
             has_table = len(table_lines) >= 2
             
-            # 构建 chunk 类型
+            # LA-035-P11: 修复 chunk_type 判断逻辑 — 纯图片行应标记为 image
+            # 原逻辑：content.strip().replace("\n", "").replace(" ", "") 对 ![alt](path) 判断为空
+            # 修复：移除 Markdown 图片语法后检查是否还有文本
+            import re
+            text_without_images = re.sub(r'!\[([^\]]*)\]\(([^)]+)\)', '', content).strip()
             chunk_type = "text"
-            if image_refs and not content.strip().replace("\n", "").replace(" ", ""):
-                chunk_type = "image"  # 纯图片章节
+            if image_refs and not text_without_images:
+                chunk_type = "image"  # 纯图片行（内容只有图片引用）
+                print(f"[MinerU] 纯图片 chunk: {chunk_id}, images={len(image_refs)}")
+            elif image_refs and text_without_images:
+                # 有图片也有文本，标记为 text_image
+                chunk_type = "text_image"
+                print(f"[MinerU] 图文混合 chunk: {chunk_id}, images={len(image_refs)}, text_len={len(text_without_images)}")
             elif formula_blocks or inline_formulas:
                 chunk_type = "text_formula"  # 含公式
             elif has_table:
@@ -460,6 +469,13 @@ class MinerUClient:
                 chunk["metadata"]["media_refs"] = image_refs
             
             chunks.append(chunk)
+        
+        # 调试打印 chunk 类型分布
+        type_counts = {}
+        for c in chunks:
+            ct = c.get("metadata", {}).get("chunk_type", "unknown")
+            type_counts[ct] = type_counts.get(ct, 0) + 1
+        print(f"[MinerU] parse_pdf_to_chunks 返回 {len(chunks)} 个 chunks, 类型分布: {type_counts}")
         
         return chunks
     

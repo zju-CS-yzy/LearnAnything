@@ -71,6 +71,7 @@ class GraphStore:
             thumbnail_path STRING,
             width INT64,
             height INT64,
+            media_refs STRING,
             PRIMARY KEY(chunk_id)
         )""",
 
@@ -295,26 +296,41 @@ class GraphStore:
         print(f"[GraphStore] Schema created for {self.collection_name}")
 
     def _check_schema_version(self, conn):
-
         """
-
-        LA-035: 检查 schema 版本，如果旧版本则提示用户。
-
-        旧版本标志：CanonicalConcept 缺少 media_refs 字段。
-
+        LA-035: 检查 schema 版本，尝试自动升级旧版本。
         """
-
+        # 检查 CanonicalConcept 是否有 media_refs
         try:
-
             self._execute(conn, "MATCH (c:CanonicalConcept) RETURN c.media_refs LIMIT 1")
-
         except Exception as e:
-
             if "media_refs" in str(e):
+                print(f"[GraphStore] 升级 CanonicalConcept: {self.collection_name}")
+                try:
+                    self._execute(conn, "ALTER TABLE CanonicalConcept ADD media_refs STRING")
+                except Exception as alt_e:
+                    print(f"[GraphStore] 升级失败: {alt_e}")
 
-                print(f"[GraphStore] 旧版本 schema 检测到：{self.collection_name}")
+        # 检查 Chunk 是否有 media_refs
+        try:
+            self._execute(conn, "MATCH (ch:Chunk) RETURN ch.media_refs LIMIT 1")
+        except Exception as e:
+            if "media_refs" in str(e):
+                print(f"[GraphStore] 升级 Chunk: {self.collection_name}")
+                try:
+                    self._execute(conn, "ALTER TABLE Chunk ADD media_refs STRING")
+                except Exception as alt_e:
+                    print(f"[GraphStore] 升级 Chunk 失败: {alt_e}")
 
-                print(f"[GraphStore] 建议：删除旧数据库并重新导入，或调用 init_schema(force=True)")
+        # 检查 ExtractedConcept 是否有 media_refs
+        try:
+            self._execute(conn, "MATCH (e:ExtractedConcept) RETURN e.media_refs LIMIT 1")
+        except Exception as e:
+            if "media_refs" in str(e):
+                print(f"[GraphStore] 升级 ExtractedConcept: {self.collection_name}")
+                try:
+                    self._execute(conn, "ALTER TABLE ExtractedConcept ADD media_refs STRING")
+                except Exception as alt_e:
+                    print(f"[GraphStore] 升级 ExtractedConcept 失败: {alt_e}")
 
         # 也检查 Chunk 是否有 media 相关字段（旧版本可能缺少）
 
@@ -1498,6 +1514,11 @@ class GraphStore:
                 else:
                     raise
 
+            # LA-035-P10: 如果 media_refs 为空，尝试从 source_chunks 关联的 Chunk 获取
+            for node in nodes:
+                if not node.get("media_refs"):
+                    node["media_refs"] = self._get_media_refs_from_chunks(conn, node.get("source_chunks", []))
+
         except Exception as e:
 
             print(f"[GraphStore] 获取概念节点失败: {e}")
@@ -1507,6 +1528,96 @@ class GraphStore:
         return nodes
 
 
+
+    def _get_media_refs_from_chunks(self, conn, source_chunks):
+        """
+        从 source_chunks 关联的 Chunk 节点获取 media_refs。
+        LA-035-P10 修复：兼容旧 schema（Chunk 无 media_refs 字段时回退到 image_path/thumbnail_path）。
+        """
+        import json
+
+        # 解析 source_chunks
+        chunk_ids = []
+        if isinstance(source_chunks, list):
+            chunk_ids = source_chunks
+        elif isinstance(source_chunks, str) and source_chunks:
+            try:
+                parsed = json.loads(source_chunks)
+                if isinstance(parsed, list):
+                    chunk_ids = parsed
+                else:
+                    chunk_ids = [source_chunks]
+            except:
+                chunk_ids = [s.strip() for s in source_chunks.split(",") if s.strip()]
+
+        if not chunk_ids:
+            return []
+
+        media_refs = []
+        seen = set()
+
+        # 先尝试查询 media_refs 字段（新 schema）
+        has_media_refs_field = True
+        for chunk_id in chunk_ids:
+            try:
+                result = self._execute(conn, f"""
+                    MATCH (ch:Chunk {{chunk_id: '{self._escape_cypher_string(chunk_id)}'}})
+                    RETURN ch.media_refs
+                """)
+                if result.has_next():
+                    row = result.get_next()
+                    if row[0]:
+                        try:
+                            refs = json.loads(row[0])
+                            if isinstance(refs, list):
+                                for ref in refs:
+                                    key = f"{ref.get('type', '')}:{ref.get('path', ref.get('description', '')[:50])}"
+                                    if key not in seen:
+                                        seen.add(key)
+                                        media_refs.append(ref)
+                        except:
+                            pass
+            except Exception as e:
+                # 旧 schema：media_refs 字段不存在，回退到 image_path/thumbnail_path
+                if "media_refs" in str(e):
+                    has_media_refs_field = False
+                    break
+                else:
+                    print(f"[GraphStore] 获取 chunk {chunk_id} 的 media_refs 失败: {e}")
+
+        # 如果新 schema 没有 media_refs 数据，或旧 schema 无 media_refs 字段，回退到 image_path
+        if not media_refs and not has_media_refs_field:
+            for chunk_id in chunk_ids:
+                try:
+                    result = self._execute(conn, f"""
+                        MATCH (ch:Chunk {{chunk_id: '{self._escape_cypher_string(chunk_id)}'}})
+                        RETURN ch.chunk_type, ch.image_path, ch.thumbnail_path, ch.text, ch.width, ch.height
+                    """)
+                    if result.has_next():
+                        row = result.get_next()
+                        chunk_type = row[0] or ''
+                        img_path = row[1] or ''
+                        thumb_path = row[2] or ''
+                        text = row[3] or ''
+                        width = row[4] or 0
+                        height = row[5] or 0
+                        # 如果 chunk_type 是 image 或 text 包含图片标记，构建 media_refs
+                        if img_path or chunk_type in ('image', 'image_pseudo'):
+                            key = f"image:{img_path}"
+                            if key not in seen:
+                                seen.add(key)
+                                media_refs.append({
+                                    "type": "image",
+                                    "path": img_path,
+                                    "thumbnail_path": thumb_path,
+                                    "caption": text[:100] if text else '',
+                                    "width": width,
+                                    "height": height,
+                                })
+                except Exception as e:
+                    print(f"[GraphStore] 回退获取 chunk {chunk_id} 的图片信息失败: {e}")
+
+        return media_refs
 
     def get_extracted_concepts(self, limit: int = 10000) -> List[Dict[str, Any]]:
         """

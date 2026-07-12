@@ -62,44 +62,40 @@ export function buildCyStyles() {
       style: {
         'label': 'data(cardLabel)',
         'text-wrap': 'wrap',
-        'text-max-width': '110px',
+        'text-max-width': 'data(nodeWidth)',
         'text-valign': 'center',
         'text-halign': 'center',
-        'font-size': '12px',
+        'font-size': '11px',
         'color': '#fff',
-        'text-outline-color': 'rgba(0,0,0,0.6)',
-        'text-outline-width': 2,
-        'width': 160,
+        'text-outline-color': 'rgba(0,0,0,0.5)',
+        'text-outline-width': 1,
+        'width': 'data(nodeWidth)',
         'height': 'data(cardHeight)',
-        'padding': '18px',
-        'border-width': 2,
-        'border-color': 'rgba(255,255,255,0.5)',
+        'border-width': 3,
+        'border-color': 'data(borderColor)',
         'shape': 'round-rectangle',
-        'corner-radius': 8,
+        'corner-radius': 10,
       }
     },
-    // 需求类型
+    // 需求类型 — 背景色红色
     {
       selector: 'node[type="requirement"], node[type="sub_requirement"]',
       style: {
         'background-color': '#e74c3c',
-        'border-color': '#c0392b',
       }
     },
-    // 技术类型
+    // 技术类型 — 背景色蓝色
     {
       selector: 'node[type="technology"], node[type="sub_technology"]',
       style: {
         'background-color': '#3498db',
-        'border-color': '#2980b9',
       }
     },
-    // 通用概念（含 Phase 2 提取的 definition/law/application/extension）
+    // 通用概念（含 Phase 2 提取的 definition/law/application/extension）— 背景色绿色
     {
       selector: 'node[type="concept"], node[type="definition"], node[type="law"], node[type="application"], node[type="extension"]',
       style: {
         'background-color': '#2ecc71',
-        'border-color': '#27ae60',
       }
     },
     // ========== 图片节点样式（LA-035）==========
