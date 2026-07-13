@@ -174,6 +174,7 @@ class GraphStore:
         self.collection_name = collection_name
 
         self.db_path = GRAPH_DB_DIR / f"{collection_name}_graph"
+        self.db_path_str = str(self.db_path)  # LA-035-P12: 统一使用字符串缓存 key
 
         self._db = None
 
@@ -189,17 +190,17 @@ class GraphStore:
 
         # 获取或创建全局共享??Database 实例
 
-        db_path_str = str(self.db_path)
+        # LA-035-P12: 使用 self.db_path_str
 
         with _db_cache_lock:
 
-            if db_path_str not in _db_cache:
+            if self.db_path_str not in _db_cache:
 
                 self.db_path.parent.mkdir(parents=True, exist_ok=True)
 
-                _db_cache[db_path_str] = kuzu.Database(db_path_str)
+                _db_cache[self.db_path_str] = kuzu.Database(self.db_path_str)
 
-            self._db = _db_cache[db_path_str]
+            self._db = _db_cache[self.db_path_str]
 
 
 
@@ -246,10 +247,9 @@ class GraphStore:
             self._db = None
             self._conn = None
             # 清除全局缓存中的旧 Database 实例
-            db_path_str = str(self.db_path)
             with _db_cache_lock:
-                if db_path_str in _db_cache:
-                    del _db_cache[db_path_str]
+                if self.db_path_str in _db_cache:
+                    del _db_cache[self.db_path_str]
             if self.db_path.is_dir():
                 shutil.rmtree(self.db_path)
             else:

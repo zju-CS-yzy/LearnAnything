@@ -182,20 +182,20 @@ class GraphBuilder:
                     img_refs = chunk_meta.get("image_refs", []) or chunk_meta.get("media_refs", [])
                     
                     if not img_refs:
-                        print(f"[GraphBuilder] ⚠️ 图片 chunk 无图片引用: {chunk['id']}")
+                        print(f"[GraphBuilder] [WARN] 图片 chunk 无图片引用: {chunk['id']}")
                         continue
                     
                     # 构建完整路径（取第一个图片）
                     from config.settings import KNOWLEDGE_BASE_DIR
                     img_path = img_refs[0].get("path", "")
                     if not img_path:
-                        print(f"[GraphBuilder] ⚠️ 图片 chunk 无 path: {chunk['id']}")
+                        print(f"[GraphBuilder] [WARN] 图片 chunk 无 path: {chunk['id']}")
                         continue
                     
                     full_path = KNOWLEDGE_BASE_DIR / img_path
                     
                     if not full_path.exists():
-                        print(f"[GraphBuilder] ⚠️ 图片文件不存在: {full_path}")
+                        print(f"[GraphBuilder] [WARN] 图片文件不存在: {full_path}")
                         continue
                     
                     try:
@@ -206,14 +206,14 @@ class GraphBuilder:
                             # 将 VLM 描述附加到 chunk text 中
                             chunk["text"] = f"[图片内容]\n{description}\n\n[原始占位] {chunk.get('text', '')}"
                             chunk["metadata"]["vlm_description"] = description
-                            print(f"[GraphBuilder] ✅ 图片 chunk VLM 描述生成成功: {chunk['id']}, desc_len={len(description)}")
+                            print(f"[GraphBuilder] [OK] 图片 chunk VLM 描述生成成功: {chunk['id']}, desc_len={len(description)}")
                         else:
-                            print(f"[GraphBuilder] ⚠️ 图片 chunk VLM 描述为空: {chunk['id']}")
+                            print(f"[GraphBuilder] [WARN] 图片 chunk VLM 描述为空: {chunk['id']}")
                     
                     except Exception as e:
-                        print(f"[GraphBuilder] ❌ 图片 chunk VLM 描述生成失败 {chunk['id']}: {e}")
+                        print(f"[GraphBuilder] [ERR] 图片 chunk VLM 描述生成失败 {chunk['id']}: {e}")
             else:
-                print(f"[GraphBuilder] ⚠️ VLM 不可用，跳过图片 chunk 描述生成")
+                print(f"[GraphBuilder] [WARN] VLM 不可用，跳过图片 chunk 描述生成")
         
         child_chunks = [c for c in all_chunks if c.get("metadata", {}).get("type", "child") != "parent"]
 
@@ -274,7 +274,7 @@ class GraphBuilder:
                     skipped_empty_text += 1
                     if chunk_type in ("image", "image_pseudo", "text_image"):
                         skipped_empty_text_image += 1
-                        print(f"[GraphBuilder] ⚠️ 图片 chunk 因 text 为空被过滤: {chunk_id}, type={chunk_type}, image_path={chunk_meta.get('image_path', 'N/A')}")
+                        print(f"[GraphBuilder] [WARN] 图片 chunk 因 text 为空被过滤: {chunk_id}, type={chunk_type}, image_path={chunk_meta.get('image_path', 'N/A')}")
                     continue
 
                 # LA-035-P11: 多媒体上下文 — 统一从多种来源提取
@@ -282,7 +282,7 @@ class GraphBuilder:
                 
                 # 调试打印图片 chunk 的 media_context
                 if chunk_type in ("image", "image_pseudo") and media_context:
-                    print(f"[GraphBuilder] ✅ 图片 chunk 进入提取流程: {chunk_id}, media_refs_count={len(media_context)}")
+                    print(f"[GraphBuilder] [OK] 图片 chunk 进入提取流程: {chunk_id}, media_refs_count={len(media_context)}")
 
                 batch_chunks.append({
                     "id": chunk_id,
