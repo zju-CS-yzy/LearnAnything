@@ -449,6 +449,12 @@ class GraphStore:
             width = meta.get("width", 0) or 0
             height = meta.get("height", 0) or 0
 
+            # LA-035-P18: 从 metadata 中提取并序列化 media_refs
+            media_refs_raw = meta.get("media_refs", []) or meta.get("image_refs", [])
+            media_refs_json = self._escape_cypher_string(
+                json.dumps(media_refs_raw, ensure_ascii=False) if media_refs_raw else ""
+            )
+
             cypher = (
 
                 f"CREATE (c:Chunk {{"
@@ -471,7 +477,9 @@ class GraphStore:
 
                 f"width: {width},"
 
-                f"height: {height}"
+                f"height: {height},"
+
+                f"media_refs: '{media_refs_json}'"
 
                 f"}})"
 
@@ -1304,6 +1312,7 @@ class GraphStore:
                         "description": c.get("description", ""),
 
                         "parent_hint": c.get("parent_hint", ""),
+                        "media_refs": c.get("media_refs", []),
 
                     }
 
@@ -1585,8 +1594,9 @@ class GraphStore:
                 else:
                     print(f"[GraphStore] 获取 chunk {chunk_id} 的 media_refs 失败: {e}")
 
-        # 如果新 schema 没有 media_refs 数据，或旧 schema 无 media_refs 字段，回退到 image_path
-        if not media_refs and not has_media_refs_field:
+        # LA-035-P18: 修复回退逻辑
+        # 当 media_refs 为空时，无论是因为字段不存在（旧 schema）还是字段值为空（新 schema但无数据），都应回退到 image_path
+        if not media_refs:
             for chunk_id in chunk_ids:
                 try:
                     result = self._execute(conn, f"""
