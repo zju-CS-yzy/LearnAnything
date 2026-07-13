@@ -409,9 +409,15 @@ class SemanticExtractor:
         self,
         chunks: List[Dict[str, Any]],
         max_tokens_per_batch: int = 3000,
+        heading_context: str = "",
     ) -> Dict[str, List[Dict[str, Any]]]:
         """
         小批量提取多个 chunk 的概念（按 heading 分组，同一 heading 内的 chunk 一起提取）。
+
+        LA-035-P12: 支持 heading_context 注入。
+        - heading_chunk 的文本作为【上下文声明】注入到 prompt 中
+        - heading_chunk 本身不提取概念（由调用方过滤）
+        - 只返回 paragraph/image chunk 的概念
 
         优势：
         - 系统提示词只发一次，节省 60-80% token
@@ -423,6 +429,7 @@ class SemanticExtractor:
                 {"id": "chunk_1", "text": "...", "media_context": [...]},
                 ...
             ]
+            heading_context: "## 5.2 检索与 Retrieval\n..." (heading chunk 的文本，作为语义层级声明)
 
         输出格式：
             {"chunk_id": [concept1, concept2, ...], ...}
@@ -474,6 +481,12 @@ class SemanticExtractor:
 
         # 构建 messages
         combined_text = "\n\n".join(batch_parts)
+
+        # LA-035-P12: 注入 heading 上下文作为语义层级声明
+        if heading_context.strip():
+            heading_safe = heading_context.strip()[:300]  # 截断到300字符，避免占用过多token
+            combined_text = f"【上下文声明】\n本组知识片段的主题层级：{heading_safe}\n\n注意：【上下文声明】只用于帮助你理解各片段的语义位置，你绝对禁止从【上下文声明】中提取任何概念。你只应从标记了【chunk_id=xxx】的【知识片段】区域中提取概念。\n\n{combined_text}"
+
         system_prompt = self._get_system_prompt()
 
         messages = [
@@ -492,6 +505,8 @@ class SemanticExtractor:
   ],
   "chunk_id_2": [...]
 }
+
+注意：只为标记了【chunk_id=xxx】的片段提取概念。【上下文声明】只用于理解语义层级，不为其提取概念。
 """
 
         try:

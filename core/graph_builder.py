@@ -242,9 +242,28 @@ class GraphBuilder:
 
         # 按 heading 组批量提取
         for heading_path, chunks in heading_groups.items():
-            # 准备批量提取的输入
-            batch_chunks = []
+            # LA-035-P12: 分离 heading chunk 和可提取 chunk
+            heading_chunks = []
+            extractable_chunks = []
+            
             for chunk in chunks:
+                chunk_type = chunk.get("metadata", {}).get("chunk_type", "") or chunk.get("metadata", {}).get("type", "")
+                if chunk_type == "heading":
+                    heading_chunks.append(chunk)
+                else:
+                    extractable_chunks.append(chunk)
+            
+            # 提取 heading context（作为语义层级声明注入）
+            heading_context = ""
+            for hc in heading_chunks:
+                h_text = hc.get("text", "")
+                if h_text.strip():
+                    heading_context += h_text.strip() + "\n"
+            heading_context = heading_context.strip()[:300]  # 截断到300字符，避免占用过多token
+            
+            # 准备批量提取的输入（只包含非 heading 的 chunk）
+            batch_chunks = []
+            for chunk in extractable_chunks:
                 chunk_id = chunk["id"]
                 chunk_text = chunk.get("text", "")
                 chunk_meta = chunk.get("metadata", {})
@@ -276,13 +295,15 @@ class GraphBuilder:
 
             try:
                 # 批量提取（小批量：同一 heading 的 chunk 一起提取）
+                # LA-035-P12: heading 作为上下文注入，heading 本身不提取概念
                 batch_results = extractor.extract_concepts_batch_v2(
                     batch_chunks,
                     max_tokens_per_batch=3000,
+                    heading_context=heading_context,
                 )
 
-                # 处理每个 chunk 的结果
-                for chunk in chunks:
+                # 处理每个 chunk 的结果（只处理可提取的 chunk）
+                for chunk in extractable_chunks:
                     chunk_id = chunk["id"]
                     chunk_meta = chunk.get("metadata", {})
                     chunk_type = chunk_meta.get("chunk_type", "") or chunk_meta.get("type", "")
