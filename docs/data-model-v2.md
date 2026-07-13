@@ -50,19 +50,29 @@
 
 ### 2.1 节点类型
 
-#### Chunk（不变）
+#### Chunk（多媒体增强版）
 ```cypher
 CREATE NODE TABLE Chunk (
     chunk_id STRING PRIMARY KEY,
-    text STRING,
-    heading_path STRING,
-    source STRING,
-    page_number INT64,
-    chunk_type STRING
+    text STRING,                    -- 文本内容（图片 chunk 为 VLM 描述文本）
+    heading_path STRING,            -- 标题路径
+    source STRING,                  -- 来源文件名
+    page_number INT64,             -- 页码
+    chunk_type STRING,             -- 类型: document | heading | paragraph | image_pseudo
+    image_path STRING,             -- 原始图片路径（图片 chunk 专用）
+    thumbnail_path STRING,         -- 缩略图路径（图片 chunk 专用）
+    width INT64,                   -- 图片宽度（像素，图片 chunk 专用）
+    height INT64,                  -- 图片高度（像素，图片 chunk 专用）
+    media_refs STRING              -- JSON 数组: [{"type": "image", "path": ..., "thumbnail_path": ..., "description": ...}]
 )
 ```
 
-#### ExtractedConcept（新增）
+**字段说明**：
+- `image_path` / `thumbnail_path` / `width` / `height`：图片 chunk 的元数据，用于前端展示和回退查询
+- `media_refs`：JSON 序列化的媒体引用列表，支持图片、公式、表格等多种媒体类型（LA-035-P18 新增）
+- `chunk_type`：新增 `image_pseudo` 类型，表示 VLM 描述后的图片 chunk
+
+#### ExtractedConcept（多媒体增强版）
 ```cypher
 CREATE NODE TABLE ExtractedConcept (
     extracted_id STRING PRIMARY KEY,    -- 格式: {chunk_id}_{name_hash}
@@ -71,9 +81,14 @@ CREATE NODE TABLE ExtractedConcept (
     extract_role STRING,               -- DEFINES/HAS_LAW/APPLIES_TO/EXTENDS/REQUIRES/IMPLEMENTS/HAS_SUB/HAS_IMPL
     description STRING,
     parent_hint STRING,
-    source_chunk STRING                -- 来源 chunk_id
+    source_chunk STRING,               -- 来源 chunk_id
+    media_refs STRING                  -- JSON 数组: [{"type": "image", "path": ..., "description": ...}]（LA-035-P18 新增）
 )
 ```
+
+**字段说明**：
+- `media_refs`：从来源 chunk 的 `media_refs` 继承，用于在概念详情面板中展示关联媒体（LA-035-P18）
+- 去重合并时，CanonicalConcept 的 `media_refs` 由所有来源 ExtractedConcept 的 `media_refs` 合并去重得到
 
 #### CanonicalConcept（新增，替代原 Concept）
 ```cypher
