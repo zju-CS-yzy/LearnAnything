@@ -24,7 +24,18 @@
           <button class="btn btn-sm" @click="searchNode">搜索</button>
         </div>
         <div class="toolbar-group">
-          <button class="btn btn-sm" @click="showConceptView" title="概念视图">🧩 概念</button>
+          <button 
+            class="btn btn-sm" 
+            :class="{ 'btn-primary': viewMode === 'document' }"
+            @click="switchViewMode('document')" 
+            title="文档结构树"
+          >📄 文档树</button>
+          <button 
+            class="btn btn-sm" 
+            :class="{ 'btn-primary': viewMode === 'concept' }"
+            @click="switchViewMode('concept')" 
+            title="知识图谱"
+          >🧩 知识图谱</button>
           <button class="btn btn-sm" @click="fitGraph" title="适应窗口">⬜ 适应</button>
           <button class="btn btn-sm" @click="resetLayout" title="重置布局">🔄 重置</button>
           <button class="btn btn-sm btn-primary" @click="openBuildOptions" :disabled="isBuilding">
@@ -187,6 +198,9 @@ const isLoading = ref(false)
 const nodeCount = ref(0)
 const edgeCount = ref(0)
 
+// LA-035-P19: 视图模式 — 'document' 文档结构树 / 'concept' 知识图谱
+const viewMode = ref('concept')
+
 // 构建选项
 const showBuildOptions = ref(false)
 const isRebuilding = ref(false)
@@ -317,27 +331,25 @@ async function loadAllNodes() {
     if (!cy) return
     cy.elements().remove()
 
-    await loadChunkNodes()
-    await loadEdges()
-    await loadConceptNodes()
-    await loadSemanticEdges()
-
-    if (cy.nodes().length > 0) {
-      const conceptNodes = cy.nodes().filter(n => {
-        const t = n.data('type')
-        return t && !['child', 'parent', 'markdown'].includes(t)
-      })
-      if (conceptNodes.length > 0) {
-        runConceptLayout(cy)
-      } else {
+    if (viewMode.value === 'document') {
+      // LA-035-P19: 文档结构树视图 — 只加载 Chunk 节点 + 结构边
+      await loadChunkNodes()
+      await loadEdges()
+      if (cy.nodes().length > 0) {
         runTreeLayout(cy)
+      }
+    } else {
+      // LA-035-P19: 知识图谱视图 — 只加载 CanonicalConcept + 语义边
+      await loadConceptNodes()
+      await loadSemanticEdges()
+      if (cy.nodes().length > 0) {
+        runConceptLayout(cy)
       }
     }
 
     await nextTick()
     if (cy) {
       cy.resize()
-      // 不调用 cy.fit() —— 布局函数已自行设置 zoom/pan
     }
 
     nodeCount.value = cy.nodes().length
@@ -661,39 +673,17 @@ function fitGraph() {
 }
 
 function resetLayout() {
-  const visibleConcepts = cy.nodes().filter(n => {
-    const t = n.data('type')
-    return t && !['child', 'parent', 'markdown'].includes(t) && n.style('display') !== 'none'
-  })
-  if (visibleConcepts.length > 0) {
-    runConceptLayout(cy)
-  } else {
+  if (viewMode.value === 'document') {
     runTreeLayout(cy)
+  } else {
+    runConceptLayout(cy)
   }
 }
 
-
-function showConceptView() {
-  // 先显示概念节点，隐藏 chunk 节点
-  cy.nodes().forEach(n => {
-    const t = n.data('type')
-    if (t === 'child' || t === 'parent' || t === 'markdown') {
-      n.style('display', 'none')
-    } else {
-      n.style('display', 'element')
-      n.style('opacity', 1)
-    }
-  })
-  cy.edges().forEach(e => {
-    const t = e.data('type')
-    if (t === 'SOLUTION' || t === 'DEPENDS_ON') {
-      e.style('display', 'element')
-    } else {
-      e.style('display', 'none')
-    }
-  })
-  
-  runConceptLayout(cy)
+function switchViewMode(mode) {
+  if (viewMode.value === mode) return
+  viewMode.value = mode
+  loadAllNodes()
 }
 
 async function expandNeighbors() {
@@ -871,19 +861,25 @@ function showConceptDetail(concept) {
 }
 
 function navigateToChunk(chunkId) {
-  // 在图谱中高亮并定位到指定 chunk
+  // LA-035-P19: 切换到文档树视图并高亮指定 chunk
   if (!cy) return
-  const target = cy.getElementById(chunkId)
-  if (target.length > 0) {
-    cy.animate({
-      fit: { eles: target, padding: 100 },
-      duration: 500,
-    })
-    target.select()
-    showConceptModal.value = false
-  } else {
-    alert(`Chunk ${chunkId} 不在当前视图中`)
+  if (viewMode.value !== 'document') {
+    switchViewMode('document')
   }
+  // 等待文档树加载完成
+  nextTick(() => {
+    const target = cy.getElementById(chunkId)
+    if (target.length > 0) {
+      cy.animate({
+        fit: { eles: target, padding: 100 },
+        duration: 500,
+      })
+      target.select()
+      showConceptModal.value = false
+    } else {
+      alert(`Chunk ${chunkId} 不在当前视图中`)
+    }
+  })
 }
 
 // ========== 生命周期 ==========

@@ -356,7 +356,7 @@ class ConceptDeduper:
             writer.writerow([
                 "id", "name", "aliases", "alias_count",
                 "concept_type", "relation", "source_chunks", "source_chunk_count",
-                "description", "parent_hint", "embedding"
+                "description", "parent_hint", "media_refs", "embedding"
             ])
             for c in concepts:
                 emb = c.get("embedding", [])
@@ -369,6 +369,9 @@ class ConceptDeduper:
                 # 过滤 aliases 和 source_chunks 中的 None
                 aliases = [a for a in c.get("aliases", []) if a and isinstance(a, str)]
                 source_chunks = [s for s in c.get("source_chunks", []) if s and isinstance(s, str)]
+                # LA-035-P18: 序列化 media_refs
+                media_refs = c.get("media_refs", [])
+                media_refs_str = json.dumps(media_refs, ensure_ascii=False) if media_refs else ""
                 writer.writerow([
                     c["id"],
                     c["name"],
@@ -380,6 +383,7 @@ class ConceptDeduper:
                     c["source_chunk_count"],
                     c.get("description", ""),
                     c.get("parent_hint", ""),
+                    media_refs_str,
                     emb_str,
                 ])
 
