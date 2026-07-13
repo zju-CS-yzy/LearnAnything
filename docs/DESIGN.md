@@ -22,6 +22,21 @@
 
 ---
 
+## 相关设计文档
+
+| 文档 | 说明 | 创建日期 |
+|:---|:---|:---|
+| [docs/DESIGN.md](DESIGN.md) | 本文件：总体设计文档 | 2026-07-05 |
+| [docs/data-model-v2.md](data-model-v2.md) | 四层数据模型设计（v2.0）：ExtractedConcept + CanonicalConcept 分层 | 2026-07-07 |
+| [docs/concept-view-layout.md](concept-view-layout.md) | 概念视图布局设计：DAG 分树 + 副本策略 + dagre 布局 | 2026-07-07 |
+| [docs/design-canonicalconcept-multimedia.md](design-canonicalconcept-multimedia.md) | CanonicalConcept 多媒体展示设计 | 2026-07-11 |
+| [docs/design-image-semantic-classification.md](design-image-semantic-classification.md) | 图片语义分类设计 | 2026-07-11 |
+| [docs/design-markdown-chunk-semantic-aggregation.md](design-markdown-chunk-semantic-aggregation.md) | Markdown 分块语义聚合设计 | 2026-07-11 |
+| [docs/leftover-problem.md](leftover-problem.md) | 遗留问题跟踪 | 持续更新 |
+| [docs/effective-decisions.md](effective-decisions.md) | 有效决策记录 | 持续更新 |
+
+---
+
 ## 1. 项目简要说明
 
 ### 1.1 背景
@@ -643,8 +658,13 @@ python build.py
 | `agents/coordinator.py` | Agent 协调器 |
 | `app/backend_api.py` | FastAPI 后端 |
 | `web-vue/src/components/GraphView.vue` | 知识图谱可视化 |
+| `docs/data-model-v2.md` | 四层数据模型设计（v2.0） |
+| `docs/concept-view-layout.md` | 概念视图布局设计 |
+| `docs/design-canonicalconcept-multimedia.md` | CanonicalConcept 多媒体展示设计 |
+| `docs/design-image-semantic-classification.md` | 图片语义分类设计 |
+| `docs/design-markdown-chunk-semantic-aggregation.md` | Markdown 分块语义聚合设计 |
 | `docs/leftover-problem.md` | 遗留问题跟踪 |
-| `docs/PROJECT_STATUS.md` | 项目状态汇报 |
+| `docs/effective-decisions.md` | 有效决策记录 |
 
 ---
 
