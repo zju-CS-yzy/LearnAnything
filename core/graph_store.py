@@ -451,6 +451,19 @@ class GraphStore:
 
             # LA-035-P18: 从 metadata 中提取并序列化 media_refs
             media_refs_raw = meta.get("media_refs", []) or meta.get("image_refs", [])
+            
+            # LA-035-P18-fix: 如果 media_refs 为空但 image_path 存在，
+            # 自动从 image_path 构建 media_refs（兼容 DocumentProcessor 生成的 chunk）
+            if not media_refs_raw and image_path and image_path != "":
+                media_refs_raw = [{
+                    "type": "image",
+                    "path": image_path,
+                    "thumbnail_path": thumbnail_path or "",
+                    "description": "",
+                    "width": width or 0,
+                    "height": height or 0,
+                }]
+            
             media_refs_json = self._escape_cypher_string(
                 json.dumps(media_refs_raw, ensure_ascii=False) if media_refs_raw else ""
             )
