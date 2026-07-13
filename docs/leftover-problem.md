@@ -236,6 +236,84 @@
 
 ---
 
+## 2026-07-13 更新
+
+### ✅ 已完成（今日）
+
+#### LA-035-P18：media_refs 显示不一致
+- **状态**: ✅ **已完成**
+- **问题**: 部分节点有图片 tag 但悬浮窗/详情面板无图片（数据链断裂）
+- **根因**: 
+  1. `add_chunk_nodes` 遗漏 `media_refs` 字段写入 Chunk 节点
+  2. `_get_media_refs_from_chunks` 回退逻辑条件过严（字段存在但值为空时不会回退到 image_path）
+- **修复**:
+  1. `graph_store.py` `add_chunk_nodes`: 从 metadata 提取并序列化 `media_refs` 写入 Chunk
+  2. `graph_store.py` `_get_media_refs_from_chunks`: 放宽条件为 `if not media_refs`（不需要检查字段是否存在）
+- **修改文件**: `core/graph_store.py`
+- **提交**: ef9633c
+
+#### LA-035-P19：非概念 chunk 节点在概念视图中重叠
+- **状态**: ✅ **已完成**
+- **问题**: document/heading/paragraph 类型节点在概念视图中全部堆叠在 (0,0)
+- **根因**: 前端 `GraphView.vue` 同时加载了 Chunk 节点和 CanonicalConcept 节点，通过 CSS 隐藏制造"概念视图"假象
+- **修复**: 
+  - 前端双视图严格分离：
+    - 知识图谱视图：只加载 CanonicalConcept + 语义边
+    - 文档树视图：只加载 Chunk + 结构边
+  - 新增工具栏切换按钮：📄 文档树 / 🧩 知识图谱
+- **修改文件**: `web-vue/src/components/graph/GraphView.vue`
+- **提交**: ef9633c
+
+#### LA-035-P12：上层 chunk 融合方案（Heading 作为上下文注入）
+- **状态**: ✅ **已完成**
+- **诊断**: RAG 学科同 heading_path 概念重叠率 84.2%（HeadingChunk vs ParagraphChunk）
+- **方案**: HeadingChunk 不直接提取概念，作为 ParagraphChunk 的语义上下文注入
+- **实现**:
+  - `semantic_extractor.py`: `extract_concepts_batch_v2` 新增 `heading_context` 参数
+  - `graph_builder.py`: 按 heading 分组 → 提取 heading 文本作为上下文声明 → 只提取非 heading chunk
+- **效果**:
+  - Heading 概念重叠率从 84.7% 降至 **0%**
+  - Paragraph 提取在 heading 上下文指导下更精准
+- **修改文件**: `core/semantic_extractor.py`, `core/graph_builder.py`
+- **提交**: 87ccce6
+
+#### LA-035：GraphStore 缓存一致性修复
+- **状态**: ✅ **已完成**
+- **问题**: `init_schema(force=True)` 时无法删除旧数据库（Windows 目录名损坏 + 缓存 key 不匹配）
+- **修复**: `graph_store.py` 使用统一的 `db_path_str` 缓存 key（字符串类型），避免 `Path` 对象与 `str` 混用
+- **修改文件**: `core/graph_store.py`
+- **提交**: f2b7cf9
+
+### 🔴 遗留问题更新
+
+#### LA-035-P17：公式/表格提取增强（更新）
+- **状态**: 🔴 **待测试**
+- **问题描述**: 当前前端仅对图片 chunk 进行了多媒体适配（悬浮预览、详情面板）。公式和表格 chunk 在 MinerU 提取时会生成对应的公式/表格标记，但尚未接入 VLM 描述或前端展示。
+- **待测试场景**: 表格密集型文档（如财务报表）、公式密集型文档（如数学/物理教材）
+- **期望效果**:
+  - 公式 chunk：VLM 生成公式文本描述（LaTeX 或自然语言）→ 可提取概念
+  - 表格 chunk：VLM 生成表格结构描述 → 可提取概念
+  - 前端：公式/表格节点显示专用标识，悬浮预览显示公式/表格内容
+- **修改范围**: `core/document_processor.py`（公式/表格 chunk 类型标记）+ `core/vlm_client.py`（公式/表格描述任务）+ `web-vue/src/components/graph/`（前端展示）
+- **优先级**: P2
+- **备注**: 需要开发者提供表格/公式较多的测试文档
+
+### 明日计划（后续）
+
+| 优先级 | 任务 | 内容 |
+|:---|:---|:---|
+| P2 | LA-035-P14 | 两阶段提取优化：nodes-first → edges-with-context 模式 |
+| P2 | LA-035-P17 | 公式/表格提取增强（等待测试文档） |
+| P2 | LA-035-P13 | 批量测试更多 PDF（不同特征文档） |
+| P3 | LA-035-P15 | YAML 模板配置 |
+| P3 | LA-035-P16 | Token 过期检测 |
+
+---
+
+*记录日期：2026-07-13*
+
+---
+
 ## 2026-07-11 终版更新
 
 [旧内容保留...]

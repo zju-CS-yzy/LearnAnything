@@ -298,14 +298,49 @@ chunks = chunker.chunk_markdown(markdown_text, source_metadata)
 - `chunk_type == "heading"` 的 chunk 承担相同的"图片上下文容器"角色
 - `ImageConceptExtractor` 需同时支持 `"title"`（旧数据）和 `"heading"`（新数据）
 
-### 5.3 与 SemanticExtractor 的兼容
+### 5.3 与 VLM 图片处理的兼容（LA-035-P10）
 
-`SemanticExtractor.extract_concepts()` 接收 `chunk_text` 和 `media_context`：
-- HeadingChunk: 包含标题 + 直接段落，适合提取**主题概念**
-- ParagraphChunk: 包含单个自然段，适合提取**细粒度概念**
-- 两者均可携带 `media_refs`（图片/表格/公式引用）
+`VLMClient`（`core/vlm_client.py`）通过智谱 AI GLM-4V 为图片 chunk 生成描述：
 
----
+```python
+# 图片 chunk 处理流程
+if chunk_type == "image_pseudo":
+    image_path = chunk["metadata"]["image_path"]
+    description = vlm.analyze_image(image_path, task="describe")
+    chunk["text"] = f"[图片内容]\n{description}"
+    chunk["metadata"]["vlm_description"] = description
+    chunk["metadata"]["media_refs"] = [{
+        "type": "image", "path": image_path, "thumbnail_path": ...,
+        "description": description, "width": ..., "height": ...
+    }]
+```
+
+**关键设计**：
+- VLM 描述文本被注入到 `chunk["text"]` 中，使图片 chunk 可参与概念提取
+- `media_refs` 保留原始图片的完整引用信息，用于前端展示
+- 图片描述的概念在语义聚合阶段与文本概念统一去重（CanonicalConcept）
+
+### 5.4 与 SemanticExtractor 的兼容（LA-035-P12）
+
+`SemanticExtractor.extract_concepts_batch_v2()` 接收 `heading_context` 参数：
+
+```python
+# 按 heading 分组提取
+heading_groups = group_by_heading_path(chunks)
+for heading_path, group_chunks in heading_groups.items():
+    heading_text = extract_heading_text(group_chunks)  # HeadingChunk 文本
+    extractable_chunks = [c for c in group_chunks if c["type"] != "heading"]
+    
+    concepts = extractor.extract_concepts_batch_v2(
+        extractable_chunks,
+        heading_context=heading_text[:300],  # 截断到 300 字符
+    )
+```
+
+**关键设计**：
+- HeadingChunk 文本作为【上下文声明】注入 prompt，但不从中提取概念
+- 消除同 heading_path 下的概念冗余（重叠率从 84.7% → 0%）
+- ParagraphChunk 和 image_pseudo chunk 在 heading 上下文指导下提取概念
 
 ## 6. 语义聚合策略（Phase 2.3）
 

@@ -252,11 +252,15 @@ Subject {
 | 前端 | UI组件 | 原生CSS（未使用组件库） | — |
 | 后端 | API框架 | FastAPI | 0.110+ |
 | 后端 | 进程管理 | Uvicorn | 0.27+ |
-| 核心 | 文档处理 | PyMuPDF + PaddleOCR | — |
+| 核心 | 文档处理 | PyMuPDF + PaddleOCR + **MinerU CLI** | — |
+| 核心 | Markdown 分块 | **MarkdownChunker v2.0**（自然段 + 树形 heading 层级） | — |
+| 核心 | 图片解析 | **VLM 视觉语言模型**（智谱 AI GLM-4V，图片描述生成） | — |
 | 核心 | 向量检索 | ChromaDB + BM25 + RRF | 0.4+ |
 | 核心 | Embedding | 智谱AI Embedding API | 2048维 |
 | 核心 | 图数据库 | KùzuDB | 0.4+ |
 | 核心 | LLM | DeepSeek API (Chat) + Zhipu API | — |
+| 核心 | **语义聚合** | **SemanticAggregator**（Heading 层级聚合） | — |
+| 核心 | 图片概念提取 | **ImageConceptExtractor** | — |
 | 数据 | 学科配置 | SQLite + JSON | — |
 | 数据 | 监控 | SQLite | — |
 | 打包 | 桌面应用 | PyInstaller + PyQt5 | 6.0+ |
@@ -386,21 +390,40 @@ build_links(canonical_concepts, chunks):
 
 ### 7.1 导入流程（Phase 1）
 
+**完整链路（PDF → Markdown → Chunk → 图片 VLM 描述 → 向量索引）：**
+
 ```
-用户上传文件
+用户上传 PDF
     │
     ▼
 ┌──────────────────┐
-│ DocumentProcessor │ 格式检测 → 内容提取
+│ MinerU CLI       │ 提取结构化 Markdown（标题层级、图片、公式、表格）
+│ (mineru-open-api)│
 └──────────────────┘
     │
     ▼
 ┌──────────────────┐
-│   Chunking       │ 分块（标题分块 + 语义分块）
+│ MarkdownChunker  │ 按自然段分块 + 树形 heading 层级结构
+│ v2.0             │ 生成：DocumentChunk / HeadingChunk / ParagraphChunk / image_pseudo
 └──────────────────┘
     │
     ├──────────────┬──────────────┐
     ▼              ▼              ▼
+┌────────┐  ┌────────────┐  ┌────────────┐
+│ 文本段落 │  │ 图片 chunk  │  │ 公式/表格  │  ← 图片 → VLM 描述生成
+│(Paragraph│  │(image_pseudo│  │(待提取)   │  ← 公式/表格（LA-035-P17 待优化）
+│ Chunk)  │  │ Chunk)     │  │           │
+└────────┘  └────────────┘  └────────────┘
+    │              │              │
+    ▼              ▼              ▼
+┌─────────────────────────────────────┐
+│  VLMClient (GLM-4V)                 │
+│  - 图片 chunk → VLM 描述文本        │
+│  - 描述注入 chunk.text 中            │
+│  - media_refs 关联原始图片路径       │
+└─────────────────────────────────────┘
+    │
+    ▼
 ┌────────┐  ┌────────────┐  ┌────────────┐
 │VectorStore│  │ GraphStore │  │ SubjectManager│
 │ChromaDB │  │  KùzuDB    │  │  SQLite    │
@@ -424,7 +447,22 @@ build_links(canonical_concepts, chunks):
     │
     ▼
 ┌──────────────────┐
-│ SemanticExtractor│ 遍历每个 chunk，LLM 提取概念
+│ 按 heading_path 分组 │ 同一 heading 下的 Paragraph + image_pseudo Chunk 归为一组
+└──────────────────┘
+    │
+    ▼
+┌──────────────────┐
+│ Heading 上下文提取 │ 提取 HeadingChunk 文本作为【上下文声明】
+│ (LA-035-P12)     │ 截断到 300 字符，注入到 LLM prompt
+└──────────────────┘
+    │
+    ▼
+┌──────────────────┐
+│ SemanticExtractor│ 小批量提取（系统提示词 + 上下文声明 + chunk 内容）
+│ (extract_concepts_batch_v2) │
+│ - 只从 ParagraphChunk 提取概念（Heading 不提取）
+│ - 上下文声明帮助 LLM 理解段落语义位置
+│ - 图片 chunk 携带 VLM 描述和 media_refs
 └──────────────────┘
     │
     ▼
