@@ -48,9 +48,22 @@ class MarkdownChunker:
     
     # 分块配置
     MAX_PARA_CHARS = 4000  # 单个自然段的最大字符数，超过则按句子切分
+    MIN_PARA_CHARS = 50    # LA-035: 极短段落合并阈值（小于此值尝试合并到相邻段落）
     
-    def __init__(self, max_para_chars: int = 4000):
+    # 合并方向判断用的连词/标点规则
+    MERGE_FORWARD_MARKERS = [  # 倾向于合并到下一段的标记
+        "此外", "但是", "然而", "不过", "另外", "其次", "接着",
+        "然后", "最后", "总之", "因此", "所以", "于是", "从而",
+        "另一方面", "除此之外", "不仅如此", "更重要的是",
+        "but", "however", "therefore", "thus", "moreover", "furthermore",
+    ]
+    
+    MERGE_BACKWARD_MARKERS = [  # 倾向于合并到上一段的标记（句末标点已在代码中处理）
+    ]
+    
+    def __init__(self, max_para_chars: int = 4000, min_para_chars: int = 50):
         self.max_para_chars = max_para_chars
+        self.min_para_chars = min_para_chars
     
     def chunk_markdown(
         self,
@@ -245,13 +258,18 @@ class MarkdownChunker:
     
     def _split_to_paragraphs(self, content: str) -> List[str]:
         """
-        按自然段分割文本。
+        按自然段分割文本，并执行后处理优化。
         
         规则:
         - 分隔符: 一个或多个空行（\n\n+）
         - 每个自然段 strip() 处理
         - 过滤空字符串
+        - 过滤纯图片引用行（LA-035: MinerU 会将图片提取为独立行）
+        - 合并极短段落（< MIN_PARA_CHARS）到相邻段落
         - 如果自然段超过 MAX_PARA_CHARS，按句子边界切分
+        
+        Returns:
+            优化后的段落列表
         """
         if not content.strip():
             return []
@@ -259,9 +277,20 @@ class MarkdownChunker:
         # 按一个或多个空行分割
         raw_paras = [p.strip() for p in re.split(r'\n\s*\n', content) if p.strip()]
         
-        paragraphs = []
+        # LA-035: Step 1 — 过滤纯图片引用行
+        filtered_paras = []
         for para in raw_paras:
-            # 如果段落过长，按句子边界切分
+            # 如果段落只包含图片引用（无其他文本内容），跳过
+            if self._is_image_only_paragraph(para):
+                continue
+            filtered_paras.append(para)
+        
+        # LA-035: Step 2 — 合并极短段落
+        merged_paras = self._merge_short_paragraphs(filtered_paras)
+        
+        # Step 3 — 处理超长段落
+        paragraphs = []
+        for para in merged_paras:
             if len(para) > self.max_para_chars:
                 sentences = self._split_to_sentences(para)
                 current = ""
@@ -278,6 +307,122 @@ class MarkdownChunker:
                 paragraphs.append(para)
         
         return paragraphs
+    
+    def _is_image_only_paragraph(self, para: str) -> bool:
+        """
+        判断段落是否只包含图片引用（无其他语义内容）。
+        
+        MinerU 输出的 Markdown 中，图片可能被提取为独立段落：
+        ![](path/to/image.png)
+        
+        这些段落没有文本语义，应该被过滤（图片内容会在 image_pseudo chunk 中处理）。
+        """
+        # 移除所有 Markdown 图片引用
+        text_without_images = re.sub(r'!\[[^\]]*\]\([^)]+\)', '', para).strip()
+        # 如果移除图片后为空或只剩空白，则认为是纯图片段落
+        return not text_without_images
+    
+    def _merge_short_paragraphs(self, paragraphs: List[str]) -> List[str]:
+        """
+        合并极短段落（< MIN_PARA_CHARS）到相邻段落。
+        
+        合并方向判断策略（优先级从高到低）：
+        1. 句末标点：以句号/问号/感叹号结尾 → 合并到下一段（作为开头补充）
+        2. 连词开头：以"此外"/"但是"/"因此"等开头 → 合并到下一段（承接上文）
+        3. 列表标记：以 "- "/"* "/"数字. " 开头 → 合并到上一段（列表延续）
+        4. 位置优先：第一个段落 → 合并到下一段；最后一个段落 → 合并到上一段
+        5. 默认：合并到上一段（中文阅读流自上而下）
+        
+        Args:
+            paragraphs: 原始段落列表
+            
+        Returns:
+            合并后的段落列表
+        """
+        if not paragraphs:
+            return []
+        
+        result = []
+        i = 0
+        while i < len(paragraphs):
+            para = paragraphs[i]
+            
+            # 如果段落长度 >= 阈值，直接保留
+            if len(para) >= self.min_para_chars:
+                result.append(para)
+                i += 1
+                continue
+            
+            # 极短段落，需要合并
+            # 判断合并方向
+            merge_direction = self._determine_merge_direction(
+                para, i, len(paragraphs), result[-1] if result else None, paragraphs[i + 1] if i + 1 < len(paragraphs) else None
+            )
+            
+            if merge_direction == "forward" and i + 1 < len(paragraphs):
+                # 合并到下一段
+                paragraphs[i + 1] = para + "\n" + paragraphs[i + 1]
+                i += 1  # 跳过当前段落（已合并到下一段）
+            elif merge_direction == "backward" and result:
+                # 合并到上一段
+                result[-1] = result[-1] + "\n" + para
+                i += 1
+            else:
+                # 无法合并，保留（作为独立段落）
+                result.append(para)
+                i += 1
+        
+        return result
+    
+    def _determine_merge_direction(
+        self,
+        para: str,
+        index: int,
+        total: int,
+        prev_para: Optional[str],
+        next_para: Optional[str],
+    ) -> str:
+        """
+        判断极短段落的合并方向。
+        
+        Returns:
+            "forward" — 合并到下一段
+            "backward" — 合并到上一段
+            "keep" — 无法合并，保持独立
+        """
+        # 规则 1：句末标点检查
+        # 如果短段落以句号/问号/感叹号结尾，可能是上一句的结尾，应合并到下一段作为开头补充
+        if re.search(r'[。！？\.\!\?]$', para.strip()):
+            # 但如果这是最后一个段落，只能合并到上一段
+            if index == total - 1:
+                return "backward" if prev_para else "keep"
+            return "forward"
+        
+        # 规则 2：连词开头检查
+        # 如果以"此外"/"但是"/"因此"等开头，说明是承接上文，应合并到下一段
+        para_start = para.strip()[:10]  # 取前10个字符判断
+        for marker in self.MERGE_FORWARD_MARKERS:
+            if para_start.startswith(marker):
+                if index == total - 1:
+                    return "backward" if prev_para else "keep"
+                return "forward"
+        
+        # 规则 3：列表标记检查
+        # 如果以列表标记开头，说明是列表延续，应合并到上一段
+        if re.match(r'^\s*[-\*•]\s', para) or re.match(r'^\s*\d+[\.\)]\s', para):
+            return "backward" if prev_para else "keep"
+        
+        # 规则 4：位置优先
+        # 第一个段落 → 合并到下一段
+        if index == 0:
+            return "forward" if next_para else "keep"
+        
+        # 最后一个段落 → 合并到上一段
+        if index == total - 1:
+            return "backward" if prev_para else "keep"
+        
+        # 规则 5：默认合并到上一段（中文阅读流自上而下）
+        return "backward" if prev_para else "keep"
     
     def _split_to_sentences(self, text: str) -> List[str]:
         """
@@ -484,13 +629,17 @@ def chunk_markdown_to_standard(
     markdown_text: str,
     source_metadata: Dict[str, Any],
     max_para_chars: int = 4000,
+    min_para_chars: int = 50,
 ) -> List[Dict[str, Any]]:
     """
     一键将 Markdown 转换为标准 chunk 列表。
     
     用于与现有 pipeline 兼容。
+    
+    Args:
+        min_para_chars: 极短段落合并阈值（小于此值尝试合并到相邻段落，默认 50）
     """
-    chunker = MarkdownChunker(max_para_chars=max_para_chars)
+    chunker = MarkdownChunker(max_para_chars=max_para_chars, min_para_chars=min_para_chars)
     return chunker.chunk_markdown(markdown_text, source_metadata)
 
 
@@ -500,6 +649,7 @@ def chunk_markdown_v1_compat(
     markdown_text: str,
     source_metadata: Dict[str, Any],
     max_para_chars: int = 4000,
+    min_para_chars: int = 50,
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     """
     v1.0 兼容接口：返回 (parent_chunks, child_chunks) 元组。
@@ -509,7 +659,7 @@ def chunk_markdown_v1_compat(
     Returns:
         (heading_chunks, paragraph_chunks) — 模拟 v1.0 的 parent/child 结构
     """
-    chunker = MarkdownChunker(max_para_chars=max_para_chars)
+    chunker = MarkdownChunker(max_para_chars=max_para_chars, min_para_chars=min_para_chars)
     chunks = chunker.chunk_markdown(markdown_text, source_metadata)
     
     heading_chunks = [c for c in chunks if c["metadata"]["chunk_type"] in ("heading", "document")]
