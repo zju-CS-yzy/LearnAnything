@@ -137,9 +137,11 @@ export function getTypeLabel(type) {
  * 5. 不同树共享子节点时，复制子节点到各自的树中
  */
 export function runTreeLayout(cy) {
+  // LA-035-P19: 支持 paragraph / heading / document / child / markdown / image 所有 chunk 类型
   const chunkNodes = cy.nodes().filter(n => {
     const t = n.data('type')
-    return t === 'child' || t === 'markdown' || t === 'image'
+    return t === 'child' || t === 'markdown' || t === 'image' ||
+           t === 'paragraph' || t === 'heading' || t === 'document'
   })
   const chunkEdges = cy.edges().filter(e => {
     const t = e.data('type')
@@ -355,7 +357,9 @@ export function runTreeLayout(cy) {
   // 6. 适应视图
   const allNodes = cy.nodes().filter(n => {
     const t = n.data('type')
-    return t === 'child' || t === 'markdown' || t === 'image' || n.data('isCopy') === 1
+    return t === 'child' || t === 'markdown' || t === 'image' ||
+           t === 'paragraph' || t === 'heading' || t === 'document' ||
+           n.data('isCopy') === 1
   })
 
   if (allNodes.length > 0) {
