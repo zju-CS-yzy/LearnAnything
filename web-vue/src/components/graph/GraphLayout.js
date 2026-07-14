@@ -171,6 +171,55 @@ export function runTreeLayout(cy) {
     }
   })
 
+  // P19-FIX-2: 收集所有从根可达的节点（用于识别孤立节点）
+  const treeReachable = new Set()
+  rootIds.forEach(rootId => {
+    const stack = [rootId]
+    while (stack.length > 0) {
+      const nid = stack.pop()
+      if (treeReachable.has(nid)) continue
+      treeReachable.add(nid)
+      const children = childrenMap[nid] || []
+      children.forEach(cid => stack.push(cid))
+    }
+  })
+
+  // P19-FIX-2: 孤立节点 = 在 chunkNodes 中但不可从任何根到达
+  // 这些节点也视为单节点树，排在最下方
+  const orphanIds = []
+  chunkNodes.forEach(n => {
+    const nid = n.id()
+    if (!treeReachable.has(nid)) {
+      orphanIds.push(nid)
+    }
+  })
+
+  // 合并根节点和孤立节点
+  const allRootIds = [...rootIds, ...orphanIds]
+
+  // P19-FIX-2: 按树大小排序（大节点多的树排在上面，孤立节点排在最后）
+  const treeSizeMap = {}
+  allRootIds.forEach(rootId => {
+    const visited = new Set()
+    const stack = [rootId]
+    while (stack.length > 0) {
+      const nid = stack.pop()
+      if (visited.has(nid)) continue
+      visited.add(nid)
+      const children = childrenMap[nid] || []
+      children.forEach(cid => stack.push(cid))
+    }
+    treeSizeMap[rootId] = visited.size
+  })
+
+  allRootIds.sort((a, b) => treeSizeMap[b] - treeSizeMap[a])
+
+  console.log('[runTreeLayout] 根节点数:', rootIds.length, '孤立节点数:', orphanIds.length, '总树数:', allRootIds.length)
+  console.log('[runTreeLayout] 节点类型统计:', [...chunkNodes].map(n => n.data('type')).reduce((acc, t) => { acc[t] = (acc[t] || 0) + 1; return acc }, {}))
+  if (orphanIds.length > 0) {
+    console.log('[runTreeLayout] 孤立节点:', orphanIds)
+  }
+
   // 3. 复制共享子节点（入度 > 1 的节点）
   cy.nodes('[isCopy = 1]').remove()
   cy.edges('[isCopyEdge = 1]').remove()
@@ -179,7 +228,8 @@ export function runTreeLayout(cy) {
   const copyEdges = []
   const originalToCopies = {}
 
-  rootIds.forEach((rootId, treeIdx) => {
+  // P19-FIX-2: 使用排序后的 allRootIds（替代原来的 rootIds）
+  allRootIds.forEach((rootId, treeIdx) => {
     const visitedInTree = new Set()
     const stack = [{ originalId: rootId, parentTreeNodeId: null }]
 
@@ -316,7 +366,8 @@ export function runTreeLayout(cy) {
   }
 
   let currentY = 0
-  rootIds.forEach((rootId, treeIdx) => {
+  // P19-FIX-2: 使用排序后的 allRootIds（替代原来的 rootIds）
+  allRootIds.forEach((rootId, treeIdx) => {
     let treeRootId = rootId
     if (originalToCopies[rootId] && originalToCopies[rootId][treeIdx]) {
       treeRootId = originalToCopies[rootId][treeIdx]
