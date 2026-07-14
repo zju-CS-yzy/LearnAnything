@@ -216,19 +216,52 @@ def run_full_pipeline(store, target_concept_name="多头注意力"):
     print(f"  ✓ 段落数: {len(question_context.sections)}")
     
     # ───────────────────────────────────────────────
-    # 步骤 4: 上下文组装（讲解）
+    # 步骤 4: IRT 参数估计与能力更新
     # ───────────────────────────────────────────────
-    print("\n【步骤 4】上下文组装（讲解）...")
+    print("\n【步骤 4】IRT 参数估计与能力更新...")
+    from core.graph_education.irt_estimator import IRTEstimator
     
-    # 模拟用户状态（假设答错）
+    irt = IRTEstimator(calibration_stage=1)
+    
+    # 估计目标概念的 IRT 参数
+    irt_params = irt.estimate_irt_params(seed_concepts[0], question_type="choice")
+    print(f"  ✓ 启发式难度 b: {irt_params.b}")
+    print(f"  ✓ 区分度 a: {irt_params.a}")
+    print(f"  ✓ 猜测度 c: {irt_params.c}")
+    print(f"  ✓ 校准阶段: {irt_params.calibration_stage}")
+    
+    # 模拟用户能力更新（假设初始 θ=0，答错后更新）
+    theta_before = 0.0
+    p = irt.compute_probability(theta_before, irt_params.a, irt_params.b, irt_params.c)
+    print(f"  ✓ 初始能力 θ={theta_before}，答对概率 P={p:.2%}")
+    
+    # 模拟答错
+    theta_after = irt.update_theta(theta_before, is_correct=0.0,
+                                    a=irt_params.a, b=irt_params.b, c=irt_params.c)
+    print(f"  ✓ 答错后能力 θ={theta_after}")
+    
+    # 计算信息量
+    info = irt.compute_information(theta_before, irt_params.a, irt_params.b, irt_params.c)
+    print(f"  ✓ 题目信息量 I(θ)={info:.4f}")
+    
+    # ───────────────────────────────────────────────
+    # 步骤 5: 上下文组装（讲解）
+    # ───────────────────────────────────────────────
+    print("\n【步骤 5】上下文组装（讲解）...")
+    
+    # 模拟用户状态（基于 IRT 能力估计）
     user_states = {}
     for node in subgraph.nodes:
-        # 目标概念掌握度低，其他中等
-        mastery = 0.2 if node.canonical_id == seed_concepts[0].canonical_id else 0.6
+        if node.canonical_id == seed_concepts[0].canonical_id:
+            # 目标概念：低掌握度（θ 映射到 mastery）
+            mastery = irt.theta_to_mastery(theta_after)
+        else:
+            # 其他概念：中等掌握度
+            mastery = 0.6
         user_states[node.canonical_id] = UserKnowledgeState(
             canonical_id=node.canonical_id,
             canonical_name=node.name,
-            mastery_level=mastery,
+            mastery_level=round(mastery, 2),
             test_count=3,
             streak=-1
         )
@@ -252,6 +285,17 @@ def run_full_pipeline(store, target_concept_name="多头注意力"):
     print(question_context.text)
     
     print("\n" + "=" * 60)
+    print("【IRT 参数】")
+    print("=" * 60)
+    print(f"目标概念: {target_concept_name}")
+    print(f"难度 b: {irt_params.b}")
+    print(f"区分度 a: {irt_params.a}")
+    print(f"猜测度 c: {irt_params.c}")
+    print(f"初始能力 θ: {theta_before}")
+    print(f"答错后能力 θ: {theta_after}")
+    print(f"信息量 I(θ): {info:.4f}")
+    
+    print("\n" + "=" * 60)
     print("【最终输出】讲解上下文")
     print("=" * 60)
     print(explanation_context.text)
@@ -268,11 +312,14 @@ def run_full_pipeline(store, target_concept_name="多头注意力"):
         "出题上下文包含文件名": "Attention_Is_All_You_Need.pdf" in question_context.text,
         "出题上下文包含章节": "章节:" in question_context.text or "heading" in question_context.text.lower(),
         "出题上下文包含页码": "页码:" in question_context.text,
+        "IRT 参数已估计": irt_params.b != 0.0,
+        "能力更新正确": theta_after < theta_before,  # 答错后能力下降
+        "信息量 > 0": info > 0,
         "讲解上下文包含错因定位": "错因" in explanation_context.text or "掌握度" in explanation_context.text,
         "讲解上下文包含知识网络": "知识网络" in explanation_context.text or "概念" in explanation_context.text,
         "讲解上下文包含推荐学习": "推荐" in explanation_context.text or "优先" in explanation_context.text,
         "出题上下文在预算内": question_context.token_count <= pattern.context_budget.max_tokens,
-        "讲解上下文在预算内": explanation_context.token_count <= 3000,  # L2 默认预算
+        "讲解上下文在预算内": explanation_context.token_count <= 3000,
     }
     
     all_pass = True

@@ -239,3 +239,33 @@ QUICK_PRACTICE_TEMPLATE = ExamTemplate(
 BUILTIN_TEMPLATES = {
     "quick_practice": QUICK_PRACTICE_TEMPLATE,
 }
+
+
+@dataclass
+class AnswerRecord:
+    """
+    答题记录：用于 IRT 校准和能力画像
+    """
+    record_id: str = ""
+    user_id: str = ""
+    subject_id: str = ""
+    group_id: str = ""
+    question_id: str = ""
+    sequence: int = 0
+    
+    # 作答内容
+    user_answer: str = ""
+    correct_answer: str = ""
+    is_correct: bool = False
+    
+    # 时间
+    time_spent: int = 0  # 秒
+    answered_at: Optional[Any] = None
+    
+    # 关联概念（用于知识传播分析）
+    primary_concepts: List[str] = field(default_factory=list)
+    
+    # IRT 相关（提交时计算）
+    theta_before: float = 0.0  # 答题前能力估计
+    theta_after: float = 0.0   # 答题后能力估计
+    item_information: float = 0.0  # 该题的信息量 I(θ)

@@ -27,6 +27,7 @@ from core.graph_education.types import (
 from core.graph_education.concept_retriever import ConceptRetriever
 from core.graph_education.subgraph_builder import SubgraphBuilder
 from core.graph_education.context_assembler import ContextAssembler
+from core.graph_education.irt_estimator import IRTEstimator
 
 __all__ = [
     "ConceptNode",
@@ -44,4 +45,5 @@ __all__ = [
     "ConceptRetriever",
     "SubgraphBuilder",
     "ContextAssembler",
+    "IRTEstimator",
 ]
