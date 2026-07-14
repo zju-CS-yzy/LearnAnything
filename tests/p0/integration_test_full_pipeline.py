@@ -3,17 +3,22 @@ LA-040-P0: 完整流程集成测试脚本
 
 从出题意图 → 概念检索 → 子图构建 → 上下文组装
 
-运行方式：
+运行方式:
     cd D:\MyCS\AI\Project\LearnAnything
-    python -m tests.p0.integration_test_full_pipeline
+    python tests\p0\integration_test_full_pipeline.py
 
-输出：完整的上下文组装结果，用于人工判断是否合理
+输出: 完整的上下文组装结果，用于人工判断是否合理
 """
 
 import sys
 import tempfile
 import shutil
 from pathlib import Path
+
+# 设置 UTF-8 编码（Windows 兼容）
+import io
+sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
+sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
 
 sys.path.insert(0, r"D:\MyCS\AI\Project\LearnAnything")
 
@@ -46,30 +51,55 @@ def setup_test_database():
     store = GraphStore(str(db_path))
     store.init_schema(force=True)
     
-    # 添加 Chunk 节点
+    # 添加 Chunk 节点（带 heading_path 和 page_number）
+    # 注意：add_chunk_nodes 从 metadata 中读取 heading_path 和 page_number
     chunks = [
-        {"id": "chunk_001", "text": "注意力机制是 Transformer 的核心", 
-         "metadata": {"source": "Attention_Is_All_You_Need.pdf", "subject": "transformer"}},
-        {"id": "chunk_002", "text": "多头注意力并行运行多组注意力", 
-         "metadata": {"source": "Attention_Is_All_You_Need.pdf", "subject": "transformer"}},
-        {"id": "chunk_003", "text": "缩放点积除以 sqrt(d_k) 防止饱和", 
-         "metadata": {"source": "Attention_Is_All_You_Need.pdf", "subject": "transformer"}},
+        {
+            "id": "chunk_001",
+            "text": "注意力机制是 Transformer 的核心",
+            "metadata": {
+                "source": "Attention_Is_All_You_Need.pdf",
+                "subject": "transformer",
+                "heading_path": "3.2 注意力机制",
+                "page_number": 4,
+            },
+        },
+        {
+            "id": "chunk_002",
+            "text": "多头注意力并行运行多组注意力",
+            "metadata": {
+                "source": "Attention_Is_All_You_Need.pdf",
+                "subject": "transformer",
+                "heading_path": "3.2.2 多头注意力",
+                "page_number": 5,
+            },
+        },
+        {
+            "id": "chunk_003",
+            "text": "缩放点积除以 sqrt(d_k) 防止饱和",
+            "metadata": {
+                "source": "Attention_Is_All_You_Need.pdf",
+                "subject": "transformer",
+                "heading_path": "3.2.1 缩放点积注意力",
+                "page_number": 5,
+            },
+        },
     ]
     store.add_chunk_nodes(chunks)
     
     # 添加概念
     import json
     concepts = [
-        ("concept_c1", "注意力机制", "concept", "让模型自动关注输入重要部分的技术", 
+        ("concept_c1", "注意力机制", "concept", "让模型自动关注输入重要部分的技术",
          '["Attention", "Attention Mechanism"]', "chunk_001"),
-        ("concept_c2", "多头注意力", "technology", "并行运行多组注意力计算", 
+        ("concept_c2", "多头注意力", "technology", "并行运行多组注意力计算",
          '["Multi-Head Attention", "MHA"]', "chunk_002"),
-        ("concept_c3", "缩放点积注意力", "sub_technology", "除以 sqrt(d_k) 防止梯度消失", 
+        ("concept_c3", "缩放点积注意力", "sub_technology", "除以 sqrt(d_k) 防止梯度消失",
          '["Scaled Dot-Product Attention"]', "chunk_003"),
-        ("concept_c4", "Transformer", "technology", "基于自注意力机制的深度学习架构", 
+        ("concept_c4", "Transformer", "technology", "基于自注意力机制的深度学习架构",
          '["Transformer", "Transformer模型"]', "chunk_001"),
-        ("concept_c5", "位置编码", "sub_technology", "为序列添加位置信息使模型感知顺序", 
-         '["Positional Encoding"]', ""),
+        ("concept_c5", "位置编码", "sub_technology", "为序列添加位置信息使模型感知顺序",
+         '["Positional Encoding"]', "chunk_001"),
     ]
     
     conn = store._ensure_db()
@@ -171,7 +201,8 @@ def run_full_pipeline(store, target_concept_name="多头注意力"):
     # 步骤 3: 上下文组装（出题）
     # ───────────────────────────────────────────────
     print("\n【步骤 3】上下文组装（出题）...")
-    assembler = ContextAssembler()
+    # 传入 graph_store，让来源文档显示文件名/章节/页码
+    assembler = ContextAssembler(graph_store=store)
     
     question_context = assembler.assemble(
         subgraph=subgraph,
@@ -233,7 +264,10 @@ def run_full_pipeline(store, target_concept_name="多头注意力"):
     checks = {
         "出题上下文包含目标概念": target_concept_name in question_context.text,
         "出题上下文包含关联概念": len(subgraph.nodes) > 1,
-        "出题上下文包含来源文档": "来源文档" in question_context.text or "source" in question_context.text.lower(),
+        "出题上下文包含来源文档": "来源文档" in question_context.text,
+        "出题上下文包含文件名": "Attention_Is_All_You_Need.pdf" in question_context.text,
+        "出题上下文包含章节": "章节:" in question_context.text or "heading" in question_context.text.lower(),
+        "出题上下文包含页码": "页码:" in question_context.text,
         "讲解上下文包含错因定位": "错因" in explanation_context.text or "掌握度" in explanation_context.text,
         "讲解上下文包含知识网络": "知识网络" in explanation_context.text or "概念" in explanation_context.text,
         "讲解上下文包含推荐学习": "推荐" in explanation_context.text or "优先" in explanation_context.text,

@@ -5,6 +5,7 @@ LA-040-P0: Context Assembler（上下文组装器）
 """
 
 import re
+import json
 from typing import Dict, List, Optional, Any
 
 from core.graph_education.types import (
@@ -25,13 +26,15 @@ class ContextAssembler:
     # 中文 token 估算系数（经验值：1 中文字 ≈ 1.5 tokens）
     TOKEN_RATIO = 1.5
     
-    def __init__(self, tokenizer: Optional[Any] = None):
+    def __init__(self, tokenizer: Optional[Any] = None, graph_store=None):
         """
         Args:
             tokenizer: 可选的分词器（如 tiktoken），用于精确估算 token。
                        未提供时使用字符数估算。
+            graph_store: 可选的 GraphStore 实例，用于查询 Chunk 节点的完整来源信息。
         """
         self.tokenizer = tokenizer
+        self.graph_store = graph_store
     
     # ───────────────────────────────────────────────
     # 核心接口
@@ -285,22 +288,100 @@ class ContextAssembler:
         return "## 前置知识\n" + "\n".join(chains)
     
     def _format_sources(self, nodes: List[ConceptNode]) -> str:
-        """格式化来源文档"""
-        sources = set()
+        """
+        格式化来源文档
+        
+        如果提供了 graph_store，会查询 Chunk 节点获取完整的文档信息：
+        - 文件名（从 metadata.source 解析）
+        - 章节路径（heading_path）
+        - 页码（page_number）
+        """
+        chunk_ids = set()
         for node in nodes:
             if node.source_chunks:
-                # source_chunks 是逗号分隔的 chunk_id 或 JSON
                 for chunk_id in str(node.source_chunks).split(","):
                     chunk_id = chunk_id.strip()
                     if chunk_id:
-                        sources.add(chunk_id)
+                        chunk_ids.add(chunk_id)
         
-        if not sources:
+        if not chunk_ids:
             return "## 来源文档\n（无明确来源）"
         
+        # 如果有 graph_store，查询 Chunk 节点获取完整元数据
+        if self.graph_store:
+            chunk_info = self._query_chunk_info(chunk_ids)
+            if chunk_info:
+                return self._format_sources_enriched(chunk_info)
+        
+        # 回退：简单显示 chunk_id
         lines = ["## 来源文档"]
-        for s in list(sources)[:5]:  # 最多 5 个来源
+        for s in list(chunk_ids)[:5]:
             lines.append(f"- {s}")
+        return "\n".join(lines)
+    
+    def _query_chunk_info(self, chunk_ids: set) -> List[Dict]:
+        """查询 Chunk 节点的元数据（文件名、章节、页码）"""
+        if not chunk_ids or not self.graph_store:
+            return []
+        
+        conn = self.graph_store._ensure_db()
+        id_str = ", ".join([f"'{cid}'" for cid in chunk_ids])
+        
+        # 注意：KùzuDB 中 Chunk 节点的 id 字段是 chunk_id，文件名是 source 字段
+        cypher = f"""
+            MATCH (c:Chunk)
+            WHERE c.chunk_id IN [{id_str}]
+            RETURN c.chunk_id, c.heading_path, c.page_number, c.source
+        """
+        
+        results = []
+        try:
+            result = self.graph_store._execute(conn, cypher)
+            while result.has_next():
+                row = result.get_next()
+                results.append({
+                    "chunk_id": row[0] or "",
+                    "heading_path": row[1] or "",
+                    "page_number": row[2] if row[2] is not None else "",
+                    "metadata": json.dumps({"source": row[3] or ""})  # 模拟 metadata 格式
+                })
+        except Exception:
+            pass
+        
+        return results
+    
+    def _format_sources_enriched(self, chunk_info: List[Dict]) -> str:
+        """格式化 enriched 来源信息（含文件名、章节、页码）"""
+        if not chunk_info:
+            return "## 来源文档\n（无明确来源）"
+        
+        # 按文件分组
+        by_file = {}
+        for info in chunk_info:
+            filename = "未知文件"
+            try:
+                metadata = json.loads(info["metadata"]) if info["metadata"] else {}
+                filename = metadata.get("source", "未知文件")
+            except (json.JSONDecodeError, TypeError):
+                pass
+            
+            if filename not in by_file:
+                by_file[filename] = []
+            by_file[filename].append(info)
+        
+        lines = ["## 来源文档"]
+        for filename, chunks in by_file.items():
+            lines.append(f"- **文件**: {filename}")
+            for info in chunks:
+                parts = []
+                if info["heading_path"]:
+                    parts.append(f"章节: {info['heading_path']}")
+                if info["page_number"] not in (None, "", 0):
+                    parts.append(f"页码: {info['page_number']}")
+                if info["chunk_id"]:
+                    parts.append(f"段落: {info['chunk_id']}")
+                if parts:
+                    lines.append(f"  - {'; '.join(parts)}")
         return "\n".join(lines)
     
     def _format_explanation_target(
