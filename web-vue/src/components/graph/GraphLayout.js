@@ -689,6 +689,45 @@ export function runConceptLayout(cy) {
 
   console.log(`[runConceptLayout] Trees after split: ${allTrees.length}`)
 
+  // P19-FIX-3: 处理漏掉的节点（不在任何树中的连通节点，通常是环状结构）
+  const nodesInTrees = new Set()
+  allTrees.forEach(tree => {
+    tree.nodes.forEach(id => nodesInTrees.add(id))
+  })
+  const leakedIds = []
+  allConceptIds.forEach(id => {
+    if (!nodesInTrees.has(id)) leakedIds.push(id)
+  })
+  if (leakedIds.length > 0) {
+    console.warn(`[runConceptLayout] ${leakedIds.length} leaked nodes not in any tree:`, leakedIds)
+    // 按连通分量将漏掉的节点分组，每组创建一个伪树
+    const leakedVisited = new Set()
+    leakedIds.forEach(startId => {
+      if (leakedVisited.has(startId)) return
+      const comp = new Set()
+      const stack = [startId]
+      while (stack.length > 0) {
+        const nid = stack.pop()
+        if (comp.has(nid)) continue
+        comp.add(nid)
+        leakedVisited.add(nid)
+        // 遍历可见边，找同分量的节点
+        visibleEdges.forEach(e => {
+          const src = e.source().id()
+          const tgt = e.target().id()
+          if (src === nid && !comp.has(tgt) && leakedIds.includes(tgt)) stack.push(tgt)
+          if (tgt === nid && !comp.has(src) && leakedIds.includes(src)) stack.push(src)
+        })
+      }
+      if (comp.size > 0) {
+        // 用第一个节点作为伪根
+        const pseudoRoot = comp.values().next().value
+        allTrees.push({ rootId: pseudoRoot, nodes: comp, isPseudo: true })
+      }
+    })
+    console.log(`[runConceptLayout] Added ${allTrees.length - (allTrees.length - leakedIds.length)} pseudo-trees for leaked nodes`)
+  }
+
   // 2d. 每棵树独立跑 dagre LR
   const treeBboxes = []
 
@@ -714,36 +753,48 @@ export function runConceptLayout(cy) {
       return
     }
 
-    // 重置位置并跑 dagre
-    layoutCollection.nodes().forEach(n => n.position({ x: 0, y: 0 }))
-    layoutCollection.layout({
-      name: 'dagre',
-      rankDir: 'LR',
-      rankSep: 80,
-      nodeSep: 40,
-      edgeSep: 10,
-      padding: 10,
-      fit: false,
-      animate: false,
-    }).run()
-
-    // P19-FIX: dagre fallback — 如果所有节点仍在原点（dagre 失败，可能有环），使用简单网格
-    const dagreNodes = layoutCollection.nodes()
-    const allAtOrigin = dagreNodes.length > 0 && dagreNodes.every(n => {
-      const x = n.position('x')
-      const y = n.position('y')
-      return Math.abs(x) < 1 && Math.abs(y) < 1
-    })
-    if (allAtOrigin && dagreNodes.length > 1) {
-      console.warn(`[runConceptLayout] Tree ${idx} dagre failed (all at origin), using fallback grid`)
-      const fCols = Math.max(1, Math.ceil(Math.sqrt(dagreNodes.length)))
-      const fGapX = 200
-      const fGapY = 120
-      dagreNodes.forEach((n, i) => {
-        const col = i % fCols
-        const row = Math.floor(i / fCols)
-        n.position({ x: col * fGapX, y: row * fGapY })
+    // P19-FIX-3: 伪树（漏掉的环状节点）直接用网格，不跑 dagre
+    if (tree.isPseudo) {
+      const pseudoNodes = layoutCollection.nodes()
+      const pCols = Math.max(1, Math.ceil(Math.sqrt(pseudoNodes.length)))
+      const pGap = 180
+      pseudoNodes.forEach((n, i) => {
+        const col = i % pCols
+        const row = Math.floor(i / pCols)
+        n.position({ x: col * pGap, y: row * pGap })
       })
+    } else {
+      // 重置位置并跑 dagre
+      layoutCollection.nodes().forEach(n => n.position({ x: 0, y: 0 }))
+      layoutCollection.layout({
+        name: 'dagre',
+        rankDir: 'LR',
+        rankSep: 80,
+        nodeSep: 40,
+        edgeSep: 10,
+        padding: 10,
+        fit: false,
+        animate: false,
+      }).run()
+
+      // P19-FIX: dagre fallback — 如果所有节点仍在原点（dagre 失败，可能有环），使用简单网格
+      const dagreNodes = layoutCollection.nodes()
+      const allAtOrigin = dagreNodes.length > 0 && dagreNodes.every(n => {
+        const x = n.position('x')
+        const y = n.position('y')
+        return Math.abs(x) < 1 && Math.abs(y) < 1
+      })
+      if (allAtOrigin && dagreNodes.length > 1) {
+        console.warn(`[runConceptLayout] Tree ${idx} dagre failed (all at origin), using fallback grid`)
+        const fCols = Math.max(1, Math.ceil(Math.sqrt(dagreNodes.length)))
+        const fGapX = 200
+        const fGapY = 120
+        dagreNodes.forEach((n, i) => {
+          const col = i % fCols
+          const row = Math.floor(i / fCols)
+          n.position({ x: col * fGapX, y: row * fGapY })
+        })
+      }
     }
 
     // 计算 bbox（节点实际尺寸）
@@ -959,9 +1010,13 @@ export function runConceptLayout(cy) {
     const sCols = Math.max(1, Math.ceil(Math.sqrt(stuckNodes.length)))
     const sGap = 150
     stuckNodes.forEach((n, i) => {
-      const col = i % sCols
-      const row = Math.floor(i / sCols)
-      n.position({ x: 100 + col * sGap, y: totalH + 100 + row * sGap })
+      try {
+        const col = i % sCols
+        const row = Math.floor(i / sCols)
+        n.position({ x: 100 + col * sGap, y: totalH + 100 + row * sGap })
+      } catch (e) {
+        console.warn(`[runConceptLayout] Failed to reposition node ${n.id()}:`, e)
+      }
     })
   }
 
