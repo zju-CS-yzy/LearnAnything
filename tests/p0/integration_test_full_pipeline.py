@@ -61,26 +61,27 @@ def setup_test_database():
     import json
     concepts = [
         ("concept_c1", "注意力机制", "concept", "让模型自动关注输入重要部分的技术", 
-         '["Attention", "Attention Mechanism"]'),
+         '["Attention", "Attention Mechanism"]', "chunk_001"),
         ("concept_c2", "多头注意力", "technology", "并行运行多组注意力计算", 
-         '["Multi-Head Attention", "MHA"]'),
+         '["Multi-Head Attention", "MHA"]', "chunk_002"),
         ("concept_c3", "缩放点积注意力", "sub_technology", "除以 sqrt(d_k) 防止梯度消失", 
-         '["Scaled Dot-Product Attention"]'),
+         '["Scaled Dot-Product Attention"]', "chunk_003"),
         ("concept_c4", "Transformer", "technology", "基于自注意力机制的深度学习架构", 
-         '["Transformer", "Transformer模型"]'),
+         '["Transformer", "Transformer模型"]', "chunk_001"),
         ("concept_c5", "位置编码", "sub_technology", "为序列添加位置信息使模型感知顺序", 
-         '["Positional Encoding"]'),
+         '["Positional Encoding"]', ""),
     ]
     
     conn = store._ensure_db()
-    for cid, name, ctype, desc, aliases in concepts:
+    for cid, name, ctype, desc, aliases, source_chunks in concepts:
         cypher = f"""
             CREATE (c:CanonicalConcept {{
                 canonical_id: '{cid}',
                 name: '{name}',
                 concept_type: '{ctype}',
                 description: '{store._escape_cypher_string(desc)}',
-                aliases: '{aliases}'
+                aliases: '{aliases}',
+                source_chunks: '{source_chunks}'
             }})
         """
         store._execute(conn, cypher)
