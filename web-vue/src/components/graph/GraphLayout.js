@@ -505,23 +505,23 @@ export function runConceptLayout(cy) {
     return t === 'SOLUTION' || t === 'DEPENDS_ON'
   })
 
-  // 收集边（保留自环边用于连通性检测，布局时单独排除）
+  // 收集边：过滤自环边，但自环节点仍作为普通节点显示
+  // P19-FIX-3: 先记录所有节点，再过滤自环边，确保自环节点不被当作 orphan 隐藏
+  const connectedNodeIds = new Set()
   const edgeList = []
   semanticEdges.forEach(e => {
-    edgeList.push({
-      source: e.source().id(),
-      target: e.target().id(),
-      type: e.data('type'),
-      edgeRef: e,
-      isSelfLoop: e.source().id() === e.target().id(),
-    })
-  })
-
-  // 找出有连接的节点
-  const connectedNodeIds = new Set()
-  edgeList.forEach(e => {
-    connectedNodeIds.add(e.source)
-    connectedNodeIds.add(e.target)
+    const src = e.source().id()
+    const tgt = e.target().id()
+    connectedNodeIds.add(src)
+    connectedNodeIds.add(tgt)
+    if (src !== tgt) {
+      edgeList.push({
+        source: src,
+        target: tgt,
+        type: e.data('type'),
+        edgeRef: e
+      })
+    }
   })
 
   const connectedNodes = allConceptNodes.filter(n => connectedNodeIds.has(n.id()))
@@ -633,9 +633,13 @@ export function runConceptLayout(cy) {
   })
 
   // 2b. 基于 cy 中实际可见的边，识别所有根和子树
+  // P19-FIX-3: visibleEdges 也过滤自环，确保自环节点入度=0，成为根节点
   const visibleEdges = cy.edges().filter(e => {
     const t = e.data('type')
-    return (t === 'SOLUTION' || t === 'DEPENDS_ON') && e.style('display') !== 'none'
+    const isSemantic = t === 'SOLUTION' || t === 'DEPENDS_ON'
+    const isVisible = e.style('display') !== 'none'
+    const isSelfLoop = e.source().id() === e.target().id()
+    return isSemantic && isVisible && !isSelfLoop
   })
 
   // 计算入度（基于可见边）
@@ -744,8 +748,6 @@ export function runConceptLayout(cy) {
     visibleEdges.forEach(e => {
       const src = e.source().id()
       const tgt = e.target().id()
-      // P19-FIX-3: 排除自环边不传给 dagre，但节点仍参与布局
-      if (src === tgt) return
       if (tree.nodes.has(src) && tree.nodes.has(tgt)) {
         layoutCollection = layoutCollection.union(e)
       }
