@@ -494,7 +494,10 @@ export function runConceptLayout(cy) {
   const imageNodes = cy.nodes().filter(n => n.data('type') === 'image')
   const allConceptNodes = cy.nodes().filter(n => {
     const t = n.data('type')
-    return t && t !== 'child' && t !== 'parent' && t !== 'markdown' && t !== 'image'
+    // P19-FIX: 包含所有非 chunk 节点（包括 type 为 undefined 的 concept 节点）
+    // 只排除明确的 chunk / 图片类型
+    if (t === 'child' || t === 'parent' || t === 'markdown' || t === 'image') return false
+    return true
   })
 
   const semanticEdges = cy.edges().filter(e => {
@@ -724,6 +727,25 @@ export function runConceptLayout(cy) {
       animate: false,
     }).run()
 
+    // P19-FIX: dagre fallback — 如果所有节点仍在原点（dagre 失败，可能有环），使用简单网格
+    const dagreNodes = layoutCollection.nodes()
+    const allAtOrigin = dagreNodes.length > 0 && dagreNodes.every(n => {
+      const x = n.position('x')
+      const y = n.position('y')
+      return Math.abs(x) < 1 && Math.abs(y) < 1
+    })
+    if (allAtOrigin && dagreNodes.length > 1) {
+      console.warn(`[runConceptLayout] Tree ${idx} dagre failed (all at origin), using fallback grid`)
+      const fCols = Math.max(1, Math.ceil(Math.sqrt(dagreNodes.length)))
+      const fGapX = 200
+      const fGapY = 120
+      dagreNodes.forEach((n, i) => {
+        const col = i % fCols
+        const row = Math.floor(i / fCols)
+        n.position({ x: col * fGapX, y: row * fGapY })
+      })
+    }
+
     // 计算 bbox（节点实际尺寸）
     let minX = Infinity, maxX = -Infinity
     let minY = Infinity, maxY = -Infinity
@@ -922,6 +944,24 @@ export function runConceptLayout(cy) {
       imgNode.position({ x: 50 + idx * imageGap, y: imageStartY })
       imgNode.style('display', 'element')
       imgNode.style('opacity', 1)
+    })
+  }
+
+  // P19-FIX: 最终安全检查 — 遍历所有显示中的节点，将仍在原点的节点重新定位
+  const visibleNodes = cy.nodes().filter(n => n.style('display') !== 'none')
+  const stuckNodes = visibleNodes.filter(n => {
+    const x = n.position('x')
+    const y = n.position('y')
+    return Math.abs(x) < 5 && Math.abs(y) < 5
+  })
+  if (stuckNodes.length > 0) {
+    console.warn(`[runConceptLayout] ${stuckNodes.length} nodes stuck at origin, repositioning`)
+    const sCols = Math.max(1, Math.ceil(Math.sqrt(stuckNodes.length)))
+    const sGap = 150
+    stuckNodes.forEach((n, i) => {
+      const col = i % sCols
+      const row = Math.floor(i / sCols)
+      n.position({ x: 100 + col * sGap, y: totalH + 100 + row * sGap })
     })
   }
 
