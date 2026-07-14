@@ -186,6 +186,72 @@ class UserKnowledgeState:
 
 
 @dataclass
+class KnowledgeTrace:
+    """知识追踪：题目与概念的关联"""
+    primary_concepts: List[str] = field(default_factory=list)
+    secondary_concepts: List[str] = field(default_factory=list)
+    concept_chain: List[str] = field(default_factory=list)
+    bloom_level: str = "understand"
+    difficulty_score: float = 0.5
+    difficulty_label: str = "中等"
+
+
+@dataclass
+class Question:
+    """题目"""
+    question_id: str = ""
+    group_id: str = ""
+    sequence: int = 0
+    
+    question_type: str = ""
+    question_text: str = ""
+    options: Optional[Dict[str, str]] = None
+    correct_answer: str = ""
+    explanation: str = ""
+    
+    knowledge_trace: KnowledgeTrace = field(default_factory=KnowledgeTrace)
+    irt_params: IRTParams = field(default_factory=IRTParams)
+    
+    user_answer: Optional[str] = None
+    is_correct: Optional[bool] = None
+    time_spent: Optional[int] = None
+    answered_at: Optional[datetime] = None
+
+
+class GroupStatus(Enum):
+    """题目组状态机"""
+    GENERATED = "generated"
+    IN_PROGRESS = "in_progress"
+    SUBMITTED = "submitted"
+    GRADED = "graded"
+
+
+@dataclass
+class QuestionGroup:
+    """题目组"""
+    group_id: str = ""
+    user_id: str = ""
+    subject_id: str = ""
+    template_id: str = ""
+    
+    status: GroupStatus = GroupStatus.GENERATED
+    questions: List[Question] = field(default_factory=list)
+    target_concepts: List[str] = field(default_factory=list)
+    
+    generated_at: datetime = field(default_factory=datetime.now)
+    submitted_at: Optional[datetime] = None
+    graded_at: Optional[datetime] = None
+    
+    @property
+    def total_questions(self) -> int:
+        return len(self.questions)
+    
+    @property
+    def is_completed(self) -> bool:
+        return self.status in (GroupStatus.SUBMITTED, GroupStatus.GRADED)
+
+
+@dataclass
 class QuestionPattern:
     """题型配置"""
     pattern_id: str = ""
