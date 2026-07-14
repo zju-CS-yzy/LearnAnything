@@ -744,36 +744,75 @@ export function runConceptLayout(cy) {
     console.log(`[runConceptLayout] Tree ${idx}: ${tree.nodes.size} nodes, h=${Math.round(bbox.h)}`)
   })
 
-  // ===== 步骤3: 纵向堆叠所有树 =====
-  const order = allTrees.map((tree, i) => ({ i, count: tree.nodes.size }))
+  // ===== 步骤3: 二维网格排列所有树（替代原来的纵向堆叠）=====
+  // P19-FIX: 将纵向堆叠改为二维网格，避免总高度过大
+  const container = cy.container()
+  const containerW = container.clientWidth || 1200
+  const containerH = container.clientHeight || 800
+  const maxRowWidth = Math.max(600, containerW * 0.9) // 每行最大宽度
+
+  // 按节点数降序排列（大的树优先）
+  const sortedTrees = allTrees
+    .map((tree, i) => ({ treeIdx: i, count: tree.nodes.size, bbox: treeBboxes[i] }))
+    .filter(t => t.bbox.h > 0)
     .sort((a, b) => b.count - a.count)
 
-  const treeGap = 100
-  let currentY = 30
+  // 网格排列：每行尽可能多地放树
+  const rows = [] // 每行包含的 tree indices
+  let currentRow = []
+  let currentRowWidth = 0
+  const treeGapX = 60  // 树之间水平间距
+  const treeGapY = 80  // 行之间垂直间距
 
-  order.forEach(({ i: treeIdx }) => {
-    const tree = allTrees[treeIdx]
-    const bbox = treeBboxes[treeIdx]
+  sortedTrees.forEach(({ treeIdx, bbox }) => {
+    const treeWidth = bbox.w + treeGapX
+    // 如果当前行放不下这棵树，换行
+    if (currentRow.length > 0 && currentRowWidth + treeWidth > maxRowWidth) {
+      rows.push(currentRow)
+      currentRow = []
+      currentRowWidth = 0
+    }
+    currentRow.push({ treeIdx, bbox })
+    currentRowWidth += treeWidth
+  })
+  if (currentRow.length > 0) {
+    rows.push(currentRow)
+  }
 
-    if (bbox.h === 0) return
+  console.log(`[runConceptLayout] Grid layout: ${rows.length} rows, maxRowWidth=${Math.round(maxRowWidth)}`)
+  rows.forEach((row, ridx) => {
+    console.log(`[runConceptLayout] Row ${ridx}: ${row.length} trees, totalWidth=${Math.round(row.reduce((sum, t) => sum + t.bbox.w + treeGapX, 0))}`)
+  })
 
-    const targetX = 30
-    const targetY = currentY
+  // 放置每棵树
+  let rowStartY = 30
+  rows.forEach(row => {
+    let rowHeight = 0
+    let currentX = 30
 
-    const dx = targetX - bbox.x1
-    const dy = targetY - bbox.y1
+    row.forEach(({ treeIdx, bbox }) => {
+      const tree = allTrees[treeIdx]
+      rowHeight = Math.max(rowHeight, bbox.h)
 
-    // 移动该树所有节点
-    tree.nodes.forEach(id => {
-      const node = cy.getElementById(id)
-      if (node.length > 0) {
-        node.position('x', node.position('x') + dx)
-        node.position('y', node.position('y') + dy)
-      }
+      const dx = currentX - bbox.x1
+      const dy = rowStartY - bbox.y1
+
+      // 移动该树所有节点
+      tree.nodes.forEach(id => {
+        const node = cy.getElementById(id)
+        if (node.length > 0) {
+          node.position('x', node.position('x') + dx)
+          node.position('y', node.position('y') + dy)
+        }
+      })
+
+      currentX += bbox.w + treeGapX
     })
 
-    currentY = currentY + bbox.h + treeGap
+    rowStartY += rowHeight + treeGapY
   })
+
+  const totalGridHeight = rowStartY
 
   // ===== 步骤4: 显示节点并计算全局 zoom =====
   connectedNodes.forEach(n => {
@@ -813,12 +852,10 @@ export function runConceptLayout(cy) {
 
   console.log(`[runConceptLayout] Global: ${Math.round(totalW)} x ${Math.round(totalH)}`)
 
-  const container = cy.container()
-  const containerW = container.clientWidth
-
-  // 纵向堆叠：宽度是瓶颈，优先 fit 宽度；高度方向可滚动
+  // P19-FIX: 二维网格布局，优先 fit 宽度，高度可滚动
   const zoomByWidth = (containerW * 0.85) / totalW
-  const zoom = Math.min(zoomByWidth, 0.5)
+  const zoomByHeight = (containerH * 0.8) / totalH
+  const zoom = Math.min(zoomByWidth, zoomByHeight, 0.5)
   cy.zoom(Math.max(zoom, 0.1))
   cy.pan({ x: 30, y: 30 })
 
