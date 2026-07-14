@@ -26,6 +26,7 @@ from core.graph_education.types import (
 
 from core.graph_education.concept_retriever import ConceptRetriever
 from core.graph_education.subgraph_builder import SubgraphBuilder
+from core.graph_education.context_assembler import ContextAssembler
 
 __all__ = [
     "ConceptNode",
@@ -42,4 +43,5 @@ __all__ = [
     "QUICK_PRACTICE_TEMPLATE",
     "ConceptRetriever",
     "SubgraphBuilder",
+    "ContextAssembler",
 ]

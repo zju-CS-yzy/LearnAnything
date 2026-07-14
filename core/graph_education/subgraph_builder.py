@@ -351,10 +351,18 @@ class SubgraphBuilder:
                         node_ids.add(target_id)
                         next_level.append(target_id)
                         
-                        # 添加节点
-                        nodes.append(self._row_to_node(row[2:]))
+                        # 手动创建节点：row[2] = name, row[3] = concept_type, row[4] = description, ...
+                        node = ConceptNode(
+                            canonical_id=target_id,
+                            name=row[2] if len(row) > 2 else "",
+                            concept_type=row[3] if len(row) > 3 else "concept",
+                            description=row[4] if len(row) > 4 else "",
+                            parent_hint=row[5] if len(row) > 5 else "",
+                            aliases=row[6] if len(row) > 6 else [],
+                        )
+                        nodes.append(node)
                         
-                        # 添加边（KùzuDB 查询使用了多种关系类型，统一标记为 RELATED）
+                        # 添加边
                         edges.append(SemanticEdge(
                             source_id=source_id,
                             target_id=target_id,

@@ -33,6 +33,7 @@ from core.graph_store import GraphStore
 from core.graph_education.types import ConceptNode, ContextBudget, QuestionPattern
 from core.graph_education.concept_retriever import ConceptRetriever
 from core.graph_education.subgraph_builder import SubgraphBuilder
+from core.graph_education.context_assembler import ContextAssembler
 
 
 # ───────────────────────────────────────────────
@@ -284,3 +285,15 @@ def transformer_concept(sample_concept_nodes):
 def sample_subgraph(subgraph_builder, attention_concept):
     """返回一个样本星型子图"""
     return subgraph_builder.build_star(attention_concept, max_nodes=5)
+
+
+@pytest.fixture
+def large_subgraph(subgraph_builder, transformer_concept):
+    """返回一个较大的树型子图（用于测试预算裁剪）"""
+    return subgraph_builder.build_tree(transformer_concept, max_depth=2, max_nodes=10)
+
+
+@pytest.fixture
+def context_assembler():
+    """返回已初始化的 ContextAssembler"""
+    return ContextAssembler()
