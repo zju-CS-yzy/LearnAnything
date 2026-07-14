@@ -758,10 +758,11 @@ export function runConceptLayout(cy) {
       const pseudoNodes = layoutCollection.nodes()
       const pCols = Math.max(1, Math.ceil(Math.sqrt(pseudoNodes.length)))
       const pGap = 180
+      // P19-FIX-3b: 网格起始位置偏移 50，避免被 stuckNodes 误判
       pseudoNodes.forEach((n, i) => {
         const col = i % pCols
         const row = Math.floor(i / pCols)
-        n.position({ x: col * pGap, y: row * pGap })
+        n.position({ x: 50 + col * pGap, y: 50 + row * pGap })
       })
     } else {
       // 重置位置并跑 dagre
@@ -789,10 +790,11 @@ export function runConceptLayout(cy) {
         const fCols = Math.max(1, Math.ceil(Math.sqrt(dagreNodes.length)))
         const fGapX = 200
         const fGapY = 120
+        // P19-FIX-3b: 网格起始位置偏移 50，避免被 stuckNodes 误判
         dagreNodes.forEach((n, i) => {
           const col = i % fCols
           const row = Math.floor(i / fCols)
-          n.position({ x: col * fGapX, y: row * fGapY })
+          n.position({ x: 50 + col * fGapX, y: 50 + row * fGapY })
         })
       }
     }
@@ -1000,10 +1002,11 @@ export function runConceptLayout(cy) {
 
   // P19-FIX: 最终安全检查 — 遍历所有显示中的节点，将仍在原点的节点重新定位
   const visibleNodes = cy.nodes().filter(n => n.style('display') !== 'none')
+  // P19-FIX-3b: 收紧阈值，避免误判正常布局的节点（网格第一列 x=0 但 y>0 不是 stuck）
   const stuckNodes = visibleNodes.filter(n => {
     const x = n.position('x')
     const y = n.position('y')
-    return Math.abs(x) < 5 && Math.abs(y) < 5
+    return Math.abs(x) < 2 && Math.abs(y) < 2
   })
   if (stuckNodes.length > 0) {
     console.warn(`[runConceptLayout] ${stuckNodes.length} nodes stuck at origin, repositioning`)
