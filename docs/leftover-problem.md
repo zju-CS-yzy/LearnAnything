@@ -441,6 +441,58 @@
 
 ---
 
+## 2026-07-16 更新
+
+### 🔴 遗留问题更新
+
+#### LA-035-P21: 公式图片识别为 LaTeX（修正方向）
+- **状态**: 🔴 **进行中**
+- **问题描述**: MinerU 从 PDF 提取的公式实际是图片，不是文本 LaTeX。当前流程中这些公式图片被当作普通图片用 VLM 描述，导致 SemanticExtractor 无法获取精确的公式语义。
+- **根因**: 
+  - MinerU 输出的 Markdown 中公式以 `![...](images/xxx.jpg)` 图片形式存在
+  - `ImageConceptExtractor` 对所有图片统一调用 VLM `task="describe"`，而非 `task="formula"`
+  - 公式图片生成的 pseudo_chunk text 是"图片描述"而非 LaTeX 代码
+- **修复方案**:
+  - 在 `ImageConceptExtractor` 中增加公式图片检测（宽高比特征）
+  - 对疑似公式图片调用 VLM `task="formula"` 识别 LaTeX
+  - 公式图片的 pseudo_chunk text 设为识别出的 LaTeX（而非描述）
+  - `media_refs` 中同时添加 `{"type": "formula", "latex": "..."}`
+- **修改范围**: `core/image_concept_extractor.py`, `core/mineru_client.py`
+- **优先级**: P0
+
+#### LA-035-P23: 缺少[删除学科]前端方法
+- **状态**: 🔴 **新增**
+- **问题描述**: 前端没有删除学科的功能，不便于测试时清理和重建学科数据。
+- **期望效果**: 前端学科列表页提供删除按钮，调用后端 `/api/subjects/{name}` DELETE 接口
+- **优先级**: P1
+
+#### LA-035-P24: 节点有图片 tag 但详情面板无图片（media_ref 数据链断裂）
+- **状态**: 🔴 **新增**
+- **问题描述**: 部分概念节点在图谱中显示"图片×N" tag，但点击打开详情面板后"引用媒体"区域为空。
+- **根因分析**: 
+  - 可能性1: `_normalize_media_refs` 在某种 chunk 类型下回退逻辑未覆盖
+  - 可能性2: CanonicalConcept 节点合并时 media_refs 丢失
+  - 可能性3: 前端详情面板渲染逻辑与悬浮窗使用不同的数据字段
+- **排查方向**: 
+  - 对比悬浮窗和详情面板的数据来源（是否为同一 API 返回的同一字段）
+  - 检查 concept 去重/合并时 media_refs 是否正确聚合
+  - 检查 `_normalize_media_refs` 对不同类型 chunk 的处理
+- **优先级**: P1
+
+### 明日计划（2026-07-16）
+
+| 优先级 | 任务编号 | 任务内容 | 说明 |
+|:---|:---|:---|:---|
+| **P0** | P21 | 公式图片识别为 LaTeX | ImageConceptExtractor + mineru_client 公式识别 |
+| **P1** | P23 | 删除学科前端方法 | 前端增加删除按钮 + 后端 API |
+| **P1** | P24 | media_ref 断裂排查 | 对比悬浮窗 vs 详情面板数据来源 |
+
+---
+
+*记录日期：2026-07-16*
+
+---
+
 ## 2026-07-11 终版更新
 
 [旧内容保留...]

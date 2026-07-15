@@ -263,20 +263,107 @@ class MinerUClient:
             source_metadata={**metadata, "subject": subject},
         )
         
-        # 补充图片信息到 heading / document chunks
+        # LA-035-P21 FIX: 补充图片信息到 heading / document chunks
+        # Bug 原因: _replace_image_paths 已替换 Markdown 中的图片路径为知识库路径，
+        # 但 copied_images 的 key 是原始文件名（如 xxx.jpg），而 ref["path"] 已是替换后的
+        # 知识库路径（如 线性代数_v1_images/xxx.png），两者不匹配导致 image_refs 被清空。
+        # 修复: 建立从替换后路径到 copied_images 条目的映射，确保可追溯性。
+        # 注意: Windows 路径使用反斜杠，但 Markdown 中的路径使用正斜杠，需要统一。
+        path_to_info = {}
+        for info in copied_images.values():
+            rel_path = info["relative_path"].replace("\\", "/")
+            path_to_info[rel_path] = info
+        
         for chunk in chunks:
             if chunk["metadata"]["chunk_type"] in ("heading", "document"):
-                chunk["metadata"]["image_refs"] = [
-                    copied_images.get(Path(ref["path"]).name, ref)
-                    for ref in chunk["metadata"].get("image_refs", [])
-                    if Path(ref["path"]).name in copied_images
-                ]
+                new_refs = []
+                for ref in chunk["metadata"].get("image_refs", []):
+                    ref_path = ref["path"].replace("\\", "/")
+                    if ref_path in path_to_info:
+                        info = path_to_info[ref_path]
+                        new_refs.append({
+                            "type": "image",
+                            "path": str(info["full_path"]),
+                            "relative_path": info["relative_path"].replace("\\", "/"),
+                            "thumbnail_path": info["thumbnail_path"].replace("\\", "/"),
+                            "width": info["width"],
+                            "height": info["height"],
+                            "alt": ref.get("alt", ""),
+                            "original_name": Path(info["relative_path"]).name,
+                        })
+                chunk["metadata"]["image_refs"] = new_refs
+                
+                # 同步更新 media_refs（供 GraphStore 使用）
+                if new_refs:
+                    chunk["metadata"]["media_refs"] = new_refs
         
         # 5. 调用 ImageConceptExtractor 生成图片概念伪文本 chunks
         # LA-035: 对含图片的 heading chunks 调用 VLM 生成描述，生成 image_pseudo chunks
         from core.image_concept_extractor import ImageConceptExtractor
         extractor = ImageConceptExtractor()
         chunks = extractor.enrich_chunks_with_image_descriptions(chunks, subject=subject)
+        
+        # LA-035-P21 FIX: 如果 Markdown 中没有图片引用，但 MinerU 提取了图片，
+        # 将这些图片作为独立 image_pseudo chunks 添加到 chunks 列表中。
+        # 这种情况发生在 MinerU 输出的 Markdown 中不包含图片引用时。
+        has_image_refs = any(
+            c["metadata"].get("image_refs", [])
+            for c in chunks
+            if c["metadata"]["chunk_type"] in ("heading", "document", "title")
+        )
+        
+        if not has_image_refs and copied_images:
+            print(f"[MinerUClient] Markdown 中无图片引用，但提取了 {len(copied_images)} 张图片，直接创建 image_pseudo chunks")
+            for idx, (orig_name, info) in enumerate(copied_images.items()):
+                pseudo_id = f"img_pseudo_{source_name}_{idx}_{hashlib.md5(info['relative_path'].encode()).hexdigest()[:6]}"
+                
+                # LA-035-P21: 使用 ImageConceptExtractor 的智能分析（自动检测公式图片）
+                img_path = info["full_path"]
+                analyze_result = extractor._describe_image_with_context(img_path, context="")
+                
+                if analyze_result:
+                    text, source = analyze_result
+                    is_formula = source == "vlm_formula"
+                else:
+                    # 回退到占位符
+                    text = f"[图片] {orig_name}"
+                    source = "placeholder"
+                    is_formula = False
+                
+                # 构建 media_refs
+                media_refs = [{
+                    "type": "image",
+                    "path": str(info["full_path"]),
+                    "relative_path": info["relative_path"].replace("\\", "/"),
+                    "thumbnail_path": info["thumbnail_path"].replace("\\", "/"),
+                    "width": info["width"],
+                    "height": info["height"],
+                    "alt": orig_name,
+                }]
+                
+                # 如果是公式图片，额外添加 formula media_ref
+                if is_formula:
+                    media_refs.append({
+                        "type": "formula",
+                        "latex": text,
+                        "display": "block" if "\n" in text else "inline",
+                    })
+                
+                pseudo_chunk = {
+                    "id": pseudo_id,
+                    "text": f"[{'公式' if is_formula else '图片'} - {orig_name}]\n{text}",
+                    "metadata": {
+                        "chunk_type": "image_pseudo",
+                        "source_name": source_name,
+                        "subject": subject,
+                        "media_refs": media_refs,
+                        "description_source": source,
+                        "description_length": len(text),
+                        "is_formula_image": is_formula,
+                    },
+                    "source": source_name,
+                }
+                chunks.append(pseudo_chunk)
         
         return chunks
     

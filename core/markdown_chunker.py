@@ -237,6 +237,11 @@ class MarkdownChunker:
             content_lines = lines[start_line:end_line]
             content = "\n".join(content_lines)
             
+            # LA-035-P21 FIX: 从原始内容提取图片引用，防止纯图片行被过滤后丢失
+            # 纯图片段落（如 ![formula](path)）会被 _is_image_only_paragraph 过滤，
+            # 但图片引用信息必须保留，供 ImageConceptExtractor 后续处理
+            node["image_refs"] = self._extract_image_refs(content)
+            
             # 按自然段分割
             paragraphs = self._split_to_paragraphs(content)
             
@@ -511,14 +516,30 @@ class MarkdownChunker:
             paragraph_ids = [para_ids[(id(node), pidx)] for pidx in range(len(node["paragraphs"]))]
             
             # 提取图片引用
-            image_refs = []
+            # LA-035-P21 FIX: 从节点预先提取的原始图片引用读取（防止纯图片行被过滤后丢失）
+            # 同时兼容从段落提取的旧逻辑
+            image_refs = list(node.get("image_refs", []))
             for para in node["paragraphs"]:
                 image_refs.extend(self._extract_image_refs(para))
+            
+            # 去重（基于 path）
+            seen_paths = set()
+            deduped_refs = []
+            for ref in image_refs:
+                path = ref.get("path", "")
+                if path and path not in seen_paths:
+                    seen_paths.add(path)
+                    deduped_refs.append(ref)
+            image_refs = deduped_refs
             
             # 检测公式和表格
             all_para_text = "\n".join(node["paragraphs"])
             formula_count = self._count_formulas(all_para_text)
             table_lines = self._count_table_lines(all_para_text)
+            
+            # LA-035-P21 FIX: 提取公式为 media_refs，供 SemanticExtractor 识别
+            heading_formulas = self._extract_formulas(all_para_text)
+            heading_media_refs = self._build_media_refs(image_refs, heading_formulas)
             
             chunk = {
                 "id": node["id"],
@@ -533,6 +554,7 @@ class MarkdownChunker:
                     "paragraph_ids": paragraph_ids,
                     "line_range": [node["line_idx"], node["end_line_idx"]],
                     "image_refs": image_refs,
+                    "media_refs": heading_media_refs,
                     "formula_count": formula_count,
                     "table_lines": table_lines,
                 },
@@ -544,6 +566,10 @@ class MarkdownChunker:
             for pidx, para in enumerate(node["paragraphs"]):
                 para_id = para_ids[(id(node), pidx)]
                 para_image_refs = self._extract_image_refs(para)
+                
+                # LA-035-P21 FIX: 提取段落中的公式为 media_refs
+                para_formulas = self._extract_formulas(para)
+                para_media_refs = self._build_media_refs(para_image_refs, para_formulas)
                 
                 para_chunk = {
                     "id": para_id,
@@ -557,6 +583,7 @@ class MarkdownChunker:
                         "paragraph_index": pidx,
                         "line_range": node["para_line_ranges"][pidx] if pidx < len(node["para_line_ranges"]) else [0, 0],
                         "image_refs": para_image_refs,
+                        "media_refs": para_media_refs,
                         "formula_count": self._count_formulas(para),
                         "table_lines": self._count_table_lines(para),
                     },
@@ -612,6 +639,55 @@ class MarkdownChunker:
         block = len(re.findall(r'\$\$(.*?)\$\$', text, re.DOTALL))
         inline = len(re.findall(r'(?<!\$)\$(?!\$)([^\$]+)\$(?!\$)', text))
         return block + inline
+    
+    def _extract_formulas(self, text: str) -> List[Dict[str, Any]]:
+        """
+        从文本中提取 LaTeX 公式，返回 media_refs 格式列表。
+        
+        支持的格式:
+        - 块级公式: $$...$$
+        - 行内公式: $...$ (不包含 $$)
+        
+        Returns:
+            [{"type": "formula", "latex": str, "display": "block"|"inline"}, ...]
+        """
+        formulas = []
+        # 块级公式 $$...$$
+        for match in re.finditer(r'\$\$(.*?)\$\$', text, re.DOTALL):
+            formulas.append({
+                "type": "formula",
+                "latex": match.group(1).strip(),
+                "display": "block",
+            })
+        # 行内公式 $...$ — 使用负向回顾/前瞻避免匹配 $$
+        for match in re.finditer(r'(?<!\$)\$(?!\$)([^\$]+)\$(?!\$)', text):
+            formulas.append({
+                "type": "formula",
+                "latex": match.group(1).strip(),
+                "display": "inline",
+            })
+        return formulas
+    
+    def _build_media_refs(self, image_refs: List[Dict[str, Any]], formulas: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """
+        将图片引用和公式合并为统一的 media_refs 列表。
+        
+        Args:
+            image_refs: _extract_image_refs 返回的列表
+            formulas: _extract_formulas 返回的列表
+        
+        Returns:
+            统一的 media_refs，供 SemanticExtractor.media_context 使用
+        """
+        media_refs = []
+        for ref in image_refs:
+            media_refs.append({
+                "type": ref.get("type", "image"),
+                "path": ref.get("path", ""),
+                "caption": ref.get("alt", ""),
+            })
+        media_refs.extend(formulas)
+        return media_refs
     
     def _count_table_lines(self, text: str) -> int:
         """统计文本中的 Markdown 表格行数。"""
