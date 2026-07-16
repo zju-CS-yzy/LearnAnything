@@ -17,6 +17,7 @@ from core.embedding import EmbeddingManager
 from core.query_rewriter import QueryRewriter
 from core.subject_analyzer import SubjectAnalyzer
 from core.llm_client import LLMClient
+from core.graph_education import GraphContext
 from agents.base_agent import BaseAgent
 
 
@@ -97,26 +98,168 @@ class QuizAgent(BaseAgent):
             self._vector_store = VectorStore(self.collection_name)
         return self._vector_store
 
-    def handle(self, query: str, n_questions: int = 5, filters: Optional[Dict[str, Any]] = None, **kwargs) -> Dict[str, Any]:
-        # 从用户查询中提取核心主题
-        topic = self._extract_topic(query)
+    def handle(self, query: str, n_questions: int = 5, filters: Optional[Dict[str, Any]] = None, graph_context: Optional[GraphContext] = None, **kwargs) -> Dict[str, Any]:
+        # P0-INT-2: 如果提供了 graph_context，使用 P0 图谱上下文出题
+        if graph_context is not None and graph_context.text:
+            print(f"[QuizAgent] P0-INT-2: 使用 P0 图谱上下文出题，token={graph_context.token_count}")
+            return self._generate_questions_with_context(query, n_questions, graph_context)
 
-        # 加载动态学科配置
+        # 回退：旧方式直接检索 chunks
+        print(f"[QuizAgent] 回退到旧方式出题（无图谱上下文）")
+        return self._generate_questions_old(query, n_questions, filters)
+
+    def _extract_topic(self, query: str) -> str:
+        """从用户查询中提取核心主题"""
+        keywords = [
+            "出题", "题目", "面试题", "练习题", "测试题", "考题", "试题",
+            "考我", "测试我", "考一下", "测一下", "做道题", "来道题",
+            "quiz", "question", "exam", "test me", "give me a question",
+            "出一道", "来一道", "来几题", "出几题", "给我出题",
+            "关于", "的", "一下", "几道", "几题",
+        ]
+        topic = query
+        for kw in keywords:
+            topic = topic.replace(kw, "")
+        return " ".join(topic.split()).strip() or query
+
+    # ==================== P0-INT-2: 使用图谱上下文出题 ====================
+
+    def _generate_questions_with_context(self, query: str, n_questions: int, graph_context: GraphContext) -> Dict[str, Any]:
+        """P0-INT-2: 使用 ContextAssembler 组装的上下文生成题目"""
+        topic = self._extract_topic(query)
         config = self._get_subject_config()
         enabled_types = [k for k, v in config.get("question_types", {}).items() if v.get("enabled", False)]
 
-        # 检索相关知识
+        # 使用 graph_context.text 作为上下文
+        context_text = graph_context.text
+
+        # 从 subgraph 提取概念名列表
+        concept_names = []
+        if graph_context.subgraph:
+            concept_names = [n.name for n in graph_context.subgraph.nodes]
+            print(f"[QuizAgent] 图谱上下文概念: {concept_names}")
+
+        # 优先使用 LLM 生成题目
+        questions = self._generate_questions_llm_from_context(context_text, n_questions, topic)
+
+        if not questions:
+            questions = self._generate_questions_fallback_from_context(context_text, n_questions, topic)
+
+        # 为题目增加 knowledge_trace
+        for q in questions:
+            q["knowledge_trace"] = {
+                "primary_concepts": concept_names[:3] if concept_names else [topic],
+                "secondary_concepts": concept_names[3:6] if len(concept_names) > 3 else [],
+                "concept_chain": concept_names,
+                "difficulty_score": 0.5,
+                "difficulty_label": "中等",
+            }
+
+        text_parts = [f"以下是 {len(questions)} 道关于「{topic}」的题目（基于知识图谱）：\n"]
+        for q in questions:
+            text_parts.append(f"\n【{q['id']}】{q['question']}")
+            if q.get('options'):
+                for opt in q['options']:
+                    text_parts.append(f"  {opt}")
+            text_parts.append(f"\n答案：{q['answer']}")
+            text_parts.append(f"解析：{q['explanation']}")
+
+        return {
+            "text": "\n".join(text_parts),
+            "questions": questions,
+            "graph_context_token_count": graph_context.token_count,
+            "concept_names": concept_names,
+            "topic": topic,
+            "subject_config": {
+                "subject": config.get("subject", "generic"),
+                "name": config.get("name", "通用"),
+                "question_types_used": enabled_types,
+            },
+            "generation_method": "p0_context" if questions else "fallback",
+        }
+
+    def _generate_questions_llm_from_context(self, context_text: str, n_questions: int, topic: str) -> List[Dict[str, Any]]:
+        """使用 graph_context.text 替代 chunks 作为 LLM prompt 上下文"""
+        if not self._llm.available or not context_text:
+            return []
+
+        # 限制 context 长度
+        if len(context_text) > 6000:
+            context_text = context_text[:6000] + "..."
+
+        prompt = QUIZ_GENERATION_PROMPT.format(
+            n_questions=min(n_questions, 8),
+            chunks_text=context_text,
+        )
+
+        try:
+            result = self._llm.chat_json(
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.4,
+                max_tokens=2000,
+            )
+            questions = result.get("questions", [])
+            if not questions:
+                return []
+
+            cleaned_questions = []
+            for i, q in enumerate(questions):
+                cleaned = self._validate_and_clean_question(q, i + 1)
+                if cleaned:
+                    cleaned_questions.append(cleaned)
+            return cleaned_questions[:n_questions]
+        except Exception as e:
+            print(f"[QuizAgent] 图谱上下文 LLM 生成题目失败: {e}")
+            return []
+
+    def _generate_questions_fallback_from_context(self, context_text: str, n_questions: int, topic: str) -> List[Dict[str, Any]]:
+        """LLM 不可用时，从 context 文本中提取关键句生成题目"""
+        questions = []
+        sentences = re.split(r'[。！？\n]+', context_text)
+        key_sentences = [s.strip() for s in sentences if 30 <= len(s.strip()) <= 200]
+
+        for i, sentence in enumerate(key_sentences[:n_questions]):
+            question_text = f"关于「{topic}」，以下描述正确的是？"
+            options_pool = [sentence[:80]]
+            distractors = [s[:80] for s in key_sentences if s != sentence and len(s) >= 20][:3]
+            while len(distractors) < 3:
+                distractors.append(f"与{topic}无关的陈述")
+            options = [options_pool[0]] + distractors[:3]
+
+            import random
+            random.seed(i)
+            random.shuffle(options)
+            correct_idx = options.index(options_pool[0])
+
+            questions.append({
+                "id": i + 1,
+                "type": "single_choice",
+                "question": question_text,
+                "options": [f"{['A','B','C','D'][j]}. {opt}" for j, opt in enumerate(options)],
+                "answer": ["A", "B", "C", "D"][correct_idx],
+                "explanation": sentence[:200],
+                "source": "graph_context",
+            })
+
+        return questions
+
+    # ==================== 旧方式出题（回退）====================
+
+    def _generate_questions_old(self, query: str, n_questions: int = 5, filters: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """P0-INT-2: 原 handle 逻辑提取为独立方法（回退路径）"""
+        topic = self._extract_topic(query)
+
+        config = self._get_subject_config()
+        enabled_types = [k for k, v in config.get("question_types", {}).items() if v.get("enabled", False)]
+
         store = self._get_vector_store()
         retrieved = store.query(topic, n_results=max(n_questions * 4, 24))
 
-        # 优先使用 LLM 生成高质量题目
         questions = self._generate_questions_llm(retrieved, n_questions, topic)
 
-        # LLM 失败时回退到规则方法
         if not questions:
             questions = self._generate_questions_fallback(retrieved, n_questions)
 
-        # 组装文本
         text_parts = [f"以下是 {len(questions)} 道关于「{topic}」的题目：\n"]
         for q in questions:
             text_parts.append(f"\n【{q['id']}】{q['question']}")
@@ -138,20 +281,6 @@ class QuizAgent(BaseAgent):
             },
             "generation_method": "llm" if self._llm.available else "fallback",
         }
-
-    def _extract_topic(self, query: str) -> str:
-        """从用户查询中提取核心主题"""
-        keywords = [
-            "出题", "题目", "面试题", "练习题", "测试题", "考题", "试题",
-            "考我", "测试我", "考一下", "测一下", "做道题", "来道题",
-            "quiz", "question", "exam", "test me", "give me a question",
-            "出一道", "来一道", "来几题", "出几题", "给我出题",
-            "关于", "的", "一下", "几道", "几题",
-        ]
-        topic = query
-        for kw in keywords:
-            topic = topic.replace(kw, "")
-        return " ".join(topic.split()).strip() or query
 
     # ==================== LLM 驱动生成（首选）====================
 

@@ -1337,3 +1337,112 @@ async def process_group_submission(group_id: str):
 ---
 
 *详细设计文档结束。等待测试计划文档编写。*
+
+
+---
+
+## 附录：P0 模块实现状态（2026-07-16 更新）
+
+> 本附录由 OpenClaw 自动维护，每次代码更新后同步检查并更新。
+
+### 已实现模块（代码存在 + 单元测试通过）
+
+| 模块 | 代码文件 | 单元测试 | 提交记录 | 状态 |
+|------|----------|----------|----------|------|
+| **ConceptRetriever** | core/graph_education/concept_retriever.py (19KB) | 	ests/p0/test_concept_retriever.py (56 测试) |  8b11c6 | ✅ 已实现 |
+| **SubgraphBuilder** | core/graph_education/subgraph_builder.py (23KB) | 	ests/p0/test_subgraph_builder.py (56 测试) |  8b11c6 | ✅ 已实现 |
+| **ContextAssembler** | core/graph_education/context_assembler.py (18KB) | 	ests/p0/test_context_assembler.py (79 测试) | 81f010 | ✅ 已实现 |
+| **IRTEstimator** | core/graph_education/irt_estimator.py (12KB) | 	ests/p0/test_irt_estimator.py (26 测试) | 48f33e7 | ✅ 已实现 |
+| **GroupManager** | core/graph_education/group_manager.py | 	ests/p0/test_group_manager.py (15 测试) |  94b54b | ✅ 已实现 |
+| **types** | core/graph_education/types.py | — | — | ✅ 已实现 |
+| **__init__ 导出** | core/graph_education/__init__.py | — | — | ✅ 已导出 |
+
+### 未集成问题（代码已存在但未被上层调用）
+
+| 问题 | 说明 | 影响 |
+|------|------|------|
+| **Coordinator 未集成 P0 模块** | gents/coordinator.py 仍只使用旧版 TutorAgent/QuizAgent/CoachAgent/HeadhunterAgent，未导入 core.graph_education 的任何模块 | P0 模块无法通过 Coordinator 入口使用 |
+| **QuizAgent 未使用 ContextAssembler** | gents/quiz_agent.py 仍直接检索 chunks 拼接为 LLM prompt，未调用 ContextAssembler 组装结构化上下文 | 出题上下文未按 P0 设计进行 budget 控制和子图构建 |
+| **CoachAgent 未使用 IRTEstimator** | gents/coach_agent.py 的评分逻辑使用简单规则评分（对/错），未调用 IRTEstimator 进行能力估计 | 用户能力画像无 IRT 参数，无法自适应出题难度 |
+| **Agent 间无消息总线** | 设计文档中的 MetaGPT 风格消息池未实现 | 各 Agent 独立工作，状态不共享 |
+| **UserKnowledgeState 无持久化** | 	ypes.py 中定义了 UserKnowledgeState dataclass，但无 SQLite/Redis 持久化实现 | 用户答题历史无法保存，IRT 无法校准 |
+| **图中心性预计算未集成** | SubgraphBuilder 有 centrality_cache 参数，但无预计算脚本 | 每次构建子图需实时计算中心性 |
+
+### 遗留任务
+
+| 编号 | 任务 | 优先级 | 依赖 |
+|------|------|--------|------|
+| **P0-INT-1** | 修改 Coordinator 集成 P0 模块（ConceptRetriever → SubgraphBuilder → ContextAssembler → IRTEstimator） | P0 | — |
+| **P0-INT-2** | 修改 QuizAgent 使用 ContextAssembler 组装出题上下文（替代直接 chunks 拼接） | P0 | P0-INT-1 |
+| **P0-INT-3** | 修改 CoachAgent 使用 IRTEstimator 进行能力估计（替代简单规则评分） | P0 | P0-INT-1 |
+| **P0-INT-4** | 实现 UserKnowledgeState SQLite 持久化 | P1 | — |
+| **P0-INT-5** | 实现图中心性预计算脚本（PageRank / Betweenness） | P1 | — |
+| **P0-INT-6** | 实现 Agent 间消息总线（事件订阅/发布） | P2 | P0-INT-4 |
+
+---
+
+_更新记录：2026-07-16 由 OpenClaw 检查代码库后更新，确认 5 个 P0 核心模块已实现但未被上层 Agent 调用。_
+
+
+
+---
+
+## 附录更新：P0-INT 集成状态（2026-07-16 20:00）
+
+### P0-INT 1-3 已完成
+
+| 编号 | 任务 | 状态 | 实现文件 | 验证脚本 |
+|------|------|------|----------|----------|
+| P0-INT-1 | Coordinator 集成 P0 模块 | ✅ 已完成 | gents/coordinator.py | scripts/test_p0_integration.py |
+| P0-INT-2 | QuizAgent 使用 ContextAssembler | ✅ 已完成 | gents/quiz_agent.py | scripts/test_p0_integration.py |
+| P0-INT-3 | CoachAgent 使用 IRTEstimator | ✅ 已完成 | gents/coach_agent.py | scripts/test_p0_integration.py |
+
+### 实现详情
+
+**P0-INT-1（Coordinator）**:
+- handle() 的 quiz 分支：ConceptRetriever.resolve → SubgraphBuilder.build → ContextAssembler.assemble → QuizAgent(graph_context)
+- handle() 的 evaluate 分支：评分后附加 irt_theta 字段
+- 所有 P0 模块延迟初始化，调用失败自动回退旧方式
+- 关键 console print（便于前端观察）：
+  - [Coordinator] P0-INT-1: 使用图谱教育模块为 quiz 意图组装上下文
+  - [Coordinator] 解析到 N 个种子概念
+  - [Coordinator] 构建子图: N 节点, M 边
+  - [Coordinator] 组装上下文: T tokens
+  - [Coordinator] IRT 能力估计结果: theta=XX.XX
+
+**P0-INT-2（QuizAgent）**:
+- handle() 接受 graph_context: Optional[GraphContext] 参数
+- 当 graph_context 存在时，使用 _generate_questions_with_context() 出题
+- 返回的题目包含 knowledge_trace 字段
+- 关键 console print：
+  - [QuizAgent] P0-INT-2: 使用 P0 图谱上下文出题，token=T
+  - [QuizAgent] 图谱上下文概念: [概念1, ...]
+  - [QuizAgent] 回退到旧方式出题（无图谱上下文）（回退时）
+
+**P0-INT-3（CoachAgent）**:
+- evaluate() 评分后调用 IRTEstimator 估计能力
+- 报告新增 irt 字段：	heta, level, concept_difficulties
+- 新增 _theta_to_level() 方法：theta → 入门/初级/中级/高级/专家
+- 关键 console print：
+  - [CoachAgent] P0-INT-3: 开始 IRT 能力估计
+  - [CoachAgent] IRT 能力估计: theta=XX.XX
+
+### 向后兼容
+
+所有修改保持向后兼容：
+- 不传 graph_context → 旧方式正常工作
+- P0 模块调用失败 → 自动回退旧方式
+- 120 个 P0 单元测试全部通过
+
+### 遗留任务（P0-INT-4~6 仍待实现）
+
+| 编号 | 任务 | 优先级 | 状态 |
+|------|------|--------|------|
+| P0-INT-4 | UserKnowledgeState SQLite 持久化 | P1 | 🔴 待实现 |
+| P0-INT-5 | 图中心性预计算脚本 | P1 | 🔴 待实现 |
+| P0-INT-6 | Agent 间消息总线 | P2 | 🔴 待实现 |
+
+---
+
+_更新记录：2026-07-16 由 OpenClaw 执行 P0-INT-1/2/3 集成并更新。_
+

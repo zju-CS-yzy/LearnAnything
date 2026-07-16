@@ -17,6 +17,7 @@ from agents.quiz_agent import QuizAgent
 from agents.base_agent import BaseAgent
 from core.subject_analyzer import SubjectAnalyzer
 from core.llm_client import LLMClient
+from core.graph_education import IRTEstimator, IRTParams, UserKnowledgeState, AnswerRecord
 
 
 # 每题默认满分（5题=100分）
@@ -36,6 +37,7 @@ class CoachAgent(BaseAgent):
         self.top_k = top_k
         self._quiz_agent = None
         self._llm_client = None
+        self._irt_estimator = None
 
     def _get_subject_config(self) -> Dict[str, Any]:
         """加载动态学科配置"""
@@ -48,6 +50,13 @@ class CoachAgent(BaseAgent):
         if self._quiz_agent is None:
             self._quiz_agent = QuizAgent(self.collection_name, subject=self.subject, top_k=self.top_k)
         return self._quiz_agent
+
+    def _get_irt_estimator(self) -> IRTEstimator:
+        """P0-INT-3: 延迟初始化 IRTEstimator"""
+        if self._irt_estimator is None:
+            print(f"[CoachAgent] P0-INT-3: 延迟初始化 IRTEstimator")
+            self._irt_estimator = IRTEstimator(calibration_stage=1)
+        return self._irt_estimator
 
     def _get_llm_client(self) -> Optional[LLMClient]:
         """延迟加载 LLM 客户端"""
@@ -200,8 +209,67 @@ class CoachAgent(BaseAgent):
         if summary["strong_areas"]:
             text_lines.append(f"💪 优势点: {', '.join(summary['strong_areas'])}")
 
+        # P0-INT-3: IRT 能力估计
+        try:
+            irt = self._get_irt_estimator()
+            print(f"[CoachAgent] P0-INT-3: 开始 IRT 能力估计")
+
+            answer_records = []
+            for detail in details:
+                record = AnswerRecord(
+                    question_id=str(detail["id"]),
+                    user_answer=detail["user_answer"],
+                    correct_answer=detail["correct_answer"],
+                    is_correct=detail["is_correct"],
+                    score=detail["score"],
+                    max_score=detail["max_score"],
+                    response_time=30,
+                    primary_concepts=[detail.get("topic", detail.get("question", "")[:20])],
+                )
+                answer_records.append(record)
+
+            theta = 0.0
+            for record in answer_records:
+                theta = irt.update_theta(theta, record.is_correct, a=1.0, b=0.0, c=0.25)
+
+            concept_difficulties = {}
+            for detail in details:
+                topic = detail.get("topic", detail.get("question", "")[:20])
+                if topic:
+                    concept_difficulties[topic] = irt.estimate_b_heuristic(
+                        type('ConceptNode', (), {
+                            'pagerank_score': 0.5,
+                            'in_degree': 2, 'out_degree': 2,
+                            'description': detail.get("question", ""),
+                            'concept_type': 'concept'
+                        })()
+                    )
+
+            print(f"[CoachAgent] IRT 能力估计: theta={theta:.2f}")
+
+            report["irt"] = {
+                "theta": round(theta, 2),
+                "level": self._theta_to_level(theta),
+                "concept_difficulties": concept_difficulties,
+            }
+        except Exception as e:
+            print(f"[CoachAgent] IRT 估计失败: {e}")
+            report["irt"] = {"error": str(e)}
+
         report["text"] = "\n".join(text_lines)
         return report
+
+    def _theta_to_level(self, theta: float) -> str:
+        """P0-INT-3: 将 IRT theta 转换为等级"""
+        if theta < -1.5:
+            return "入门"
+        elif theta < -0.5:
+            return "初级"
+        elif theta < 0.5:
+            return "中级"
+        elif theta < 1.5:
+            return "高级"
+        return "专家"
 
     # ========== 评分子方法 ==========
 

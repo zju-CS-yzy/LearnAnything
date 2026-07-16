@@ -25,6 +25,7 @@ from core.graph_education.types import (
     ExamTemplate,
     BUILTIN_TEMPLATES,
     QUICK_PRACTICE_TEMPLATE,
+    AnswerRecord,
 )
 
 from core.graph_education.concept_retriever import ConceptRetriever
@@ -54,4 +55,5 @@ __all__ = [
     "ContextAssembler",
     "IRTEstimator",
     "GroupManager",
+    "AnswerRecord",
 ]

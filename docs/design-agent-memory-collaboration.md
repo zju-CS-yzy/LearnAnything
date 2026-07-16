@@ -592,3 +592,32 @@ GroupManager
 ---
 
 *文档结束 — 等待进一步讨论和实现*
+
+
+---
+
+## 附录：记忆与协作架构实现状态（2026-07-16 更新）
+
+### 分层记忆实现状态
+
+| 层级 | 组件 | 设计状态 | 实现状态 | 代码路径 | 说明 |
+|------|------|----------|----------|----------|------|
+| **L3 集体记忆** | 知识图谱（Graph DB） | ✅ 已设计 | ✅ 已实现 | core/graph_store.py | 所有 Agent 共享概念关系 |
+| **L3 集体记忆** | 用户画像全局统计 | ✅ 已设计 | 🟡 部分实现 | core/graph_education/types.py 中定义了 UserKnowledgeState，但无持久化 | 类型定义存在，SQLite 未实现 |
+| **L2 团队记忆** | IRT 参数共享 | ✅ 已设计 | ✅ 已实现 | core/graph_education/irt_estimator.py | 但 CoachAgent 未调用 |
+| **L2 团队记忆** | 对话历史共享 | ✅ 已设计 | 🔴 未实现 | — | 无 Vector DB |
+| **L1 个体记忆** | Agent 私有偏好 | ✅ 已设计 | 🔴 未实现 | — | 各 Agent prompt 模板未独立持久化 |
+| **消息总线** | MetaGPT 风格消息池 | ✅ 已设计 | 🔴 未实现 | — | 无事件订阅/发布机制 |
+| **Vector DB** | 语义检索层 | ✅ 已设计 | 🟡 部分实现 | core/vector_store.py | 仅用于概念检索，未用于对话历史 |
+| **KV Store** | 快速访问层 | ✅ 已设计 | 🔴 未实现 | — | 无 Redis 或内存缓存 |
+
+### 关键偏差
+
+1. **L3 集体记忆已存在但未被利用**：core/graph_education/__init__.py 已导出 ConceptRetriever/SubgraphBuilder/ContextAssembler/IRTEstimator，但 gents/coordinator.py 未导入任何 P0 模块。
+2. **L2 团队记忆已部分实现**：IRTEstimator 已可估计能力，但 CoachAgent 仍使用简单规则评分（对/错），未调用 IRT。
+3. **记忆主动管理未实现**：A-MEM 风格的 Agent 主动决定记忆读取/写入策略未实现。
+
+---
+
+_更新记录：2026-07-16 由 OpenClaw 检查代码库后更新。_
+
