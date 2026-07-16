@@ -24,7 +24,7 @@ class TutorAgent(BaseAgent):
     def agent_name(self) -> str:
         return "TutorAgent"
 
-    def __init__(self, collection_name: str = "learnanything_v1", top_k: int = 5):
+    def __init__(self, collection_name: str = "learnanything_v1", top_k: int = 5, message_bus=None):
         self.collection_name = collection_name
         self.top_k = top_k
         self._retriever = None
@@ -33,6 +33,10 @@ class TutorAgent(BaseAgent):
         self._rewriter = QueryRewriter()
         self._embedding = EmbeddingManager()
         self._llm = LLMClient()
+        # P0-INT-6: 消息总线
+        self._message_bus = message_bus
+        # P0-INT-6: 用户薄弱点（从消息总线接收）
+        self._user_weak_areas: List[str] = []
 
     def _get_retriever(self):
         if self._retriever is None:
@@ -228,3 +232,20 @@ class TutorAgent(BaseAgent):
             total_tokens += estimated_tokens
 
         return cleaned
+
+    # ==================== P0-INT-6: 消息总线回调 ====================
+
+    def on_weak_area_detected(self, msg):
+        """
+        订阅 weak_area 主题的回调：接收薄弱点检测，调整讲解策略。
+
+        Args:
+            msg: Message 对象（event="weak_area_detected"）
+        """
+        payload = msg.payload
+        concept = payload.get("concept", "")
+        streak_wrong = payload.get("streak_wrong", 0)
+        if concept and streak_wrong >= 2:
+            if concept not in self._user_weak_areas:
+                self._user_weak_areas.append(concept)
+            print(f"[TutorAgent] P0-INT-6: 记录薄弱点 concept={concept} streak_wrong={streak_wrong}，下次讲解将优先覆盖")

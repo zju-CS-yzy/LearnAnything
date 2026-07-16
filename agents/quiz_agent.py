@@ -77,7 +77,7 @@ class QuizAgent(BaseAgent):
     def agent_name(self) -> str:
         return "QuizAgent"
 
-    def __init__(self, collection_name: str = "learnanything_v1", subject: str = "generic", top_k: int = 5):
+    def __init__(self, collection_name: str = "learnanything_v1", subject: str = "generic", top_k: int = 5, message_bus=None):
         self.collection_name = collection_name
         self.subject = subject
         self.top_k = top_k
@@ -85,6 +85,11 @@ class QuizAgent(BaseAgent):
         self._embedding = EmbeddingManager()
         self._rewriter = QueryRewriter()
         self._llm = LLMClient()
+        # P0-INT-6: 消息总线
+        self._message_bus = message_bus
+        # P0-INT-6: 用户能力状态（从消息总线接收）
+        self._user_theta = 0.0
+        self._user_weak_areas: List[str] = []
 
     def _get_subject_config(self) -> Dict[str, Any]:
         """加载动态学科配置，优先使用已分析的学科配置，回退到通用配置"""
@@ -163,6 +168,21 @@ class QuizAgent(BaseAgent):
                     text_parts.append(f"  {opt}")
             text_parts.append(f"\n答案：{q['answer']}")
             text_parts.append(f"解析：{q['explanation']}")
+
+        # P0-INT-6: 发布 quiz_generated 事件
+        if self._message_bus:
+            self._message_bus.publish(
+                topic="quiz",
+                sender="QuizAgent",
+                event="quiz_generated",
+                payload={
+                    "topic": topic,
+                    "question_count": len(questions),
+                    "question_ids": [q.get("id") for q in questions],
+                    "concepts": concept_names[:3] if concept_names else [topic],
+                    "user_theta": self._user_theta,
+                }
+            )
 
         return {
             "text": "\n".join(text_parts),
@@ -268,6 +288,22 @@ class QuizAgent(BaseAgent):
                     text_parts.append(f"  {opt}")
             text_parts.append(f"\n答案：{q['answer']}")
             text_parts.append(f"解析：{q['explanation']}")
+
+        # P0-INT-6: 发布 quiz_generated 事件（旧方式也发布）
+        if self._message_bus:
+            self._message_bus.publish(
+                topic="quiz",
+                sender="QuizAgent",
+                event="quiz_generated",
+                payload={
+                    "topic": topic,
+                    "question_count": len(questions),
+                    "question_ids": [q.get("id") for q in questions],
+                    "concepts": [topic],
+                    "user_theta": self._user_theta,
+                    "generation_method": "llm" if self._llm.available else "fallback",
+                }
+            )
 
         return {
             "text": "\n".join(text_parts),
@@ -513,3 +549,33 @@ class QuizAgent(BaseAgent):
             "explanation": "（开放性问题，无标准答案）",
             "source": "",
         }
+
+    # ==================== P0-INT-6: 消息总线回调 ====================
+
+    def on_ability_updated(self, msg):
+        """
+        订阅 user_state 主题的回调：接收 IRT 能力更新，调整出题难度。
+
+        Args:
+            msg: Message 对象（event="ability_updated"）
+        """
+        payload = msg.payload
+        theta = payload.get("theta", 0.0)
+        concept = payload.get("concept", "")
+        self._user_theta = theta
+        print(f"[QuizAgent] P0-INT-6: 收到能力更新 theta={theta:.2f} concept={concept}，将调整出题难度")
+
+    def on_weak_area_detected(self, msg):
+        """
+        订阅 weak_area 主题的回调：记录薄弱点，优先出题。
+
+        Args:
+            msg: Message 对象（event="weak_area_detected"）
+        """
+        payload = msg.payload
+        concept = payload.get("concept", "")
+        streak_wrong = payload.get("streak_wrong", 0)
+        if concept and streak_wrong >= 2:
+            if concept not in self._user_weak_areas:
+                self._user_weak_areas.append(concept)
+            print(f"[QuizAgent] P0-INT-6: 记录薄弱点 concept={concept} streak_wrong={streak_wrong}")

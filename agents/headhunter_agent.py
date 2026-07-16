@@ -18,8 +18,9 @@ class HeadhunterAgent(BaseAgent):
     def agent_name(self) -> str:
         return "HeadhunterAgent"
 
-    def __init__(self):
-        pass
+    def __init__(self, message_bus=None):
+        # P0-INT-6: 消息总线（占位，当前未使用）
+        self._message_bus = message_bus
 
     def handle(self, query: str, **kwargs) -> Dict[str, Any]:
         parsed = self._parse_query(query)
