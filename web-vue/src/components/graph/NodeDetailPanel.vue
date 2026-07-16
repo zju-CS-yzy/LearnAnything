@@ -272,7 +272,9 @@ const mediaRefs = computed(() => {
   if (!refs) return []
   if (Array.isArray(refs)) return refs
   try {
-    const parsed = JSON.parse(refs)
+    // P27-FIX: 兼容旧数据中 _escape_cypher_string 遗留问题（\\ 被替换为 //）
+    const safeJson = typeof refs === 'string' ? refs.replace(/\/\//g, '\\\\') : refs
+    const parsed = JSON.parse(safeJson)
     return Array.isArray(parsed) ? parsed : []
   } catch { return [] }
 })

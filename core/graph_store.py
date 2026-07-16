@@ -1609,7 +1609,12 @@ class GraphStore:
                     media_refs = []
                     if row[6]:
                         try:
-                            media_refs = json.loads(row[6])
+                            raw = row[6]
+                            # P0-INT-5: 修复旧数据中 _escape_cypher_string 遗留问题
+                            # 旧数据将 JSON 中的 \\ 替换为 //，需要先恢复
+                            if isinstance(raw, str) and '//' in raw:
+                                raw = raw.replace('//', '\\')
+                            media_refs = json.loads(raw)
                         except:
                             pass
                     nodes.append({

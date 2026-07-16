@@ -150,6 +150,24 @@ export function runTreeLayout(cy) {
 
   if (chunkNodes.length === 0) return
 
+  // P30-FIX: 大文档树性能保护 - 节点过多时使用简化网格布局
+  const MAX_CHUNK_NODES = 200
+  if (chunkNodes.length > MAX_CHUNK_NODES) {
+    console.warn(`[runTreeLayout] 文档节点过多 (${chunkNodes.length} > ${MAX_CHUNK_NODES})，使用简化网格布局避免卡死`)
+    const cols = Math.max(1, Math.ceil(Math.sqrt(chunkNodes.length)))
+    const gapX = 200
+    const gapY = 80
+    chunkNodes.forEach((node, idx) => {
+      node.position({
+        x: (idx % cols) * gapX,
+        y: Math.floor(idx / cols) * gapY,
+      })
+    })
+    // 边简化为直线
+    chunkEdges.forEach(e => e.style('curve-style', 'straight'))
+    return
+  }
+
   // 1. 构建子节点映射和父节点映射
   const childrenMap = {}
   const parentMap = {}
