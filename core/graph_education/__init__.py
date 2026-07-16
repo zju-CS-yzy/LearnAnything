@@ -33,6 +33,7 @@ from core.graph_education.subgraph_builder import SubgraphBuilder
 from core.graph_education.context_assembler import ContextAssembler
 from core.graph_education.irt_estimator import IRTEstimator
 from core.graph_education.group_manager import GroupManager
+from core.graph_education.user_state_store import UserStateStore
 
 __all__ = [
     "ConceptNode",
@@ -56,4 +57,5 @@ __all__ = [
     "IRTEstimator",
     "GroupManager",
     "AnswerRecord",
+    "UserStateStore",
 ]
