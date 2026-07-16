@@ -1446,3 +1446,35 @@ _更新记录：2026-07-16 由 OpenClaw 检查代码库后更新，确认 5 个 
 
 _更新记录：2026-07-16 由 OpenClaw 执行 P0-INT-1/2/3 集成并更新。_
 
+
+
+---
+
+## 附录更新：P0-INT-4 完成（2026-07-16 20:30）
+
+### UserKnowledgeState SQLite 持久化
+
+**状态**: ✅ 已完成
+
+**实现文件**:
+- core/graph_education/user_state_store.py — UserStateStore 类
+- core/graph_education/__init__.py — 导出 UserStateStore
+- gents/coach_agent.py — evaluate() 后自动保存用户状态
+
+**功能**:
+- SQLite 数据库: knowledge_base/user_states.db
+- 表: user_knowledge_states (15 个字段)
+- 索引: idx_user_subject, idx_user_canonical
+- 方法: save(), load(), load_by_user(), delete(), get_stats()
+
+**CoachAgent 集成**:
+- _get_state_store() — 延迟初始化
+- _save_user_states() — evaluate 后自动保存每个概念的状态
+- 支持状态更新（test_count, correct_count, streak, theta, mastery_level）
+
+**验证**:
+- 120 个 P0 单元测试通过
+- UserStateStore save/load/stats 功能测试通过
+
+---
+

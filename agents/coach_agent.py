@@ -17,7 +17,7 @@ from agents.quiz_agent import QuizAgent
 from agents.base_agent import BaseAgent
 from core.subject_analyzer import SubjectAnalyzer
 from core.llm_client import LLMClient
-from core.graph_education import IRTEstimator, IRTParams, UserKnowledgeState, AnswerRecord
+from core.graph_education import IRTEstimator, IRTParams, UserKnowledgeState, AnswerRecord, UserStateStore
 
 
 # 每题默认满分（5题=100分）
@@ -38,6 +38,7 @@ class CoachAgent(BaseAgent):
         self._quiz_agent = None
         self._llm_client = None
         self._irt_estimator = None
+        self._state_store = None
 
     def _get_subject_config(self) -> Dict[str, Any]:
         """加载动态学科配置"""
@@ -57,6 +58,71 @@ class CoachAgent(BaseAgent):
             print(f"[CoachAgent] P0-INT-3: 延迟初始化 IRTEstimator")
             self._irt_estimator = IRTEstimator(calibration_stage=1)
         return self._irt_estimator
+
+    def _get_state_store(self) -> UserStateStore:
+        """P0-INT-4: 延迟初始化 UserStateStore"""
+        if self._state_store is None:
+            print(f"[CoachAgent] P0-INT-4: 延迟初始化 UserStateStore")
+            self._state_store = UserStateStore()
+        return self._state_store
+
+    def _save_user_states(self, user_id: str, subject_id: str, details: List[Dict], theta: float) -> None:
+        """P0-INT-4: 保存用户知识状态到 SQLite"""
+        try:
+            store = self._get_state_store()
+            now = datetime.now()
+            for detail in details:
+                topic = detail.get("topic", detail.get("question", "")[:20])
+                if not topic:
+                    continue
+                canonical_id = topic  # 使用 topic 作为概念 ID（简化）
+                state_id = f"{user_id}#{subject_id}#{canonical_id}"
+                
+                # 尝试加载已有状态
+                existing = store.load(user_id, subject_id, canonical_id)
+                if existing:
+                    # 更新已有状态
+                    existing.test_count += 1
+                    if detail.get("is_correct"):
+                        existing.correct_count += 1
+                        existing.streak += 1
+                    else:
+                        existing.streak = 0
+                    existing.theta = theta
+                    existing.mastery_level = self._sigmoid(theta)
+                    existing.confidence = min(1.0, existing.test_count / 10)
+                    existing.last_tested = now
+                    existing.updated_at = now
+                    existing.source_of_latest_update = "coach_evaluate"
+                    store.save(existing)
+                else:
+                    # 创建新状态
+                    new_state = UserKnowledgeState(
+                        state_id=state_id,
+                        user_id=user_id,
+                        subject_id=subject_id,
+                        canonical_id=canonical_id,
+                        canonical_name=topic,
+                        mastery_level=self._sigmoid(theta),
+                        confidence=0.1,
+                        theta=theta,
+                        test_count=1,
+                        correct_count=1 if detail.get("is_correct") else 0,
+                        streak=1 if detail.get("is_correct") else 0,
+                        last_tested=now,
+                        first_tested=now,
+                        updated_at=now,
+                        source_of_latest_update="coach_evaluate",
+                    )
+                    store.save(new_state)
+            print(f"[CoachAgent] P0-INT-4: 已保存 {len(details)} 个用户知识状态")
+        except Exception as e:
+            print(f"[CoachAgent] P0-INT-4: 保存用户状态失败: {e}")
+
+    def _sigmoid(self, x: float) -> float:
+        """sigmoid 函数，将 theta 映射到 0-1"""
+        import math
+        return 1 / (1 + math.exp(-x))
 
     def _get_llm_client(self) -> Optional[LLMClient]:
         """延迟加载 LLM 客户端"""
@@ -252,6 +318,9 @@ class CoachAgent(BaseAgent):
                 "level": self._theta_to_level(theta),
                 "concept_difficulties": concept_difficulties,
             }
+            
+            # P0-INT-4: 保存用户知识状态到 SQLite
+            self._save_user_states("anonymous", self.subject, details, theta)
         except Exception as e:
             print(f"[CoachAgent] IRT 估计失败: {e}")
             report["irt"] = {"error": str(e)}
