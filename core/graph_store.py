@@ -385,6 +385,15 @@ class GraphStore:
 
         return text
 
+    def _escape_cypher_string_safe(self, text: str) -> str:
+        """安全转义 Cypher 字符串，保留反斜杠（用于 JSON 数据）"""
+        if not text:
+            return ""
+        text = text.replace("'", "\\'")
+        text = text.replace("`", "")
+        text = "".join(c for c in text if c >= " " or c in "\t")
+        return text
+
 
 
     def add_chunk_nodes(self, chunks: List[Dict[str, Any]]):
@@ -444,8 +453,14 @@ class GraphStore:
 
 
             # LA-035: 图片字段
-            image_path = self._escape_cypher_string(meta.get("image_path", ""))
-            thumbnail_path = self._escape_cypher_string(meta.get("thumbnail_path", ""))
+            raw_image_path = meta.get("image_path", "")
+            raw_thumbnail_path = meta.get("thumbnail_path", "")
+            # LA-035-P26: 将 Windows 绝对路径转换为相对路径（保留 学科_v1_images/文件名 部分）
+            import re as _re
+            img_match = _re.search(r'([^\\/]+_v1_images[\\/][^\\/]+)$', raw_image_path)
+            thumb_match = _re.search(r'([^\\/]+_v1_thumbnails[\\/][^\\/]+)$', raw_thumbnail_path)
+            image_path = self._escape_cypher_string(img_match.group(1) if img_match else raw_image_path)
+            thumbnail_path = self._escape_cypher_string(thumb_match.group(1) if thumb_match else raw_thumbnail_path)
             width = meta.get("width", 0) or 0
             height = meta.get("height", 0) or 0
 
@@ -464,7 +479,8 @@ class GraphStore:
                     "height": height or 0,
                 }]
             
-            media_refs_json = self._escape_cypher_string(
+            # LA-035-P26: 用 _escape_cypher_string_safe 保留 JSON 中的反斜杠
+            media_refs_json = self._escape_cypher_string_safe(
                 json.dumps(media_refs_raw, ensure_ascii=False) if media_refs_raw else ""
             )
 
@@ -1107,7 +1123,8 @@ class GraphStore:
 
             # LA-035: 多媒体引用
             media_refs = concept.get("media_refs", [])
-            media_refs_json = self._escape_cypher_string(
+            # LA-035-P26: 用 _escape_cypher_string_safe 保留 JSON 中的反斜杠
+            media_refs_json = self._escape_cypher_string_safe(
                 json.dumps(media_refs, ensure_ascii=False) if media_refs else ""
             )
 

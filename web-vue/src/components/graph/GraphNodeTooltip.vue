@@ -65,7 +65,10 @@
                   {{ getMediaTypeLabel(ref) }}
                 </div>
               </div>
-              <!-- 表格/公式占位 -->
+              <!-- 公式：LaTeX 渲染 -->
+              <div v-else-if="isFormulaType(ref)" class="tooltip-media-formula" v-html="renderFormula(ref)">
+              </div>
+              <!-- 表格占位 -->
               <div v-else class="tooltip-media-text">
                 <span class="tooltip-media-icon">{{ getMediaIcon(ref) }}</span>
                 <span class="tooltip-media-caption">{{ ref.caption || getMediaTypeLabel(ref) }}</span>
@@ -88,6 +91,7 @@
 
 <script setup>
 import { computed } from 'vue'
+import { renderLatex } from '../../utils/latex.js'
 
 const props = defineProps({
   visible: { type: Boolean, default: false },
@@ -148,6 +152,20 @@ function getMediaIcon(ref) {
   return '🖼️'
 }
 
+// 判断是否为公式类型
+function isFormulaType(ref) {
+  const t = (ref.type || ref.media_type || '').toLowerCase()
+  return t.includes('formula') || t.includes('公式') || t.includes('math')
+}
+
+// 渲染公式：使用 katex 渲染为 HTML
+function renderFormula(ref) {
+  const latex = ref.latex || ref.description || ''
+  const display = ref.display === 'block'
+  if (!latex.trim()) return '<span class="tooltip-media-icon">🧮</span> 公式'
+  return renderLatex(latex, display)
+}
+
 function getMediaUrl(path) {
   if (!path) return ''
   if (path.startsWith('http')) return path
@@ -165,6 +183,9 @@ function onImageError(e) {
 </script>
 
 <style scoped>
+/* KaTeX 公式样式（全局引入 CSS 后配合 scoped 生效） */
+@import 'katex/dist/katex.min.css';
+
 .graph-node-tooltip {
   position: fixed;
   z-index: 9999;
@@ -324,6 +345,24 @@ function onImageError(e) {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* 公式渲染容器 */
+.tooltip-media-formula {
+  padding: 8px 12px;
+  background: var(--bg-hover, #f5f5f5);
+  border-radius: 6px;
+  font-size: 14px;
+  line-height: 1.6;
+  max-width: 280px;
+  overflow-x: auto;
+}
+
+/* 暗色主题下公式文字反色 */
+@media (prefers-color-scheme: dark) {
+  .tooltip-media-formula :deep(.katex .mathnormal) {
+    color: #e0e0e0;
+  }
 }
 
 .tooltip-more {

@@ -1,4 +1,4 @@
-# 遗留问题追踪 (Leftover Problem Tracker)
+﻿# 遗留问题追踪 (Leftover Problem Tracker)
 
 ## 2026-07-11 终版更新
 
@@ -461,22 +461,47 @@
 - **优先级**: P0
 
 #### LA-035-P23: 缺少[删除学科]前端方法
-- **状态**: 🔴 **新增**
-- **问题描述**: 前端没有删除学科的功能，不便于测试时清理和重建学科数据。
-- **期望效果**: 前端学科列表页提供删除按钮，调用后端 `/api/subjects/{name}` DELETE 接口
-- **优先级**: P1
+- **状态**: ✅ **已完成**
+- **内容**: Sidebar.vue 学科选择器区域增加 🗑️ 删除按钮，点击确认后调用 `apiDeleteSubject` 删除学科并更新前端状态
+- **修改文件**: `web-vue/src/components/Sidebar.vue`
+- **功能**: 支持删除非默认学科，带二次确认对话框，防止误删；删除成功后自动切换至剩余学科
+
+---
 
 #### LA-035-P24: 节点有图片 tag 但详情面板无图片（media_ref 数据链断裂）
-- **状态**: 🔴 **新增**
-- **问题描述**: 部分概念节点在图谱中显示"图片×N" tag，但点击打开详情面板后"引用媒体"区域为空。
-- **根因分析**: 
-  - 可能性1: `_normalize_media_refs` 在某种 chunk 类型下回退逻辑未覆盖
-  - 可能性2: CanonicalConcept 节点合并时 media_refs 丢失
-  - 可能性3: 前端详情面板渲染逻辑与悬浮窗使用不同的数据字段
-- **排查方向**: 
-  - 对比悬浮窗和详情面板的数据来源（是否为同一 API 返回的同一字段）
-  - 检查 concept 去重/合并时 media_refs 是否正确聚合
-  - 检查 `_normalize_media_refs` 对不同类型 chunk 的处理
+- **状态**: ✅ **已完成**
+- **根因**: `GraphLayout.js` 的 `runTreeLayout` 和 `runConceptLayout` 创建副本节点时，遗漏了 `media_refs` 字段。导致图谱显示"图片×N"（cardLabel 已复制），但点击详情面板为空（副本节点无 media_refs 数据）。
+- **修复**: 
+  - `runTreeLayout` 副本增加: media_refs, image_path, thumbnail_path, width, height
+  - `runConceptLayout` 副本增加: media_refs, has_media, hasImage, hasTable, hasFormula, image_path, thumbnail_path, width, height
+- **修改文件**: `web-vue/src/components/graph/GraphLayout.js`
+- **构建状态**: `npm run build` 通过（2026-07-16）
+- **验证**: 诊断脚本 `scripts/diagnose_media_refs.py` 确认 CanonicalConcept 节点 media_refs 数据存储正确（5/20 个有图片），问题仅在前端副本节点未复制数据。
+- **优先级**: P1
+
+#### LA-035-P26: 图片不显示 + 公式渲染失败（双重根因）
+- **状态**: ✅ **已完成**
+- **根因分析**:
+  1. **图片不显示**: `_escape_cypher_string` 将 Windows 绝对路径中的 `\` 替换为 `/`，导致 `image_path` 变成 `D:/.../学科_v1_images/...`。`NodeDetailPanel` 的 `imageUrl` 解析 `path.split('/')[0]` 得到 `D:` 而不是学科名，URL 错误
+  2. **公式不渲染**: `_escape_cypher_string` 将 JSON 中的反斜杠转义 `\\` 替换为 `//`，导致 LaTeX 命令 `\sum` 变成 `//sum`，KaTeX 无法识别
+- **修复**:
+  - 后端 `graph_store.py`: 新增 `_escape_cypher_string_safe` 函数（不替换反斜杠），用于 `media_refs` 存储；`image_path` 存储前转换为相对路径
+  - 前端 `NodeDetailPanel.vue`: `imageUrl`/`thumbnailUrl`/`getImageUrl` 从路径中查找 `_v1_images`/`_v1_thumbnails` 提取学科名；`renderFormulaContent` 将 `//` 替换为 `\`
+- **修改文件**: `core/graph_store.py`, `web-vue/src/components/graph/NodeDetailPanel.vue`
+- **构建状态**: `npm run build` 通过（2026-07-16）
+- **优先级**: P1
+- **备注**: 旧数据库中的数据仍受 `_escape_cypher_string` 影响，前端修复兼容旧数据；新数据使用 `_escape_cypher_string_safe` 存储正确
+
+#### LA-035-P25: 公式 LaTeX 前端渲染
+- **状态**: ✅ **已完成**
+- **内容**: 使用 katex 库在 GraphNodeTooltip.vue 和 NodeDetailPanel.vue 中渲染 LaTeX 公式为数学符号
+- **实现方式**: OpenCode 自动执行（DeepSeek/deepseek-chat 模型）
+- **修改文件**:
+  - 新增: `web-vue/src/utils/latex.js` — 封装 renderLatex 工具函数
+  - 修改: `web-vue/src/components/graph/GraphNodeTooltip.vue` — 悬浮预览公式渲染
+  - 修改: `web-vue/src/components/graph/NodeDetailPanel.vue` — 详情面板公式渲染
+- **构建状态**: `npm run build` 通过（2026-07-16，Vite v5.4.21）
+- **备注**: 构建产物含 KaTeX 字体文件，chunk 大小 1.04MB（可后续优化按需加载）
 - **优先级**: P1
 
 ### 明日计划（2026-07-16）
@@ -496,3 +521,50 @@
 ## 2026-07-11 终版更新
 
 [旧内容保留...]
+
+---
+
+## LA-040-P0 Agent 集成遗留问题（2026-07-16 新增）
+
+### P0-INT-1: Coordinator 未集成 P0 模块
+- **状态**: 🔴 **新增**
+- **问题描述**: `agents/coordinator.py` 仍只使用旧版 `TutorAgent`/`QuizAgent`/`CoachAgent`/`HeadhunterAgent`，未导入 `core.graph_education` 的任何模块（ConceptRetriever、SubgraphBuilder、ContextAssembler、IRTEstimator、GroupManager）。
+- **代码证据**: `grep` 确认 `coordinator.py` 无任何 `graph_education` 导入，时序图 5.2 中规划的 P0 调用链未实现。
+- **影响**: P0 模块无法通过 Coordinator 统一入口使用，成为"死代码"。
+- **优先级**: P0
+
+### P0-INT-2: QuizAgent 未使用 ContextAssembler
+- **状态**: 🔴 **新增**
+- **问题描述**: `agents/quiz_agent.py` 仍直接检索 chunks 拼接为 LLM prompt（`QUIZ_GENERATION_PROMPT`），未调用 `ContextAssembler` 组装结构化上下文。
+- **代码证据**: `grep` 确认 `quiz_agent.py` 无任何 `graph_education` 导入，未使用 `ContextBudget`、`Subgraph` 等类型。
+- **影响**: 出题上下文未按 P0 设计进行 token budget 控制、子图构建、来源文档显示。
+- **优先级**: P0
+- **依赖**: P0-INT-1
+
+### P0-INT-3: CoachAgent 未使用 IRTEstimator
+- **状态**: 🔴 **新增**
+- **问题描述**: `agents/coach_agent.py` 的评分逻辑使用简单规则评分（客观题精确匹配 + 主观题关键词匹配），未调用 `IRTEstimator` 进行能力估计。
+- **代码证据**: `grep` 确认 `coach_agent.py` 无任何 `graph_education` 导入，未使用 `IRTParams`、`UserKnowledgeState` 等类型。
+- **影响**: 用户能力画像无 IRT 参数（theta / 置信度），无法自适应出题难度，无法实现设计文档中的按组选题 + 批量画像。
+- **优先级**: P0
+- **依赖**: P0-INT-1
+
+### P0-INT-4: UserKnowledgeState 无持久化
+- **状态**: 🔴 **新增**
+- **问题描述**: `core/graph_education/types.py` 中定义了 `UserKnowledgeState` dataclass，但无 SQLite/Redis 持久化实现。`graph_store.py` 中无 `UserKnowledgeState` 节点表的创建逻辑。
+- **影响**: 用户答题历史无法保存，IRT 无法校准，能力画像无法跨会话保持。
+- **优先级**: P1
+
+### P0-INT-5: 图中心性预计算未集成
+- **状态**: 🔴 **新增**
+- **问题描述**: `SubgraphBuilder` 有 `centrality_cache` 参数，但无预计算脚本。`GraphStore` 中没有 `PageRank`/`Betweenness` 的离线计算和缓存逻辑。
+- **影响**: 每次构建子图需实时计算中心性，性能开销大。
+- **优先级**: P1
+
+### P0-INT-6: Agent 间消息总线未实现
+- **状态**: 🔴 **新增**
+- **问题描述**: 设计文档中 MetaGPT 风格的 Agent 间消息池（事件订阅/发布）未实现。各 Agent 独立工作，无状态共享机制。
+- **影响**: CoachAgent 更新的能力画像，QuizAgent 无法感知；TutorAgent 无法根据用户历史错误模式调整讲解策略。
+- **优先级**: P2
+- **依赖**: P0-INT-4
+

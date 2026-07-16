@@ -13,6 +13,7 @@
     "cytoscape": "^3.34.0",
     "cytoscape-cola": "^2.5.1",
     "cytoscape-dagre": "^4.0.0",
+    "katex": "^0.17.0",
     "marked": "^12.0.2",
     "vite": "^5.4.21",
     "vue": "^3.5.39"

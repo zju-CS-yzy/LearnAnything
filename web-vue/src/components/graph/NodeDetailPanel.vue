@@ -80,10 +80,13 @@
                 />
                 <div v-if="ref.description" class="media-caption">{{ ref.description }}</div>
               </div>
-              <!-- 公式 -->
+              <!-- 公式：LaTeX 渲染 -->
               <div v-else-if="ref.type === 'formula'" class="media-formula">
                 <span class="formula-badge">公式</span>
-                <pre class="formula-content">{{ ref.description || 'LaTeX 公式' }}</pre>
+                <div
+                  class="formula-render"
+                  v-html="renderFormulaContent(ref)"
+                ></div>
               </div>
               <!-- 表格 -->
               <div v-else-if="ref.type === 'table'" class="media-table">
@@ -205,6 +208,7 @@
  */
 
 import { computed, ref } from 'vue'
+import { renderLatex } from '../../utils/latex.js'
 
 const props = defineProps({
   node: { type: Object, default: null },
@@ -230,13 +234,15 @@ const imageUrl = computed(() => {
   if (!isImageNode.value) return ''
   const path = props.node?.image_path || props.node?.metadata?.image_path
   if (!path) return ''
-  // path 格式: "<subject>_v1_images/filename.png"
-  const parts = path.split('/')
-  if (parts.length >= 2) {
-    const filename = parts[parts.length - 1]
-    // 从路径推断学科
-    const subject = parts[0].replace('_v1_images', '')
-    return `${window.location.origin}/api/images/${subject}/${filename}`
+  // LA-035-P26: 从路径中查找 _v1_images 来提取学科名，兼容绝对路径和相对路径
+  const idx = path.indexOf('_v1_images')
+  if (idx !== -1) {
+    // 从 _v1_images 往前找最后一个 / 或 \ 作为学科名起点
+    const before = path.substring(0, idx)
+    const sepIdx = Math.max(before.lastIndexOf('/'), before.lastIndexOf('\\'))
+    const subject = sepIdx !== -1 ? before.substring(sepIdx + 1) : before
+    const filename = path.substring(path.lastIndexOf('/') + 1).split('\\').pop()
+    return `${window.location.origin}/api/images/${subject.replace('_v1_images', '')}/${filename}`
   }
   return ''
 })
@@ -246,14 +252,16 @@ const thumbnailUrl = computed(() => {
   if (!isImageNode.value) return ''
   const path = props.node?.thumbnail_path || props.node?.metadata?.thumbnail_path
   if (!path) {
-    // 无缩略图则回退到原图
     return imageUrl.value
   }
-  const parts = path.split('/')
-  if (parts.length >= 2) {
-    const filename = parts[parts.length - 1]
-    const subject = parts[0].replace('_v1_thumbnails', '')
-    return `${window.location.origin}/api/images/${subject}/${filename}`
+  // LA-035-P26: 从路径中查找 _v1_thumbnails 来提取学科名，兼容绝对路径和相对路径
+  const idx = path.indexOf('_v1_thumbnails')
+  if (idx !== -1) {
+    const before = path.substring(0, idx)
+    const sepIdx = Math.max(before.lastIndexOf('/'), before.lastIndexOf('\\'))
+    const subject = sepIdx !== -1 ? before.substring(sepIdx + 1) : before
+    const filename = path.substring(path.lastIndexOf('/') + 1).split('\\').pop()
+    return `${window.location.origin}/api/images/${subject.replace('_v1_thumbnails', '')}/${filename}`
   }
   return imageUrl.value
 })
@@ -275,6 +283,14 @@ function getImageUrl(ref) {
   if (!ref || !ref.path) return ''
   const path = ref.path
   const filename = path.split('/').pop().split('\\').pop()
+  // LA-035-P26: 从路径中查找 _v1_images 来提取学科名，兼容绝对路径和相对路径
+  const idx = path.indexOf('_v1_images')
+  if (idx !== -1) {
+    const before = path.substring(0, idx)
+    const sepIdx = Math.max(before.lastIndexOf('/'), before.lastIndexOf('\\'))
+    const subject = sepIdx !== -1 ? before.substring(sepIdx + 1) : before
+    return `${window.location.origin}/api/images/${subject.replace('_v1_images', '')}/${filename}`
+  }
   const subject = path.split('/')[0]?.replace('_v1_images', '') || 'generic'
   return `${window.location.origin}/api/images/${subject}/${filename}`
 }
@@ -283,6 +299,17 @@ function openImageModal(ref) {
   if (ref && ref.path) {
     window.open(getImageUrl(ref), '_blank')
   }
+}
+
+// 渲染公式内容：用 katex 渲染 LaTeX 字符串为 HTML
+function renderFormulaContent(ref) {
+  let latex = ref.latex || ref.description || ''
+  const display = ref.display === 'block'
+  if (!latex.trim()) return '<span class="formula-fallback">LaTeX 公式</span>'
+  // LA-035-P26: 修复 _escape_cypher_string 遗留问题 - 将 // 开头的 LaTeX 命令恢复为 \
+  // 例如 //sum -> \sum, //frac -> \frac
+  latex = latex.replace(/\/\//g, '\\')
+  return renderLatex(latex, display)
 }
 
 // 解析 source_refs（人类可读的来源引用字符串数组）
@@ -352,6 +379,9 @@ function relationLabel(relation) {
 </script>
 
 <style scoped>
+/* KaTeX 公式样式 */
+@import 'katex/dist/katex.min.css';
+
 .info-panel {
   width: 300px;
   border-left: 1px solid var(--border-color, #e0e0e0);
@@ -620,7 +650,14 @@ function relationLabel(relation) {
 .media-formula, .media-table { padding: 10px; }
 .formula-badge { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: bold; background: #f59e0b; color: #1e1e2e; margin-bottom: 6px; }
 .table-badge { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: bold; background: #3b82f6; color: #fff; margin-bottom: 6px; }
-.formula-content { font-family: monospace; font-size: 12px; color: var(--text-secondary, #555); white-space: pre-wrap; word-break: break-all; margin: 0; }
+.formula-render {
+  font-size: 14px;
+  line-height: 1.8;
+  padding: 8px 0;
+  overflow-x: auto;
+  color: var(--text-primary, #2c3e50);
+}
+.formula-fallback { font-size: 12px; color: var(--text-muted, #999); }
 .table-desc { font-size: 12px; color: var(--text-secondary, #555); }
 
 .image-preview {

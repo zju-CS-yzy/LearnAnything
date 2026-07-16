@@ -255,6 +255,11 @@ export function runTreeLayout(cy) {
               page_number: origNode.data('page_number'),
               text: origNode.data('text'),
               heading_path: origNode.data('heading_path'),
+              media_refs: origNode.data('media_refs'), // LA-035-P24: 修复副本媒体数据缺失
+              image_path: origNode.data('image_path'), // LA-035-P24
+              thumbnail_path: origNode.data('thumbnail_path'), // LA-035-P24
+              width: origNode.data('width'), // LA-035-P24
+              height: origNode.data('height'), // LA-035-P24
               originalId: originalId,
               isCopy: 1,
             }
@@ -612,6 +617,15 @@ export function runConceptLayout(cy) {
             description: originalNode.data('description'),
             parent_hint: originalNode.data('parent_hint'),
             source_chunks: originalNode.data('source_chunks'),
+            media_refs: originalNode.data('media_refs'), // LA-035-P24: 修复副本媒体数据缺失
+            has_media: originalNode.data('has_media'), // LA-035-P24
+            hasImage: originalNode.data('hasImage'), // LA-035-P24
+            hasTable: originalNode.data('hasTable'), // LA-035-P24
+            hasFormula: originalNode.data('hasFormula'), // LA-035-P24
+            image_path: originalNode.data('image_path'), // LA-035-P24
+            thumbnail_path: originalNode.data('thumbnail_path'), // LA-035-P24
+            width: originalNode.data('width'), // LA-035-P24
+            height: originalNode.data('height'), // LA-035-P24
             originalId: nid,
             isCopy: '1',
           }

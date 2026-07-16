@@ -27,6 +27,7 @@
           </option>
         </select>
         <button class="btn-icon" @click="showCreateSubject = true" title="新建学科">+</button>
+        <button class="btn-icon btn-delete" @click="deleteSubject" title="删除当前学科">🗑️</button>
       </div>
       <!-- 新建学科弹窗 -->
       <div v-if="showCreateSubject" class="subject-create">
@@ -127,7 +128,7 @@
 
 <script setup>
 import { ref, computed, inject, watch } from 'vue'
-import { useHealthCheck, apiCreateSubject, apiListSubjects } from '../composables/useApi.js'
+import { useHealthCheck, apiCreateSubject, apiListSubjects, apiDeleteSubject } from '../composables/useApi.js'
 
 const props = defineProps({
   activeView: { type: String, default: 'chat' },
@@ -182,6 +183,27 @@ async function createSubject() {
     newSubjectKeywords.value = ''
   } catch (e) {
     alert('创建学科失败: ' + e.message)
+  }
+}
+
+// 删除当前学科
+async function deleteSubject() {
+  const subjectId = selectedSubject.value
+  if (!subjectId || subjectId === 'generic') {
+    alert('不能删除默认学科')
+    return
+  }
+  const sub = subjectState.subjects.value.find(s => s.id === subjectId)
+  const subName = sub?.name || subjectId
+  if (!confirm(`确定要删除学科「${subName}」吗？\n\n此操作将同时删除该学科的所有知识库数据、图谱和文档，不可恢复。`)) {
+    return
+  }
+  try {
+    await apiDeleteSubject(subjectId)
+    subjectState.removeSubject(subjectId)
+    alert(`学科「${subName}」已删除`)
+  } catch (e) {
+    alert('删除学科失败: ' + e.message)
   }
 }
 
@@ -573,5 +595,16 @@ window.addEventListener('chat-session-created', (e) => {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+/* 删除学科按钮 */
+.btn-delete {
+  font-size: var(--font-size-sm);
+  transition: all var(--transition-fast);
+}
+.btn-delete:hover {
+  background: #dc2626;
+  color: white;
+  border-color: #dc2626;
 }
 </style>
