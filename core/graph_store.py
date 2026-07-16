@@ -768,6 +768,97 @@ class GraphStore:
 
 
 
+    def compute_and_cache_centrality(self) -> Dict[str, float]:
+        """
+        P0-INT-5: 计算并缓存 CanonicalConcept 的 PageRank 中心性。
+
+        算法: 简化版 PageRank（10 次迭代, damping=0.85）
+        - 读取所有 CanonicalConcept 和语义边（SOLUTION, DEPENDS_ON, HAS_DETAIL）
+        - 计算每个节点的 PageRank
+        - 保存到 JSON 缓存文件
+        - 返回 {canonical_id: pagerank_score} 字典
+
+        Returns:
+            Dict[str, float]: {canonical_id: pagerank_score}
+        """
+        import json
+
+        cache_path = self._get_centrality_cache_path()
+
+        conn = self._ensure_db()
+        nodes = self._get_canonical_nodes(conn)
+        edges = self._get_semantic_edges(conn)
+
+        pagerank = self._compute_pagerank(nodes, edges)
+
+        cache = {nid: {"pagerank_score": pr} for nid, pr in pagerank.items()}
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(cache_path, "w", encoding="utf-8") as f:
+            json.dump(cache, f, ensure_ascii=False, indent=2)
+
+        print(f"[GraphStore] P0-INT-5: PageRank 计算完成，{len(pagerank)} 个节点，缓存保存到 {cache_path}")
+        return pagerank
+
+    def _get_centrality_cache_path(self):
+        from pathlib import Path as _Path
+        return _Path(r"D:\MyCS\AI\Project\LearnAnything\knowledge_base") / f"{self.collection_name}_centrality_cache.json"
+
+    def _get_centrality_cache(self) -> Dict[str, float]:
+        import json
+        cache_path = self._get_centrality_cache_path()
+        if cache_path.exists():
+            with open(cache_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            return {nid: d["pagerank_score"] for nid, d in data.items()}
+        return {}
+
+    def _get_canonical_nodes(self, conn) -> List[str]:
+        result = self._execute(conn, "MATCH (c:CanonicalConcept) RETURN c.canonical_id AS id")
+        nodes = []
+        while result.has_next():
+            row = result.get_next()
+            nodes.append(row[0])
+        return nodes
+
+    def _get_semantic_edges(self, conn) -> List[tuple]:
+        edges = []
+        for rel_type in ["SOLUTION", "DEPENDS_ON", "HAS_DETAIL"]:
+            try:
+                result = self._execute(conn, f"MATCH (a:CanonicalConcept)-[:{rel_type}]-(b:CanonicalConcept) RETURN a.canonical_id, b.canonical_id")
+                while result.has_next():
+                    row = result.get_next()
+                    edges.append((row[0], row[1]))
+            except Exception:
+                pass
+        return edges
+
+    def _compute_pagerank(self, nodes: List[str], edges: List[tuple], iterations: int = 10, damping: float = 0.85) -> Dict[str, float]:
+        if not nodes:
+            return {}
+
+        pagerank = {node: 1.0 / len(nodes) for node in nodes}
+
+        outgoing = {node: [] for node in nodes}
+        for src, dst in edges:
+            if src in outgoing:
+                outgoing[src].append(dst)
+
+        for _ in range(iterations):
+            new_pr = {}
+            for node in nodes:
+                rank = (1 - damping) / len(nodes)
+                for src, dst in edges:
+                    if dst == node and src in outgoing and outgoing[src]:
+                        rank += damping * pagerank[src] / len(outgoing[src])
+                new_pr[node] = rank
+            pagerank = new_pr
+
+        max_pr = max(pagerank.values()) if pagerank else 1.0
+        if max_pr > 0:
+            pagerank = {k: min(v / max_pr, 1.0) for k, v in pagerank.items()}
+
+        return pagerank
+
     def get_graph_stats(self) -> Dict[str, Any]:
 
         """获取图统计信息??"""

@@ -1478,3 +1478,39 @@ _更新记录：2026-07-16 由 OpenClaw 执行 P0-INT-1/2/3 集成并更新。_
 
 ---
 
+
+
+---
+
+## 附录更新：P0-INT-5 完成（2026-07-16 21:00）
+
+### 图中心性预计算（整合进主程序）
+
+**状态**: ✅ 已完成
+
+**实现文件**:
+- core/graph_store.py — compute_and_cache_centrality 等 5 个方法
+- pp/backend_api.py — uild_knowledge_graph 中 Phase 2.6 自动调用
+- core/graph_education/subgraph_builder.py — __init__ 自动加载缓存，_row_to_node 填充 pagerank_score
+
+**PageRank 算法**:
+- 简化版 PageRank（10 次迭代，damping=0.85）
+- 读取所有 CanonicalConcept + 语义边（SOLUTION, DEPENDS_ON, HAS_DETAIL）
+- 结果归一化到 0-1
+
+**缓存机制**:
+- 缓存文件: knowledge_base/{subject}_v1_centrality_cache.json
+- 内容: {canonical_id: {pagerank_score: float}}
+- 自动在 uild_knowledge_graph 完成后生成
+- SubgraphBuilder 自动从 GraphStore 加载
+
+**验证**:
+- 120 个 P0 测试通过
+- transformer 学科实测: 139 个节点，PageRank 范围 0.14~0.27
+- SubgraphBuilder 自动加载 139 条缓存
+- IRT 难度估计中 centrality_term 现在使用真实 PageRank 值
+
+**非阻塞**: 中心性计算失败不影响主构建流程
+
+---
+

@@ -26,7 +26,11 @@ class SubgraphBuilder:
         centrality_cache: Optional[Dict[str, float]] = None
     ):
         self.graph_store = graph_store
-        self.centrality_cache = centrality_cache or {}
+        # P0-INT-5: 自动从 GraphStore 获取中心性缓存
+        if centrality_cache is None and hasattr(graph_store, '_get_centrality_cache'):
+            self.centrality_cache = graph_store._get_centrality_cache()
+        else:
+            self.centrality_cache = centrality_cache or {}
     
     # ───────────────────────────────────────────────
     # 核心接口
@@ -359,6 +363,7 @@ class SubgraphBuilder:
                             description=row[4] if len(row) > 4 else "",
                             parent_hint=row[5] if len(row) > 5 else "",
                             aliases=row[6] if len(row) > 6 else [],
+                            pagerank_score=self.centrality_cache.get(target_id, 0.0),
                         )
                         nodes.append(node)
                         
@@ -635,22 +640,26 @@ class SubgraphBuilder:
     def _row_to_node(self, row) -> ConceptNode:
         """将查询结果行转换为 ConceptNode"""
         if isinstance(row, dict):
+            cid = row.get("canonical_id", "")
             return ConceptNode(
-                canonical_id=row.get("canonical_id", ""),
+                canonical_id=cid,
                 name=row.get("name", ""),
                 concept_type=row.get("concept_type", "concept"),
                 description=row.get("description", ""),
                 aliases=row.get("aliases", []),
                 parent_hint=row.get("parent_hint", ""),
+                pagerank_score=self.centrality_cache.get(cid, 0.0),
             )
         
         # Tuple 模式
         length = len(row)
+        cid = row[0] if length > 0 else ""
         return ConceptNode(
-            canonical_id=row[0] if length > 0 else "",
+            canonical_id=cid,
             name=row[1] if length > 1 else "",
             concept_type=row[2] if length > 2 else "concept",
             description=row[3] if length > 3 else "",
             parent_hint=row[4] if length > 4 else "",
             aliases=row[5] if length > 5 else [],
+            pagerank_score=self.centrality_cache.get(cid, 0.0),
         )

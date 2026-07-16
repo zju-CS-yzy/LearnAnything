@@ -1101,6 +1101,16 @@ def build_knowledge_graph(subject: str, body: Dict[str, Any] = None):
             # Phase 2.5: 构建语义连接
             link_result = builder.link_concepts(paradigm=paradigm)
 
+        # Phase 2.6: 计算图中心性（PageRank）- 非阻塞
+        try:
+            from core.graph_store import GraphStore as _GS
+            _store = _GS(f"{subject}_v1")
+            _store.init_schema()
+            _centrality_cache = _store.compute_and_cache_centrality()
+            print(f"[build_knowledge_graph] P0-INT-5: PageRank 缓存已更新，{len(_centrality_cache)} 个节点")
+        except Exception as e:
+            print(f"[build_knowledge_graph] P0-INT-5: 中心性计算失败（非阻塞）: {e}")
+
         return {
             "subject": subject,
             "paradigm": paradigm,
