@@ -11,6 +11,7 @@ CoachAgent: 能力评测 Agent
 
 import re
 import time
+from datetime import datetime
 from typing import Dict, Any, List, Optional
 
 from agents.quiz_agent import QuizAgent
@@ -31,7 +32,7 @@ class CoachAgent(BaseAgent):
     def agent_name(self) -> str:
         return "CoachAgent"
 
-    def __init__(self, collection_name: str = "learnanything_v1", subject: str = "generic", top_k: int = 5):
+    def __init__(self, collection_name: str = "learnanything_v1", subject: str = "generic", top_k: int = 5, message_bus=None):
         self.collection_name = collection_name
         self.subject = subject
         self.top_k = top_k
@@ -39,6 +40,10 @@ class CoachAgent(BaseAgent):
         self._llm_client = None
         self._irt_estimator = None
         self._state_store = None
+        # P0-INT-6: 消息总线
+        self._message_bus = message_bus
+        # P0-INT-6: 待评测题目队列（从 QuizAgent 接收）
+        self._pending_quizzes: List[Dict[str, Any]] = []
 
     def _get_subject_config(self) -> Dict[str, Any]:
         """加载动态学科配置"""
@@ -287,9 +292,6 @@ class CoachAgent(BaseAgent):
                     user_answer=detail["user_answer"],
                     correct_answer=detail["correct_answer"],
                     is_correct=detail["is_correct"],
-                    score=detail["score"],
-                    max_score=detail["max_score"],
-                    response_time=30,
                     primary_concepts=[detail.get("topic", detail.get("question", "")[:20])],
                 )
                 answer_records.append(record)
@@ -321,6 +323,43 @@ class CoachAgent(BaseAgent):
             
             # P0-INT-4: 保存用户知识状态到 SQLite
             self._save_user_states("anonymous", self.subject, details, theta)
+            
+            # P0-INT-6: 发布 ability_updated 事件（通知 QuizAgent 调整难度）
+            if self._message_bus:
+                for detail in details:
+                    topic = detail.get("topic", detail.get("question", "")[:20])
+                    if topic:
+                        self._message_bus.publish(
+                            topic="user_state",
+                            sender="CoachAgent",
+                            event="ability_updated",
+                            payload={
+                                "theta": round(theta, 2),
+                                "concept": topic,
+                                "is_correct": detail.get("is_correct", False),
+                                "score": detail.get("score", 0),
+                            }
+                        )
+                
+                # 检测薄弱点并发布 weak_area_detected
+                weak_concepts = []
+                for detail in details:
+                    topic = detail.get("topic", detail.get("question", "")[:20])
+                    if topic and not detail.get("is_correct", False):
+                        weak_concepts.append(topic)
+                
+                # 统计每个概念的连续错误次数（简化：本次错误即发布）
+                for concept in set(weak_concepts):
+                    self._message_bus.publish(
+                        topic="weak_area",
+                        sender="CoachAgent",
+                        event="weak_area_detected",
+                        payload={
+                            "concept": concept,
+                            "streak_wrong": 1,
+                            "theta": round(theta, 2),
+                        }
+                    )
         except Exception as e:
             print(f"[CoachAgent] IRT 估计失败: {e}")
             report["irt"] = {"error": str(e)}
@@ -596,4 +635,24 @@ class CoachAgent(BaseAgent):
         for kw in keywords:
             topic = topic.replace(kw, "")
         return " ".join(topic.split()).strip() or "通用知识"
+
+    # ==================== P0-INT-6: 消息总线回调 ====================
+
+    def on_quiz_generated(self, msg):
+        """
+        订阅 quiz 主题的回调：接收出题事件，加入待评测队列。
+
+        Args:
+            msg: Message 对象（event="quiz_generated"）
+        """
+        payload = msg.payload
+        quiz_info = {
+            "topic": payload.get("topic", ""),
+            "question_count": payload.get("question_count", 0),
+            "question_ids": payload.get("question_ids", []),
+            "concepts": payload.get("concepts", []),
+            "user_theta": payload.get("user_theta", 0.0),
+        }
+        self._pending_quizzes.append(quiz_info)
+        print(f"[CoachAgent] P0-INT-6: 收到出题事件，加入待评测队列: {quiz_info['topic']} ({quiz_info['question_count']} 题)")
 

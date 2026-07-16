@@ -22,6 +22,7 @@ from agents.tutor_agent import TutorAgent
 from agents.quiz_agent import QuizAgent
 from agents.coach_agent import CoachAgent
 from agents.headhunter_agent import HeadhunterAgent
+from agents.message_bus import MessageBus, Message
 
 
 class Coordinator:
@@ -41,11 +42,17 @@ class Coordinator:
         self._intent_router = IntentRouter()
         self._agents: Dict[str, BaseAgent] = {}
 
-        # 延迟初始化各 Agent
-        self._agents["concept"] = TutorAgent(collection_name=collection_name, top_k=top_k)
-        self._agents["quiz"] = QuizAgent(collection_name=collection_name, top_k=top_k)
-        self._agents["evaluate"] = CoachAgent(collection_name=collection_name, top_k=top_k)
-        self._agents["job"] = HeadhunterAgent()
+        # P0-INT-6: 创建消息总线
+        self._message_bus = MessageBus(enable_audit=True)
+
+        # 延迟初始化各 Agent（传入 message_bus）
+        self._agents["concept"] = TutorAgent(collection_name=collection_name, top_k=top_k, message_bus=self._message_bus)
+        self._agents["quiz"] = QuizAgent(collection_name=collection_name, top_k=top_k, message_bus=self._message_bus)
+        self._agents["evaluate"] = CoachAgent(collection_name=collection_name, top_k=top_k, message_bus=self._message_bus)
+        self._agents["job"] = HeadhunterAgent(message_bus=self._message_bus)
+
+        # P0-INT-6: 设置消息总线订阅
+        self._setup_message_bus()
 
         # P0-INT-1: 延迟初始化 P0 模块（避免立即连接数据库）
         self._graph_store = None
@@ -249,3 +256,35 @@ class Coordinator:
         if not topic:
             topic = query
         return topic
+
+    # ==================== P0-INT-6: 消息总线 ====================
+
+    def _setup_message_bus(self):
+        """设置消息总线订阅关系"""
+        bus = self._message_bus
+
+        # CoachAgent 订阅 quiz 主题（接收出题事件，加入待评测队列）
+        coach = self._agents.get("evaluate")
+        if coach and hasattr(coach, "on_quiz_generated"):
+            bus.subscribe("quiz", "CoachAgent", coach.on_quiz_generated)
+
+        # QuizAgent 订阅 user_state 主题（接收能力更新，调整出题难度）
+        quiz = self._agents.get("quiz")
+        if quiz and hasattr(quiz, "on_ability_updated"):
+            bus.subscribe("user_state", "QuizAgent", quiz.on_ability_updated)
+
+        # TutorAgent 订阅 weak_area 主题（接收薄弱点检测，调整讲解策略）
+        tutor = self._agents.get("concept")
+        if tutor and hasattr(tutor, "on_weak_area_detected"):
+            bus.subscribe("weak_area", "TutorAgent", tutor.on_weak_area_detected)
+
+        print(f"[Coordinator] P0-INT-6: 消息总线订阅设置完成")
+        print(f"[Coordinator] 当前订阅: {bus.get_stats()}")
+
+    def get_bus_stats(self) -> Dict[str, Any]:
+        """获取消息总线统计（用于测试和调试）"""
+        return self._message_bus.get_stats()
+
+    def get_bus_audit_log(self, limit: int = 50) -> List[Dict[str, Any]]:
+        """获取消息审计日志"""
+        return self._message_bus.get_audit_log(limit)
