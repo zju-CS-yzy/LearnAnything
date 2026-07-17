@@ -614,14 +614,19 @@
 - **优先级**: P1
 
 #### LA-035-P29: 删除学科后数据库未完全清除
-- **状态**: 🔴 **待实现**
-- **问题描述**: 删除学科后再重建同名学科时，出现上一次用不同范式构建的节点混入新图谱中。
-- **根因猜测**:
-  1. `apiDeleteSubject` 仅删除 KuzuDB 文件，但可能遗漏向量数据库、图片目录、缓存文件
-  2. KuzuDB 文件删除后，同目录下的 wal 日志等未被清理
-- **排查方向**:
-  1. 检查 `backend_api.py` 的 `delete_subject` 实现，确认删除范围
-  2. 检查 `knowledge_base/` 目录在删除前后文件列表变化
+- **状态**: 🟡 **已修复（待验证）**
+- **根因** (2026-07-17 已确认): `delete_subject` 只删除了 SQLite 记录、学科文件夹和向量库，但遗漏了：
+  1. KuzuDB 图数据库（`knowledge_base/graph_db/{subject}_v1_graph`）
+  2. 图片目录（`knowledge_base/{subject}_v1_images/`）
+  3. 缩略图目录（`knowledge_base/{subject}_v1_thumbnails/`）
+  4. 向量库附属文件（`.db-wal`, `.db-shm`, `.db-journal`）
+  5. 历史残留：旧删除操作留下了大量乱码命名的 graph DB 文件（编码问题导致重复创建）
+- **修复**:
+  1. `core/subject_manager.py` `delete_subject` 函数补充删除上述所有遗漏项
+  2. 清理历史残留：删除了 10+ 个旧 graph DB 文件（`RAG_graph`、乱码命名文件等）
+- **待验证**: 删除一个学科后重建同名学科，确认：
+  1. `knowledge_base/graph_db/` 下无旧 graph DB 残留
+  2. 新学科的所有节点都是新创建的（无旧节点混入）
 - **优先级**: P1
 
 #### LA-035-P30: 文档树功能卡死
