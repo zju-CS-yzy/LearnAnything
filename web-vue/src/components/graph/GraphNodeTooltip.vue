@@ -44,21 +44,27 @@
           <div class="tooltip-label">
             关联媒体 ({{ node.media_refs.length }} 个)
           </div>
-          <div class="tooltip-media-list">
+          <div
+            class="tooltip-media-list"
+            :class="{ 'single-image': node.media_refs.length === 1 }"
+          >
             <div
               v-for="(ref, idx) in node.media_refs.slice(0, 6)"
               :key="idx"
               class="tooltip-media-item"
+              :class="{ 'single': node.media_refs.length === 1 }"
             >
               <!-- 图片缩略图 -->
               <div
                 v-if="isImageType(ref)"
                 class="tooltip-media-thumb"
+                :class="{ 'single': node.media_refs.length === 1 }"
               >
                 <img
                   v-if="ref.thumbnail_path || ref.path"
                   :src="getMediaUrl(ref.thumbnail_path || ref.path)"
                   :alt="ref.caption || '图片'"
+                  loading="lazy"
                   @error="onImageError"
                 />
                 <div v-else class="tooltip-media-placeholder">
@@ -113,13 +119,38 @@ function onTooltipLeave() {
   emit('update:visible', false)
 }
 
-// 计算 tooltip 位置：节点右侧偏移
+// 计算 tooltip 位置：节点右侧偏移，带边界检测
 const tooltipStyle = computed(() => {
   const offsetX = 20
   const offsetY = -10
+  const tooltipWidth = 400   /* LA-035-P28: 与 max-width 一致 */
+  const tooltipHeight = 350  /* LA-035-P28: 预估高度 */
+
+  let left = props.position.x + offsetX
+  let top = props.position.y + offsetY
+
+  // LA-035-P28: 右边界检测
+  const viewportWidth = window.innerWidth
+  if (left + tooltipWidth > viewportWidth - 20) {
+    left = props.position.x - tooltipWidth - offsetX
+  }
+  // LA-035-P28: 下边界检测
+  const viewportHeight = window.innerHeight
+  if (top + tooltipHeight > viewportHeight - 20) {
+    top = viewportHeight - tooltipHeight - 20
+  }
+  // LA-035-P28: 上边界检测
+  if (top < 10) {
+    top = 10
+  }
+  // LA-035-P28: 左边界检测
+  if (left < 10) {
+    left = 10
+  }
+
   return {
-    left: `${props.position.x + offsetX}px`,
-    top: `${props.position.y + offsetY}px`,
+    left: `${left}px`,
+    top: `${top}px`,
   }
 })
 
@@ -190,7 +221,9 @@ function onImageError(e) {
   position: fixed;
   z-index: 9999;
   min-width: 240px;
-  max-width: 340px;
+  max-width: 400px;  /* LA-035-P28: 增大到 400px 给图片更多空间 */
+  max-height: 80vh;  /* LA-035-P28: 限制最大高度，避免超出屏幕 */
+  overflow-y: auto;  /* LA-035-P28: 内容过多时滚动 */
   background: var(--bg-card, #ffffff);
   border: 1px solid var(--border-color, #e0e0e0);
   border-radius: 12px;
@@ -289,19 +322,28 @@ function onImageError(e) {
 }
 
 .tooltip-media-list {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);  /* LA-035-P28: 2 列网格 */
+  gap: 8px;
+}
+
+/* LA-035-P28: 单张图片时单列显示 */
+.tooltip-media-list.single-image {
+  grid-template-columns: 1fr;
 }
 
 .tooltip-media-item {
-  flex-shrink: 0;
+  min-width: 0;  /* 防止 grid item 溢出 */
+}
+
+.tooltip-media-item.single {
+  grid-column: 1 / -1;
 }
 
 .tooltip-media-thumb {
-  width: 72px;
-  height: 72px;
-  border-radius: 6px;
+  width: 100%;
+  aspect-ratio: 16 / 10;  /* LA-035-P28: 统一容器比例 */
+  border-radius: 8px;
   overflow: hidden;
   background: var(--bg-hover, #f5f5f5);
   display: flex;
@@ -309,10 +351,17 @@ function onImageError(e) {
   justify-content: center;
 }
 
+/* LA-035-P28: 单张图片时更大的显示区域 */
+.tooltip-media-thumb.single {
+  aspect-ratio: 16 / 9;
+  max-height: 220px;
+}
+
 .tooltip-media-thumb img {
   width: 100%;
   height: 100%;
-  object-fit: cover;
+  object-fit: contain;  /* LA-035-P28: 保持比例，不裁剪 */
+  background: var(--bg-hover, #f5f5f5);
 }
 
 .tooltip-media-placeholder {
