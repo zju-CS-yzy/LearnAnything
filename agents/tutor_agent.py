@@ -48,20 +48,33 @@ class TutorAgent(BaseAgent):
             self._reranker = RerankerFactory.create()
         return self._reranker
 
-    def _generate_answer(self, query: str, context_chunks: List[Dict[str, Any]]) -> str:
-        """调用 LLM 生成润色后的自然语言回答。"""
+    def _generate_answer(self, query: str, context_chunks: List[Dict[str, Any]], context_text_override: str = None) -> str:
+        """调用 LLM 生成润色后的自然语言回答。
+
+        Args:
+            query: 用户问题
+            context_chunks: 上下文 chunk 列表
+            context_text_override: 可选，直接使用提供的上下文文本（P0 图谱上下文）
+        """
         if not self._llm.available:
             # LLM 不可用时返回原始上下文拼接
             return "\n\n---\n\n".join(c.get("text", "")[:500] for c in context_chunks)
 
-        # 构建上下文（最多取前 5 个 chunk）
-        context_texts = []
-        for i, chunk in enumerate(context_chunks[:5], 1):
-            text = chunk.get("text", "").strip()
-            if text:
-                context_texts.append(f"[资料{i}]\n{text[:600]}")
+        # 构建上下文
+        if context_text_override:
+            # P0: 使用图谱上下文
+            context = context_text_override[:4000]  # 限制长度
+            source_note = "（来自知识图谱）"
+        else:
+            # 传统检索：最多取前 5 个 chunk
+            context_texts = []
+            for i, chunk in enumerate(context_chunks[:5], 1):
+                text = chunk.get("text", "").strip()
+                if text:
+                    context_texts.append(f"[资料{i}]\n{text[:600]}")
+            context = "\n\n".join(context_texts)
+            source_note = ""
 
-        context = "\n\n".join(context_texts)
         if not context:
             return "抱歉，未检索到与该问题相关的资料。"
 
@@ -75,7 +88,7 @@ class TutorAgent(BaseAgent):
             "5. 如果资料不足以完全回答问题，诚实说明"
         )
 
-        user_prompt = f"用户问题：{query}\n\n参考资料：\n{context}\n\n请生成回答："
+        user_prompt = f"用户问题：{query}{source_note}\n\n参考资料：\n{context}\n\n请生成回答："
 
         messages = [{"role": "user", "content": user_prompt}]
 
@@ -92,7 +105,63 @@ class TutorAgent(BaseAgent):
             # 降级：返回原始上下文
             return "\n\n---\n\n".join(c.get("text", "")[:500] for c in context_chunks)
 
-    def handle(self, query: str, filters: Optional[Dict[str, Any]] = None, **kwargs) -> Dict[str, Any]:
+    def handle(self, query: str, filters: Optional[Dict[str, Any]] = None, graph_context=None, **kwargs) -> Dict[str, Any]:
+        """
+        概念讲解主入口。
+
+        Args:
+            query: 用户问题
+            filters: 过滤条件
+            graph_context: P0 图谱上下文（ConceptRetriever -> SubgraphBuilder -> ContextAssembler 产出）
+        """
+        # P0-INT-1: 如果提供了图谱上下文，直接使用图谱上下文生成回答
+        if graph_context is not None:
+            print(f"[TutorAgent] P0-INT-1: 使用图谱上下文生成回答")
+            return self._handle_with_graph_context(query, graph_context)
+
+        # 否则使用传统检索方式
+        return self._handle_with_retrieval(query, filters)
+
+    def _handle_with_graph_context(self, query: str, graph_context) -> Dict[str, Any]:
+        """使用 P0 图谱上下文生成回答"""
+        context_text = graph_context.text if hasattr(graph_context, 'text') else str(graph_context)
+        concept_names = []
+        if hasattr(graph_context, 'subgraph') and graph_context.subgraph:
+            concept_names = [n.name for n in graph_context.subgraph.nodes]
+
+        # P0-INT-6: 如果有薄弱领域，优先使用相关上下文
+        if self._user_weak_areas:
+            print(f"[TutorAgent] P0-INT-6: 优先覆盖薄弱领域: {self._user_weak_areas}")
+            # 在上下文前附加薄弱领域提示
+            weak_hint = f"用户薄弱环节: {', '.join(self._user_weak_areas)}。请重点讲解这些概念。\n\n"
+            context_text = weak_hint + context_text
+
+        # 构建 chunks 列表（从 graph_context 中提取）
+        context_chunks = []
+        if hasattr(graph_context, 'subgraph') and graph_context.subgraph:
+            for node in graph_context.subgraph.nodes:
+                context_chunks.append({
+                    "id": getattr(node, 'id', ''),
+                    "text": getattr(node, 'description', '') or getattr(node, 'name', ''),
+                    "source": "knowledge_graph",
+                    "concept": getattr(node, 'name', ''),
+                })
+
+        # 生成回答
+        answer = self._generate_answer(query, context_chunks, context_text_override=context_text)
+
+        return {
+            "text": answer,
+            "metadata": {
+                "source": "p0_graph_context",
+                "concepts": concept_names,
+                "token_count": getattr(graph_context, 'token_count', 0),
+            },
+            "chunks": context_chunks,
+        }
+
+    def _handle_with_retrieval(self, query: str, filters: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """使用传统 HybridRetriever 检索生成回答"""
         # 查询改写
         queries = self._rewriter.rewrite(query, n_variants=3)
 
