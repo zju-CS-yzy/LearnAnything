@@ -786,6 +786,90 @@ async def get_knowledge_profile(user_id: str, subject_id: str):
 3. **多学科通用性**：UserKnowledgeState 是否跨学科共享？（建议按学科隔离）
 4. **实时性 vs 准确性**：自适应测评的选题算法需要实时图计算，是否需要预计算概念中心性？
 5. **LLM 幻觉控制**：Graph-to-Text 的上下文长度限制如何平衡信息量与 token 消耗？
+6. **Top-N 种子概念选择**：当前 `resolve()` 只取模糊匹配 Top-1，应支持返回 Top-N 让用户/前端选择（LA-040-P0-QUIZ-IMPROV，详见遗留问题追踪）
+
+---
+
+## 附录：P0-QUIZ 最终设计实现（2026-07-18 验证通过）
+
+> 记录 P0-QUIZ 从设计到最终实现的完整修复链路，供后续参考。
+
+### 修复链路（7 轮迭代）
+
+| 轮次 | 日期 | 问题 | 修复 |
+|------|------|------|------|
+| 1 | 2026-07-16 | P0-INT 设计未落地 | 实现 Coordinator 集成、QuizAgent 使用 ContextAssembler、CoachAgent 使用 IRTEstimator、UserKnowledgeState SQLite 持久化、消息总线 |
+| 2 | 2026-07-17 | KuzuDB 文件锁定 | 全局 `_graph_store_cache`，每个学科共享一个 GraphStore 实例 |
+| 3 | 2026-07-17 | API 端点绕过 Coordinator | `/api/quiz` 和 `/api/evaluate/start` 走 Coordinator + 共享 GraphStore |
+| 4 | 2026-07-17 | QuizAgent 未订阅消息总线 | `_subscribe_to_message_bus` → `on_ability_updated` + `on_weak_area_detected` |
+| 5 | 2026-07-17 | TutorAgent 未接入 P0 | `handle()` 接受 `graph_context` 参数，`_handle_with_graph_context` 使用图谱上下文 |
+| 6 | 2026-07-18 | `QuizRequest` 缺少 `user_id` | 添加 `user_id: Optional[str] = None` 到 `QuizRequest` / `EvaluateStartRequest` |
+| 7 | 2026-07-18 | 主题提取失败 | `_extract_topic_from_query` 使用正则：`on/about/关于 {topic}` 和 `evaluate my {topic} level` |
+| 8 | 2026-07-18 | `resolve()` 抛异常 | 改为返回空列表 + PageRank Top-5 兜底 |
+| 9 | 2026-07-18 | 概念匹配过于严格 | `_match_fuzzy` 双向包含 + case-insensitive Python 回退 |
+| 10 | 2026-07-18 | `vector_store` 未传入 | Coordinator 传入 `HybridRetriever` 使 embedding 语义检索可用 |
+
+### 最终架构
+
+```
+前端出题请求 → POST /api/quiz
+  → QuizRequest (topic, subject, count, user_id)
+  → backend_api.generate_quiz
+    → get_graph_store(subject) → 共享 GraphStore
+    → Coordinator.handle(query, user_id)
+      → IntentRouter: "quiz" 意图
+      → P0-INT-1: 使用图谱教育模块
+        → _extract_topic_from_query(query) → "rag 技术"
+        → ConceptRetriever.resolve(["rag 技术"])
+          → 策略1: 精确匹配 → 失败
+          → 策略2: _match_fuzzy (双向包含 + case-insensitive)
+            → Cypher: name CONTAINS 'rag 技术' OR 'rag 技术' CONTAINS name → 0 结果
+            → Python 回退: 'rag 技术'.lower() contains 'rag' → 匹配 'RAG'
+          → 返回 1 个种子概念
+        → SubgraphBuilder.build(seed_concepts, max_depth=2, max_nodes=15)
+          → 从 "RAG" 扩展 1-hop 邻居
+          → 返回子图 (11 节点, 10 边)
+        → ContextAssembler.assemble(subgraph, budget=2000 tokens)
+          → 返回 910 tokens 的图谱上下文
+      → QuizAgent.handle(query, graph_context=graph_context)
+        → P0-INT-2: 使用 P0 图谱上下文出题
+        → 图谱上下文概念: ['RAG', 'RAG好处', ... '生成器模块']
+        → 生成基于图谱结构的 5 道题目
+      → MessageBus.publish(quiz_generated)
+        → CoachAgent 订阅 quiz 主题，加入待评测队列
+    → QuizResponse (questions, ...)
+```
+
+### 关键接口定义
+
+```python
+# ConceptRetriever.resolve
+# 输入: 概念名称列表
+# 输出: 匹配的概念节点列表（策略：精确 → 模糊 → 别名 → Embedding → PageRank Top-5 兜底）
+
+# _match_fuzzy (双向包含 + case-insensitive)
+# 1. Cypher 查询: c.name CONTAINS '{name}' OR '{name}' CONTAINS c.name
+# 2. 如果 Cypher 返回 0，Python 回退: c.name.lower() in name.lower() or name.lower() in c.name.lower()
+# 3. 如果仍无匹配，尝试 word-by-word: 查询词中的每个单词被概念名包含
+
+# Coordinator._extract_topic_from_query
+# 模式1: re.search(r'(?:on|about|关于)\s+(.+?)', query)
+# 模式2: re.search(r'evaluate\s+my\s+(.+?)\s+level', query)
+# 模式3: 停用词过滤 + 数字去除
+```
+
+### 验证日志示例
+
+```
+[Coordinator] P0-INT-1: 使用图谱教育模块为 quiz 意图组装上下文
+[Coordinator] 提取主题: rag 技术
+[ConceptRetriever._match_fuzzy] Case-sensitive Cypher returned 0 nodes
+[ConceptRetriever._match_fuzzy] Case-insensitive match: 'rag 技术' <-> 'RAG'
+[Coordinator] 解析到 1 个种子概念
+[Coordinator] 构建子图: 11 节点, 10 边
+[Coordinator] 组装上下文: 910 tokens
+[QuizAgent] P0-INT-2: 使用 P0 图谱上下文出题
+```
 
 ---
 
