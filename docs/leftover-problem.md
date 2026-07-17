@@ -641,10 +641,14 @@
 - **优先级**: P1
 
 #### LA-040-P0-QUIZ: Agent 出题流程回退到旧方式
-- **状态**: 🟡 **部分已修复（待验证）**
-- **根因 1（已确认）**: KuzuDB 文件锁定 — 后端服务运行时 Coordinator 创建新 GraphStore 被拒绝
-- **根因 2（待确认）**: `_extract_topic_from_query` 提取的主题 "RAG" 是否能匹配到概念
-- **修复**: 诊断显示后端关闭时 `resolve("RAG")` 能返回 1 个种子概念，说明 P0 流程本身正常
-- **待验证**: 启动后端后，通过前端请求出题，观察是否有 `[Coordinator] P0-INT-1: 使用图谱教育模块` 日志
+- **状态**: 🟡 **已修复（待验证）**
+- **根因 1（2026-07-17 已确认）**: KuzuDB 文件锁定 — 后端服务运行时 Coordinator 创建新 GraphStore 被拒绝
+- **根因 2（2026-07-17 已确认）**: API 端点绕过 Coordinator — `/api/quiz` 和 `/api/evaluate/start` 直接调用 `QuizAgent`/`CoachAgent`，完全跳过 P0 流程（ConceptRetriever → SubgraphBuilder → ContextAssembler）
+- **修复**:
+  1. 全局 `GraphStore` 缓存：`_graph_store_cache = {}`，`get_graph_store(subject)` 返回共享实例，每个学科只创建一个 KuzuDB 连接
+  2. `/api/quiz` 使用 `Coordinator` + 共享 `GraphStore`
+  3. `/api/evaluate/start` (mixed/default 模式) 使用 `Coordinator` + 共享 `GraphStore`
+  4. `Coordinator.__init__` 支持外部传入 `graph_store` 参数
+- **待验证**: 启动后端后，前端调用出题接口，检查日志是否有 `[Coordinator] P0-INT-1: using graph-education module` 或 `P0 pipeline: resolved X seed concepts` 等 P0 流程日志
 - **优先级**: P0
 
