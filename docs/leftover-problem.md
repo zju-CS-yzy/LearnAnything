@@ -626,9 +626,18 @@
 
 #### LA-035-P30: 文档树功能卡死
 - **状态**: 🟡 **已修复（待验证）**
-- **根因**: RAG 学科有 454 个 chunk 节点，`runTreeLayout` 处理不过来导致浏览器卡死
-- **修复**: 在 `runTreeLayout` 中添加节点数限制（>200 时使用简化网格布局）
-- **待验证**: 切换到文档树视图，检查是否还卡死
+- **根因** (2026-07-17 更新): 不是节点数量问题，而是 BELONGS_TO / ADJACENT_TO 关系结构完全错误：
+  - BELONGS_TO 被误用于同级段落顺序（816 条 paragraph→paragraph），应仅用于层级归属
+  - ADJACENT_TO 混入跨层级关系（551 条 heading→paragraph），应仅用于同级顺序
+  - document 节点无出边，导致 167 个 heading 成为"伪根"
+  - `runTreeLayout` 假设严格树结构，面对混乱的图结构导致无限递归/位置冲突
+- **修复**:
+  1. 重写 `build_belongs_to_relations`：建立正确的层级结构（document→heading→paragraph/image_pseudo，heading→子heading）
+  2. 重写 `build_adjacent_relations`：仅连接同级 chunk（同一 heading 内的 paragraph→paragraph, image→image）
+  3. 删除旧数据所有错误边（1527 BELONGS_TO + 2221 ADJACENT_TO），重建为 564 BELONGS_TO + 216 ADJACENT_TO
+  4. 修复后结构：heading→paragraph 356, heading→heading 101, document→heading 82, heading→image_pseudo 25; paragraph→paragraph 215, image→image_pseudo 1
+  5. 根节点仅剩 5 document + 7 orphan paragraph（无 heading_path 归属）
+- **待验证**: 刷新前端切换到文档树视图，检查是否还卡死，布局是否正确（层次清晰，同级排列）
 - **优先级**: P1
 
 #### LA-040-P0-QUIZ: Agent 出题流程回退到旧方式
