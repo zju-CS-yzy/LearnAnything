@@ -652,21 +652,23 @@
 - **优先级**: P1 → 延后处理
 
 #### LA-040-P0-QUIZ: Agent 出题流程回退到旧方式
-- **状态**: 🟡 **二次修复（2026-07-18），待验证**
-- **根因 1（2026-07-17 已确认）**: KuzuDB 文件锁定 — 后端服务运行时 Coordinator 创建新 GraphStore 被拒绝
-- **根因 2（2026-07-17 已确认）**: API 端点绕过 Coordinator — `/api/quiz` 和 `/api/evaluate/start` 直接调用 `QuizAgent`/`CoachAgent`，完全跳过 P0 流程
-- **根因 3（2026-07-17 已确认）**: QuizAgent 未订阅消息总线 — CoachAgent 评分后发布消息，QuizAgent 未订阅
-- **根因 4（2026-07-17 已确认）**: TutorAgent 未接入 P0 模块 — `/api/ask` 的 concept 意图只走传统检索
-- **根因 5（2026-07-18 已确认）**: `QuizRequest` / `EvaluateStartRequest` Pydantic 模型缺少 `user_id` 字段，导致 `request.user_id` 报错 `AttributeError`
-- **根因 6（2026-07-18 已确认）**: `_extract_topic_from_query` 主题提取失败 — 对英文出题请求"give me 5 questions on RAG 技术"提取出"give me 5 s on RAG 技术"（未去除英文停用词），导致 `ConceptRetriever.resolve` 找不到匹配概念
-- **根因 7（2026-07-18 已确认）**: `ConceptRetriever.resolve` 抛出 `ValueError` 当未找到匹配概念时，导致整个 P0 try 块崩溃，直接回退到旧模式
-- **修复 1** (2026-07-17): 全局 GraphStore 缓存、API 端点走 Coordinator、QuizAgent 消息订阅、TutorAgent P0 接入
-- **修复 2** (2026-07-18): `QuizRequest` / `EvaluateStartRequest` 添加 `user_id` 字段
-- **修复 3** (2026-07-18): 重写 `_extract_topic_from_query` — 使用正则提取 `on/about/关于 {topic}` 和 `evaluate my {topic} level` 模式，增加英文停用词，使用 `\b` 词边界匹配
-- **修复 4** (2026-07-18): `ConceptRetriever.resolve` 不再抛出 `ValueError`，返回空列表让 coordinator 自然回退
-- **待验证**: 
-  1. 前端调用出题接口，检查日志是否不再出现 `LA-0402001: 未找到匹配概念` 错误
-  2. 检查是否成功使用 P0 流程（`[Coordinator] 解析到 X 个种子概念` 日志）
-  3. 检查 QuizAgent 是否收到消息总线事件
+- **状态**: 🟡 **三次修复 + 调试追踪（2026-07-18），待验证**
+- **根因 1~4** (2026-07-17): KuzuDB 文件锁定、API 端点绕过 Coordinator、QuizAgent 未订阅消息总线、TutorAgent 未接入 P0
+- **根因 5** (2026-07-18): `QuizRequest` / `EvaluateStartRequest` 缺少 `user_id`
+- **根因 6** (2026-07-18): `_extract_topic_from_query` 主题提取失败（英文停用词）
+- **根因 7** (2026-07-18): `ConceptRetriever.resolve` 抛出 `ValueError`
+- **根因 8** (2026-07-18 已确认): 概念匹配过于严格 — `_match_fuzzy` 只做了单向包含，没做反向包含；大小写敏感（查询 "rag 技术" 不匹配概念 "RAG"）
+- **根因 9** (2026-07-18 已确认): `ConceptRetriever` 未传入 `vector_store`
+- **根因 10** (2026-07-18 已确认): `resolve` 返回空列表时无兜底策略
+- **修复 1~4** (2026-07-17): GraphStore 缓存、API 端点走 Coordinator、消息订阅、TutorAgent P0 接入
+- **修复 5~6** (2026-07-18): `user_id` 字段 + 主题提取正则重写
+- **修复 7** (2026-07-18): `resolve` 不再抛异常
+- **修复 8~10** (2026-07-18): 双向包含匹配、传入 `HybridRetriever` 作为 `vector_store`、PageRank Top-5 兜底
+- **调试追踪** (2026-07-18): 在 `resolve` / `_match_fuzzy` / `_search_by_embedding` / `search_by_embedding` 中添加了详细的打印，追踪每一步匹配结果
+- **验证结果** (2026-07-18 01:16): 修复后直接回退到 Top-5 兜底，改进点 1（双向匹配）和 2（语义检索）未体现。推测根因可能是大小写敏感（"rag 技术" vs "RAG"）或 vector_store metadata 中缺少 `canonical_id`
+- **待验证**: 重新测试出题，检查 `ConceptRetriever` 的调试打印，确认：
+  1. `_match_fuzzy` 的 Cypher 返回 0 时，case-insensitive Python 过滤是否匹配到概念
+  2. `search_by_embedding` 的 vector_store 返回结果中是否有 `canonical_id` metadata
+  3. 如果双向匹配和语义检索都生效，题目是否基于主题相关概念而非全局 Top-5
 - **优先级**: P0
 
