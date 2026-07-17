@@ -395,6 +395,36 @@ class GraphStore:
         return text
 
 
+    def _sanitize_media_refs(self, media_refs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """
+        LA-035-P27-fix: 清理 media_refs 中的路径格式
+        - 使用 relative_path 替代 path（避免 Windows 绝对路径）
+        - 将反斜杠替换为正斜杠
+        - 返回安全的 media_refs 列表
+        """
+        if not media_refs:
+            return []
+        
+        cleaned = []
+        for ref in media_refs:
+            if not isinstance(ref, dict):
+                continue
+            
+            ref_copy = dict(ref)
+            
+            # 优先使用 relative_path，替代 path 字段
+            if ref_copy.get("relative_path"):
+                ref_copy["path"] = ref_copy["relative_path"]
+            
+            # 清理所有路径字段中的反斜杠
+            for key in ["path", "thumbnail_path", "relative_path"]:
+                if key in ref_copy and isinstance(ref_copy[key], str):
+                    ref_copy[key] = ref_copy[key].replace("\\", "/")
+            
+            cleaned.append(ref_copy)
+        
+        return cleaned
+
 
     def add_chunk_nodes(self, chunks: List[Dict[str, Any]]):
 
@@ -466,6 +496,8 @@ class GraphStore:
 
             # LA-035-P18: 从 metadata 中提取并序列化 media_refs
             media_refs_raw = meta.get("media_refs", []) or meta.get("image_refs", [])
+            # LA-035-P27-fix: 清理路径格式（relative_path 优先，反斜杠替换为正斜杠）
+            media_refs_raw = self._sanitize_media_refs(media_refs_raw)
             
             # LA-035-P18-fix: 如果 media_refs 为空但 image_path 存在，
             # 自动从 image_path 构建 media_refs（兼容 DocumentProcessor 生成的 chunk）
@@ -1214,6 +1246,8 @@ class GraphStore:
 
             # LA-035: 多媒体引用
             media_refs = concept.get("media_refs", [])
+            # LA-035-P27-fix: 清理路径格式（relative_path 优先，反斜杠替换为正斜杠）
+            media_refs = self._sanitize_media_refs(media_refs)
             # LA-035-P26: 用 _escape_cypher_string_safe 保留 JSON 中的反斜杠
             media_refs_json = self._escape_cypher_string_safe(
                 json.dumps(media_refs, ensure_ascii=False) if media_refs else ""
@@ -1305,6 +1339,8 @@ class GraphStore:
 
             # LA-035: 多媒体引用
             media_refs = cc.get("media_refs", [])
+            # LA-035-P27-fix: 清理路径格式（relative_path 优先，反斜杠替换为正斜杠）
+            media_refs = self._sanitize_media_refs(media_refs)
             media_refs_json = json.dumps(media_refs, ensure_ascii=False) if media_refs else ""
 
             # 创建 CanonicalConcept 节点
