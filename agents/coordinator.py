@@ -111,10 +111,10 @@ class Coordinator:
             intent_info["fallback"] = True
             agent = self._agents["concept"]
 
-        # P0-INT-1: 对 quiz 意图使用图谱教育模块组装出题上下文
-        if resolved_intent == "quiz":
+        # P0-INT-1: 对 quiz / concept 意图使用图谱教育模块组装上下文
+        if resolved_intent in ("quiz", "concept"):
             try:
-                print(f"[Coordinator] P0-INT-1: 使用图谱教育模块为 quiz 意图组装上下文")
+                print(f"[Coordinator] P0-INT-1: 使用图谱教育模块为 {resolved_intent} 意图组装上下文")
                 graph_store = self._get_graph_store()
                 retriever = self._get_retriever(graph_store)
 
@@ -134,7 +134,7 @@ class Coordinator:
                     graph_context = assembler.assemble(subgraph, budget=budget)
                     print(f"[Coordinator] 组装上下文: {graph_context.token_count} tokens")
 
-                    # 将组装后的上下文传递给 QuizAgent
+                    # 将组装后的上下文传递给 Agent
                     agent_result = agent.handle(query, filters=filters, graph_context=graph_context)
                 else:
                     print(f"[Coordinator] 无匹配概念，回退到旧方式")
@@ -145,7 +145,7 @@ class Coordinator:
                 traceback.print_exc()
                 agent_result = agent.handle(query, filters=filters)
         else:
-            # 非 quiz 意图，原方式执行
+            # 非 quiz/concept 意图，原方式执行
             agent_result = agent.handle(query, filters=filters)
 
         total_duration_ms = (time.time() - start_time) * 1000
