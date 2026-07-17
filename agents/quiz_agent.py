@@ -90,6 +90,33 @@ class QuizAgent(BaseAgent):
         # P0-INT-6: 用户能力状态（从消息总线接收）
         self._user_theta = 0.0
         self._user_weak_areas: List[str] = []
+        # P0-INT-6: 订阅用户状态更新和薄弱领域通知（QuizAgent 自适应出题难度）
+        if self._message_bus is not None:
+            self._subscribe_to_message_bus()
+
+    def _subscribe_to_message_bus(self):
+        """订阅消息总线：接收用户能力更新和薄弱领域通知"""
+        # 订阅 user_state 消息（CoachAgent 评分后发布）
+        self._message_bus.subscribe(
+            topic="user_state",
+            agent_name="QuizAgent",
+            handler=self.on_ability_updated,
+        )
+        # 订阅 weak_area 消息（薄弱领域通知）
+        self._message_bus.subscribe(
+            topic="weak_area",
+            agent_name="QuizAgent",
+            handler=self.on_weak_area_detected,
+        )
+        print(f"[QuizAgent] 已订阅消息总线: user_state, weak_area")
+
+    def on_ability_updated(self, message):
+        """处理 user_state 消息：更新用户 theta 值（公共方法名，供 Coordinator._setup_message_bus 引用）"""
+        payload = message.payload
+        theta = payload.get("theta")
+        if theta is not None:
+            self._user_theta = theta
+            print(f"[QuizAgent] 收到用户能力更新: theta={self._user_theta:.2f}")
 
     def _get_subject_config(self) -> Dict[str, Any]:
         """加载动态学科配置，优先使用已分析的学科配置，回退到通用配置"""
@@ -144,8 +171,21 @@ class QuizAgent(BaseAgent):
             concept_names = [n.name for n in graph_context.subgraph.nodes]
             print(f"[QuizAgent] 图谱上下文概念: {concept_names}")
 
+        # P0-INT-6: 自适应出题 — 根据用户能力状态和薄弱领域调整
+        user_theta = self._user_theta
+        weak_areas = self._user_weak_areas
+        if weak_areas:
+            print(f"[QuizAgent] P0-INT-6: 自适应出题 — theta={user_theta:.2f}, 薄弱领域={weak_areas}")
+            # 优先从薄弱领域相关概念中抽取上下文
+            filtered_context = self._filter_context_by_weak_areas(context_text, weak_areas, concept_names)
+            if filtered_context:
+                context_text = filtered_context
+                print(f"[QuizAgent] P0-INT-6: 使用薄弱领域相关上下文出题")
+
         # 优先使用 LLM 生成题目
-        questions = self._generate_questions_llm_from_context(context_text, n_questions, topic)
+        questions = self._generate_questions_llm_from_context(
+            context_text, n_questions, topic, user_theta, weak_areas
+        )
 
         if not questions:
             questions = self._generate_questions_fallback_from_context(context_text, n_questions, topic)
@@ -198,8 +238,30 @@ class QuizAgent(BaseAgent):
             "generation_method": "p0_context" if questions else "fallback",
         }
 
-    def _generate_questions_llm_from_context(self, context_text: str, n_questions: int, topic: str) -> List[Dict[str, Any]]:
-        """使用 graph_context.text 替代 chunks 作为 LLM prompt 上下文"""
+    def _filter_context_by_weak_areas(self, context_text: str, weak_areas: List[str], concept_names: List[str]) -> str:
+        """P0-INT-6: 从上下文中过滤与薄弱领域相关的部分"""
+        if not weak_areas or not context_text:
+            return context_text
+
+        sentences = re.split(r'[。！？\n]+', context_text)
+        matched = []
+        for s in sentences:
+            s = s.strip()
+            if not s:
+                continue
+            # 检查是否包含薄弱领域关键词
+            for area in weak_areas:
+                if area.lower() in s.lower() or any(area.lower() in c.lower() for c in concept_names):
+                    matched.append(s)
+                    break
+
+        if matched:
+            # 保留匹配部分 + 原始上下文的一部分（避免过度过滤）
+            return "\n".join(matched[:20]) + "\n" + context_text[:2000]
+        return context_text
+
+    def _generate_questions_llm_from_context(self, context_text: str, n_questions: int, topic: str, user_theta: float = 0.0, weak_areas: List[str] = None) -> List[Dict[str, Any]]:
+        """使用 graph_context.text 替代 chunks 作为 LLM prompt 上下文，支持自适应难度"""
         if not self._llm.available or not context_text:
             return []
 
@@ -207,10 +269,18 @@ class QuizAgent(BaseAgent):
         if len(context_text) > 6000:
             context_text = context_text[:6000] + "..."
 
+        # P0-INT-6: 根据用户 theta 调整难度
+        difficulty_hint = self._theta_to_difficulty_hint(user_theta)
+
+        # P0-INT-6: 根据薄弱领域调整侧重
+        weak_areas_hint = ""
+        if weak_areas:
+            weak_areas_hint = f"\n\n用户薄弱环节: {', '.join(weak_areas)}。请优先针对这些薄弱环节出题。"
+
         prompt = QUIZ_GENERATION_PROMPT.format(
             n_questions=min(n_questions, 8),
             chunks_text=context_text,
-        )
+        ) + difficulty_hint + weak_areas_hint
 
         try:
             result = self._llm.chat_json(
@@ -231,6 +301,18 @@ class QuizAgent(BaseAgent):
         except Exception as e:
             print(f"[QuizAgent] 图谱上下文 LLM 生成题目失败: {e}")
             return []
+
+    def _theta_to_difficulty_hint(self, theta: float) -> str:
+        """P0-INT-6: 将 IRT theta 转换为出题难度提示"""
+        if theta < -1.0:
+            return "\n\n用户当前能力水平：初级。请出基础概念题，避免复杂推理。"
+        elif theta < 0.0:
+            return "\n\n用户当前能力水平：入门。请出基础到中等难度题目，侧重概念理解。"
+        elif theta < 1.0:
+            return "\n\n用户当前能力水平：中级。请出中等难度题目，可适当包含应用和分析。"
+        else:
+            return "\n\n用户当前能力水平：高级。请出高难度题目，侧重深入理解、综合应用和辨析。"
+
 
     def _generate_questions_fallback_from_context(self, context_text: str, n_questions: int, topic: str) -> List[Dict[str, Any]]:
         """LLM 不可用时，从 context 文本中提取关键句生成题目"""
