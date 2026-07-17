@@ -586,13 +586,20 @@
 ### 新增遗留问题（2026-07-17）
 
 #### LA-035-P27: 前端图片仍无法显示（RAG 学科重建后）
-- **状态**: 🟡 **已修复（待验证）**
-- **根因确认**: 旧数据（P26 修复前构建）中 `_escape_cypher_string` 将 JSON 反斜杠 `\\` 替换为 `//`，导致 `JSON.parse` 失败，返回空数组，`hasMedia` 为 false，前端不渲染图片区域
+- **状态**: 🟡 **后端修复完成，待前端验证**
+- **根因确认** (2026-07-17 更新):
+  - Chunk 节点 `media_refs` 存储了 Windows 绝对路径（`D:\\MyCS\\...`），反斜杠在 JSON 中未转义，导致 `json.loads` 失败：`Invalid \escape`
+  - `get_canonical_concepts` fallback 从 source_chunks 获取图片时，Chunk 的 `media_refs` 解析失败，返回空数组
+  - 概念节点自身 `media_refs` 为空，且 fallback 也失败，导致前端 `hasMedia` 为 false，不渲染图片
 - **修复**:
-  - 后端 `get_canonical_concepts`: 解析 JSON 前将 `//` 替换回 `\\`
-  - 前端 `mediaRefs` computed: 同样添加 `//` → `\\` 安全处理
-- **待验证**: 刷新前端后点击有图片标签的节点，检查 Network 中是否出现 `/api/images/...` 请求
-- **优先级**: P1
+  1. 新增 `GraphStore._sanitize_media_refs()` 方法：使用 `relative_path` 替代 `path`，反斜杠替换为正斜杠
+  2. 在所有写入路径调用：add_chunk_nodes、store_extracted_concepts、store_canonical_concepts
+  3. 批量修复现有数据：rag_v1（168/756 有图片，新增 123 个），transformer_v1（54/139 有图片，新增 27 个）
+  4. 节点 concept_canonical_b9dcd94454（"文本生成"）已修复为：`path: "rag_v1_images/tmpmevygvhq_mineru_2_2108b2b2.png"`
+- **待验证**: 刷新前端后点击有图片标签的节点（如"文本生成"），检查：
+  1. NodeDetailPanel 中显示图片
+  2. Network 中出现 `/api/images/rag/...` 请求
+  3. 图片正确显示（非空白/404）
 
 #### LA-035-P28: 节点悬浮窗图片自适应大小
 - **状态**: 🔴 **待实现**
