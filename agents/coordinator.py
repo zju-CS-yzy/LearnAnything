@@ -16,6 +16,7 @@ from core.graph_education import (
     ConceptRetriever, SubgraphBuilder, ContextAssembler, ContextBudget,
     IRTEstimator, UserKnowledgeState, GraphContext, AnswerRecord
 )
+from core.hybrid_retriever import HybridRetriever
 
 from agents.base_agent import BaseAgent
 from agents.tutor_agent import TutorAgent
@@ -213,10 +214,15 @@ class Coordinator:
         return self._graph_store
 
     def _get_retriever(self, graph_store: GraphStore) -> ConceptRetriever:
-        """延迟初始化 ConceptRetriever"""
+        """延迟初始化 ConceptRetriever，传入 HybridRetriever 作为 vector_store"""
         if self._retriever is None:
             print(f"[Coordinator] 延迟初始化 ConceptRetriever")
-            self._retriever = ConceptRetriever(graph_store=graph_store)
+            # P0-QUIZ-FIX: 传入 HybridRetriever 使 embedding 语义检索可用
+            vector_store = HybridRetriever(graph_store.collection_name)
+            self._retriever = ConceptRetriever(
+                graph_store=graph_store,
+                vector_store=vector_store,
+            )
         return self._retriever
 
     def _get_builder(self, graph_store: GraphStore) -> SubgraphBuilder:

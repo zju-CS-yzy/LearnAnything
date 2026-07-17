@@ -103,7 +103,14 @@ class ConceptRetriever:
                 seen.add(n.canonical_id)
                 unique.append(n)
 
-        # 不再抛异常，返回空列表让调用者决定是否回退
+        # 兜底策略：如果所有匹配都失败，返回图谱中 PageRank 最高的前 5 个概念
+        # 这样即使主题不匹配，P0 流程仍然可以工作（基于图谱全局概念出题）
+        if not unique and concept_names:
+            print(f"[ConceptRetriever] 主题 '{concept_names}' 未匹配到任何概念，使用图谱 Top-5 兜底")
+            all_concepts = self._get_all_concepts()
+            all_concepts.sort(key=lambda x: x.pagerank_score, reverse=True)
+            unique = all_concepts[:5]
+
         return unique
 
     def expand(
@@ -355,16 +362,21 @@ class ConceptRetriever:
         return None
 
     def _match_fuzzy(self, name: str) -> List[ConceptNode]:
-        """模糊匹配：名称包含关系"""
+        """
+        模糊匹配：双向包含关系。
+
+        匹配规则：概念名包含查询词，或查询词包含概念名。
+        例如：查询 "RAG 技术" 会匹配概念名 "RAG"；查询 "RAG" 也会匹配概念名 "RAG 技术"。
+        """
         conn = self.graph_store._ensure_db()
         safe_name = name.replace("'", "\\'")
 
         cypher = f"""
             MATCH (c:CanonicalConcept)
-            WHERE c.name CONTAINS '{safe_name}'
+            WHERE c.name CONTAINS '{safe_name}' OR '{safe_name}' CONTAINS c.name
             RETURN c.canonical_id, c.name, c.concept_type, c.description,
                    c.parent_hint, c.aliases, c.source_chunks
-            LIMIT 5
+            LIMIT 10
         """
 
         try:
