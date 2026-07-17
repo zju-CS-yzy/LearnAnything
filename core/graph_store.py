@@ -575,227 +575,189 @@ class GraphStore:
     def build_belongs_to_relations(self):
 
         """
+        LA-035-P30-fix: 构建 BELONGS_TO 层级关系
 
-        构建 BELONGS_TO 关系：同一 heading_path 下的 chunk 之间建立层级关系??
-
-        策略??        - ??heading_path 分组
-
-        - 同组内按 page_number 排序
-
-        - 相邻??chunk 之间建立 BELONGS_TO 关系
-
+        正确结构：
+          document → heading (顶层标题)
+          heading → heading (层级嵌套)
+          heading → paragraph (段落归属)
+          heading → image_pseudo (图片归属)
         """
+        import re
 
         conn = self._ensure_db()
+        esc = self._escape_cypher_string
 
+        def _extract_numeric_code(path):
+            if not path:
+                return None
+            m = re.match(r'^(\d+(?:\.\d+)*)\b', path)
+            return m.group(1) if m else None
 
+        def _get_parent_code(code):
+            if not code or '.' not in code:
+                return None
+            return code.rsplit('.', 1)[0]
 
-        # 获取所??heading_path 分组
+        def _heading_path_parent(path):
+            if not path or '>' not in path:
+                return None
+            return path.rsplit('>', 1)[0].strip()
 
+        # 1. 加载所有 chunks
+        chunks = {}
         result = self._execute(conn, """
-
             MATCH (c:Chunk)
-
-            WHERE c.heading_path <> ''
-
-            RETURN c.heading_path AS hp, c.chunk_id AS cid, c.page_number AS pn
-
-            ORDER BY hp, pn
-
+            RETURN c.chunk_id, c.chunk_type, c.heading_path, c.source, c.page_number, c.text
         """)
-
-
-
-        groups = {}
-
         while result.has_next():
-
             row = result.get_next()
+            chunks[row[0]] = {
+                'id': row[0], 'type': row[1], 'heading_path': row[2] or '',
+                'source': row[3] or '', 'page_number': row[4], 'text': row[5] or ''
+            }
 
-            hp, cid, pn = row[0], row[1], row[2]
+        docs = [c for c in chunks.values() if c['type'] == 'document']
+        headings = [c for c in chunks.values() if c['type'] == 'heading']
+        paragraphs = [c for c in chunks.values() if c['type'] == 'paragraph']
+        images = [c for c in chunks.values() if c['type'] == 'image_pseudo']
 
-            groups.setdefault(hp, []).append((cid, pn))
-
-
-
-        # 为每??heading_path 组内建立相邻关系
+        # 2. 建立 heading 映射
+        heading_by_path = {}
+        heading_by_code = {}
+        for h in headings:
+            src = h['source']
+            hp = h['heading_path']
+            key = (src, hp)
+            if key not in heading_by_path:
+                heading_by_path[key] = h['id']
+            code = _extract_numeric_code(hp)
+            if code:
+                ckey = (src, code)
+                if ckey not in heading_by_code:
+                    heading_by_code[ckey] = h['id']
 
         created = 0
 
-        esc = self._escape_cypher_string
-
-        for hp, items in groups.items():
-
-            items.sort(key=lambda x: x[1] if x[1] is not None else 0)  # ??page_number 排序，None 视为 0
-
-            for i in range(len(items) - 1):
-
-                cid1, _ = items[i]
-
-                cid2, _ = items[i + 1]
-
+        # 3. 建立 heading → heading (层级)
+        heading_to_parent = {}
+        for h in headings:
+            src = h['source']
+            hp = h['heading_path']
+            parent_id = None
+            # 方法1: '>' 分隔的层级
+            parent_hp = _heading_path_parent(hp)
+            if parent_hp:
+                parent_id = heading_by_path.get((src, parent_hp))
+            # 方法2: 数字编码前缀
+            if not parent_id:
+                code = _extract_numeric_code(hp)
+                if code:
+                    parent_code = _get_parent_code(code)
+                    if parent_code:
+                        parent_id = heading_by_code.get((src, parent_code))
+            if parent_id and parent_id != h['id']:
+                heading_to_parent[h['id']] = parent_id
                 try:
-
                     self._execute(conn, f"""
-
-                        MATCH (a:Chunk {{chunk_id: '{esc(cid1)}'}}), (b:Chunk {{chunk_id: '{esc(cid2)}'}})
-
+                        MATCH (a:Chunk {{chunk_id: '{esc(parent_id)}'}}), (b:Chunk {{chunk_id: '{esc(h['id'])}'}})
                         CREATE (a)-[:BELONGS_TO]->(b)
-
                     """)
-
                     created += 1
-
                 except Exception as e:
+                    print(f"[GraphStore] heading→heading BELONGS_TO failed: {e}")
 
-                    print(f"[GraphStore] BELONGS_TO failed: {e}")
+        # 4. 建立 heading → paragraph / image_pseudo (归属)
+        for child in paragraphs + images:
+            hp = child['heading_path']
+            src = child['source']
+            if hp:
+                heading_id = heading_by_path.get((src, hp))
+                if heading_id:
+                    try:
+                        self._execute(conn, f"""
+                            MATCH (a:Chunk {{chunk_id: '{esc(heading_id)}'}}), (b:Chunk {{chunk_id: '{esc(child['id'])}'}})
+                            CREATE (a)-[:BELONGS_TO]->(b)
+                        """)
+                        created += 1
+                    except Exception as e:
+                        print(f"[GraphStore] heading→child BELONGS_TO failed: {e}")
 
-
+        # 5. 建立 document → 顶层 heading (无父 heading 的 heading)
+        doc_by_source = {d['source']: d['id'] for d in docs}
+        for h in headings:
+            if h['id'] not in heading_to_parent:
+                doc_id = doc_by_source.get(h['source'])
+                if doc_id:
+                    try:
+                        self._execute(conn, f"""
+                            MATCH (a:Chunk {{chunk_id: '{esc(doc_id)}'}}), (b:Chunk {{chunk_id: '{esc(h['id'])}'}})
+                            CREATE (a)-[:BELONGS_TO]->(b)
+                        """)
+                        created += 1
+                    except Exception as e:
+                        print(f"[GraphStore] doc→heading BELONGS_TO failed: {e}")
 
         print(f"[GraphStore] Created {created} BELONGS_TO relations")
-
         return created
-
-
 
     def build_has_parent_relations(self, parent_chunks: List[Dict[str, Any]]):
 
         """
-
-        构建 HAS_PARENT 关系：child chunk 关联到其 parent chunk??
-
-        Args:
-
-            parent_chunks: parent chunk 列表，用于建??child→parent ??        """
-
-        conn = self._ensure_db()
-
-        created = 0
-
-
-
-        for parent in parent_chunks:
-
-            parent_id = parent["id"]
-
-            # ??parent metadata 中获取关联的 child_ids
-
-            meta = parent.get("metadata", {})
-
-            # 注意：parent chunk 本身不直接存??child_ids
-
-            # 我们需要通过??chunk ??parent_ids 反查
-
-
-
-        # 更直接的方式：遍历所??child chunk，获取其 parent_ids
-
-        result = self._execute(conn, """
-
-            MATCH (c:Chunk {chunk_type: 'child'})
-
-            RETURN c.chunk_id AS cid
-
-        """)
-
-
-
-        child_ids = []
-
-        while result.has_next():
-
-            child_ids.append(result.get_next()[0])
-
-
-
-        for cid in child_ids:
-
-            # 注意：parent_ids 存储??SQLite 向量库的 metadata ??            # 这里简化处理：通过 page_number 匹配 parent
-
-            # 实际应传??parent-child 映射
-
-            pass
-
-
-
-        print(f"[GraphStore] HAS_PARENT: simplified (page-based matching)")
-
-        return created
+        LA-035-P30: HAS_PARENT 已合并到 BELONGS_TO，此函数保留接口但不再创建关系。
+        """
+        print(f"[GraphStore] HAS_PARENT: now handled by build_belongs_to_relations")
+        return 0
 
 
 
     def build_adjacent_relations(self):
 
         """
+        LA-035-P30-fix: 构建 ADJACENT_TO 同级顺序关系
 
-        构建 ADJACENT_TO 关系：同一 source（文档）且相??page_number ??chunk 之间建立关系??        """
+        仅连接同一 heading 下的同级 chunk（paragraph → paragraph, image_pseudo → image_pseudo）
+        """
+        import re
 
         conn = self._ensure_db()
-
-
-
-        result = self._execute(conn, """
-
-            MATCH (c:Chunk)
-
-            WHERE c.source <> ''
-
-            RETURN c.source AS src, c.chunk_id AS cid, c.page_number AS pn
-
-            ORDER BY src, pn
-
-        """)
-
-
-
-        groups = {}
-
-        while result.has_next():
-
-            row = result.get_next()
-
-            src, cid, pn = row[0], row[1], row[2]
-
-            groups.setdefault(src, []).append((cid, pn))
-
-
-
-        created = 0
-
         esc = self._escape_cypher_string
 
-        for src, items in groups.items():
+        # 按 (source, heading_path, chunk_type) 分组，按 chunk_id 顺序排序
+        result = self._execute(conn, """
+            MATCH (c:Chunk)
+            WHERE c.chunk_type IN ['paragraph', 'image_pseudo']
+            RETURN c.chunk_id, c.chunk_type, c.heading_path, c.source
+            ORDER BY c.source, c.heading_path, c.chunk_id
+        """)
 
-            items.sort(key=lambda x: x[1] if x[1] is not None else 0)  # ??page_number 排序，None 视为 0
+        groups = {}
+        while result.has_next():
+            row = result.get_next()
+            cid, ctype, hp, src = row[0], row[1], row[2], row[3]
+            key = (src, hp, ctype)
+            groups.setdefault(key, []).append(cid)
 
+        created = 0
+        def _sort_key(cid):
+            m = re.search(r'_(\d+)_', cid)
+            return int(m.group(1)) if m else 0
+
+        for key, items in groups.items():
+            if len(items) < 2:
+                continue
+            items.sort(key=_sort_key)
             for i in range(len(items) - 1):
-
-                cid1, pn1 = items[i]
-
-                cid2, pn2 = items[i + 1]
-
-                if pn1 is not None and pn2 is not None and abs(pn2 - pn1) <= 1:  # 相邻??                
-
-                    try:
-
-                        self._execute(conn, f"""
-
-                            MATCH (a:Chunk {{chunk_id: '{esc(cid1)}'}}), (b:Chunk {{chunk_id: '{esc(cid2)}'}})
-
-                            CREATE (a)-[:ADJACENT_TO {{source_page: {pn1}}}]->(b)
-
-                        """)
-
-                        created += 1
-
-                    except Exception as e:
-
-                        print(f"[GraphStore] ADJACENT_TO failed: {e}")
-
-
+                try:
+                    self._execute(conn, f"""
+                        MATCH (a:Chunk {{chunk_id: '{esc(items[i])}'}}), (b:Chunk {{chunk_id: '{esc(items[i+1])}'}})
+                        CREATE (a)-[:ADJACENT_TO]->(b)
+                    """)
+                    created += 1
+                except Exception as e:
+                    print(f"[GraphStore] ADJACENT_TO failed: {e}")
 
         print(f"[GraphStore] Created {created} ADJACENT_TO relations")
-
         return created
 
 
