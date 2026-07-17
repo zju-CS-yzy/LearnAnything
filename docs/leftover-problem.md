@@ -652,23 +652,18 @@
 - **优先级**: P1 → 延后处理
 
 #### LA-040-P0-QUIZ: Agent 出题流程回退到旧方式
-- **状态**: 🟡 **三次修复 + 调试追踪（2026-07-18），待验证**
-- **根因 1~4** (2026-07-17): KuzuDB 文件锁定、API 端点绕过 Coordinator、QuizAgent 未订阅消息总线、TutorAgent 未接入 P0
-- **根因 5** (2026-07-18): `QuizRequest` / `EvaluateStartRequest` 缺少 `user_id`
-- **根因 6** (2026-07-18): `_extract_topic_from_query` 主题提取失败（英文停用词）
-- **根因 7** (2026-07-18): `ConceptRetriever.resolve` 抛出 `ValueError`
-- **根因 8** (2026-07-18 已确认): 概念匹配过于严格 — `_match_fuzzy` 只做了单向包含，没做反向包含；大小写敏感（查询 "rag 技术" 不匹配概念 "RAG"）
-- **根因 9** (2026-07-18 已确认): `ConceptRetriever` 未传入 `vector_store`
-- **根因 10** (2026-07-18 已确认): `resolve` 返回空列表时无兜底策略
-- **修复 1~4** (2026-07-17): GraphStore 缓存、API 端点走 Coordinator、消息订阅、TutorAgent P0 接入
-- **修复 5~6** (2026-07-18): `user_id` 字段 + 主题提取正则重写
-- **修复 7** (2026-07-18): `resolve` 不再抛异常
-- **修复 8~10** (2026-07-18): 双向包含匹配、传入 `HybridRetriever` 作为 `vector_store`、PageRank Top-5 兜底
-- **调试追踪** (2026-07-18): 在 `resolve` / `_match_fuzzy` / `_search_by_embedding` / `search_by_embedding` 中添加了详细的打印，追踪每一步匹配结果
-- **验证结果** (2026-07-18 01:16): 修复后直接回退到 Top-5 兜底，改进点 1（双向匹配）和 2（语义检索）未体现。推测根因可能是大小写敏感（"rag 技术" vs "RAG"）或 vector_store metadata 中缺少 `canonical_id`
-- **待验证**: 重新测试出题，检查 `ConceptRetriever` 的调试打印，确认：
-  1. `_match_fuzzy` 的 Cypher 返回 0 时，case-insensitive Python 过滤是否匹配到概念
-  2. `search_by_embedding` 的 vector_store 返回结果中是否有 `canonical_id` metadata
-  3. 如果双向匹配和语义检索都生效，题目是否基于主题相关概念而非全局 Top-5
-- **优先级**: P0
+- **状态**: ✅ **已解决（2026-07-18 验证通过）**
+- **修复历史**:
+  - 修复1 (2026-07-17): KuzuDB 文件锁定、API 端点绕过 Coordinator、消息总线订阅、TutorAgent P0 接入
+  - 修复2 (2026-07-18): `QuizRequest` / `EvaluateStartRequest` 添加 `user_id` 字段
+  - 修复3 (2026-07-18): `_extract_topic_from_query` 正则重写，支持 "on {topic}" / "evaluate my {topic} level" 模式
+  - 修复4 (2026-07-18): `ConceptRetriever.resolve` 不再抛异常，添加 PageRank Top-5 兜底策略
+  - 修复5 (2026-07-18): `_match_fuzzy` 双向包含匹配 + case-insensitive Python 回退（关键修复：Cypher 大小写敏感导致 "rag 技术" 不匹配 "RAG"，Python 回退逻辑成功匹配）
+  - 修复6 (2026-07-18): `Coordinator._get_retriever` 传入 `HybridRetriever` 作为 `vector_store`，使 embedding 语义检索可用
+- **验证结果** (2026-07-18 01:27): 出题成功走 P0 流程，从 "RAG" 种子扩展出 11 节点 10 边，返回 RAG 相关题目
+- **日志**: `[Coordinator] 解析到 1 个种子概念` → `[Coordinator] 构建子图: 11 节点, 10 边` → `[Coordinator] 组装上下文: 910 tokens` → `[QuizAgent] P0-INT-2: 使用 P0 图谱上下文出题`
+- **改进建议（待实现）**:
+  1. `resolve` 当前只取 `nodes[0]`（Top-1），可改为返回所有模糊匹配结果，让前端/用户选择基于 Top-N 出题
+  2. 调试打印已生效，可后续清理或保留为 `logging.debug`
+- **优先级**: P0 → 已关闭
 
