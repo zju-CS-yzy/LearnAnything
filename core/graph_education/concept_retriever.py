@@ -68,24 +68,33 @@ class ConceptRetriever:
             if not name:
                 continue
 
+            print(f"[ConceptRetriever.resolve] ===== 解析概念: '{name}' =====")
+
             # 策略 1: 精确匹配
+            print(f"[ConceptRetriever.resolve] 尝试策略1: 精确匹配...")
             node = self._match_exact(name)
             if node:
+                print(f"[ConceptRetriever.resolve] 策略1 成功: 精确匹配到 '{node.name}'")
                 resolved.append(node)
                 continue
 
             # 策略 2: 模糊匹配（包含关系）
+            print(f"[ConceptRetriever.resolve] 尝试策略2: 模糊匹配...")
             nodes = self._match_fuzzy(name)
             if nodes:
+                print(f"[ConceptRetriever.resolve] 策略2 成功: 模糊匹配到 '{nodes[0].name}' (共{len(nodes)}个)")
                 resolved.append(nodes[0])  # 取最匹配的
                 continue
 
             # 策略 3: 别名匹配
+            print(f"[ConceptRetriever.resolve] 尝试策略3: 别名匹配...")
             node = self._match_alias(name)
             if node:
+                print(f"[ConceptRetriever.resolve] 策略3 成功: 别名匹配到 '{node.name}'")
                 resolved.append(node)
                 continue
 
+            print(f"[ConceptRetriever.resolve] 前3个策略全部失败，进入 embedding 回退")
             not_found.append(name)
 
         # 回退：对未找到的概念尝试 Embedding 语义检索
@@ -306,20 +315,19 @@ class ConceptRetriever:
 
     def search_by_embedding(self, query: str, top_k: int = 5) -> List[ConceptNode]:
         """
-        Embedding 语义检索
-
-        Args:
-            query: 查询文本
-            top_k: 返回数量
-
-        Returns:
-            List[ConceptNode]: 语义相似的概念
+        Embedding 语义检索（带调试打印）
         """
+        print(f"[ConceptRetriever.search_by_embedding] query='{query}', top_k={top_k}, vector_store={'已设置' if self.vector_store else '未设置'}")
         if not self.vector_store:
+            print(f"[ConceptRetriever.search_by_embedding] vector_store 为空，直接返回 []")
             return []
 
         # 使用 vector_store 查询
+        print(f"[ConceptRetriever.search_by_embedding] 调用 vector_store.query('{query}', n_results={top_k})...")
         results = self.vector_store.query(query, n_results=top_k)
+        print(f"[ConceptRetriever.search_by_embedding] vector_store 返回 {len(results)} 条结果")
+        for i, doc in enumerate(results[:3]):
+            print(f"  [{i}] {doc.get('text', 'N/A')[:40]}... metadata={doc.get('metadata', {})}")
 
         nodes = []
         for doc in results:
@@ -327,11 +335,26 @@ class ConceptRetriever:
             metadata = doc.get('metadata', {})
             canonical_id = metadata.get('canonical_id')
             if canonical_id:
+                print(f"[ConceptRetriever.search_by_embedding] 从 metadata 提取 canonical_id='{canonical_id}'")
                 node = self._load_node_by_id(canonical_id)
                 if node:
                     node.similarity_score = doc.get('score', 0.0)
+                    print(f"[ConceptRetriever.search_by_embedding] 加载成功: '{node.name}' (score={node.similarity_score})")
                     nodes.append(node)
+                else:
+                    print(f"[ConceptRetriever.search_by_embedding] canonical_id='{canonical_id}' 在图数据库中不存在")
+            else:
+                # 如果 metadata 没有 canonical_id，尝试从文本中提取
+                text = doc.get('text', '')
+                print(f"[ConceptRetriever.search_by_embedding] metadata 无 canonical_id，尝试从文本匹配: '{text[:40]}...'")
+                # 尝试用文本中的名称做模糊匹配
+                fuzzy_nodes = self._match_fuzzy(text)
+                if fuzzy_nodes:
+                    fuzzy_nodes[0].similarity_score = doc.get('score', 0.0)
+                    nodes.append(fuzzy_nodes[0])
+                    print(f"[ConceptRetriever.search_by_embedding] 文本模糊匹配成功: '{fuzzy_nodes[0].name}'")
 
+        print(f"[ConceptRetriever.search_by_embedding] 最终返回 {len(nodes)} 个 ConceptNode")
         return nodes
 
     # ───────────────────────────────────────────────
@@ -363,14 +386,18 @@ class ConceptRetriever:
 
     def _match_fuzzy(self, name: str) -> List[ConceptNode]:
         """
-        模糊匹配：双向包含关系。
+        模糊匹配：双向包含关系（不区分大小写）。
 
-        匹配规则：概念名包含查询词，或查询词包含概念名。
+        匹配规则：
+          1. 概念名（lower）包含查询词（lower），或查询词（lower）包含概念名（lower）
+          2. 查询词中的任一单词被概念名包含
         例如：查询 "RAG 技术" 会匹配概念名 "RAG"；查询 "RAG" 也会匹配概念名 "RAG 技术"。
         """
         conn = self.graph_store._ensure_db()
         safe_name = name.replace("'", "\\'")
+        name_lower = name.lower()
 
+        # P0-QUIZ-DEBUG: 打印 Cypher 查询
         cypher = f"""
             MATCH (c:CanonicalConcept)
             WHERE c.name CONTAINS '{safe_name}' OR '{safe_name}' CONTAINS c.name
@@ -378,16 +405,50 @@ class ConceptRetriever:
                    c.parent_hint, c.aliases, c.source_chunks
             LIMIT 10
         """
+        print(f"[ConceptRetriever._match_fuzzy] Cypher (case-sensitive): name='{name}'")
 
+        nodes = []
         try:
             result = self.graph_store._execute(conn, cypher)
-            nodes = []
             while result.has_next():
                 row = result.get_next()
                 nodes.append(self._row_to_node(row))
-            return nodes
+            print(f"[ConceptRetriever._match_fuzzy] Case-sensitive Cypher returned {len(nodes)} nodes")
         except Exception as e:
-            return []
+            print(f"[ConceptRetriever._match_fuzzy] Case-sensitive Cypher failed: {e}")
+
+        # 如果大小写敏感匹配失败，尝试全量加载 + Python 端大小写不敏感过滤
+        if not nodes:
+            print(f"[ConceptRetriever._match_fuzzy] Case-sensitive returned 0, trying case-insensitive Python filter")
+            all_concepts = self._get_all_concepts()
+            for c in all_concepts:
+                c_name_lower = c.name.lower()
+                # 双向包含（大小写不敏感）
+                if c_name_lower in name_lower or name_lower in c_name_lower:
+                    nodes.append(c)
+                    print(f"[ConceptRetriever._match_fuzzy]  Case-insensitive match: '{name}' <-> '{c.name}'")
+            # 如果双向包含没匹配到，尝试查询词中的每个单词被概念名包含
+            if not nodes:
+                words = [w for w in name_lower.split() if len(w) >= 2]
+                print(f"[ConceptRetriever._match_fuzzy]  Trying word-by-word matching with words={words}")
+                for c in all_concepts:
+                    c_name_lower = c.name.lower()
+                    for w in words:
+                        if w in c_name_lower:
+                            nodes.append(c)
+                            print(f"[ConceptRetriever._match_fuzzy]  Word match: word='{w}' in concept='{c.name}'")
+                            break
+
+        # 去重
+        seen = set()
+        unique_nodes = []
+        for n in nodes:
+            if n.canonical_id not in seen:
+                seen.add(n.canonical_id)
+                unique_nodes.append(n)
+
+        print(f"[ConceptRetriever._match_fuzzy] Final unique matches: {len(unique_nodes)}")
+        return unique_nodes
 
     def _match_alias(self, name: str) -> Optional[ConceptNode]:
         """别名匹配：aliases 字段包含"""
@@ -413,8 +474,13 @@ class ConceptRetriever:
         return None
 
     def _search_by_embedding(self, name: str) -> Optional[ConceptNode]:
-        """Embedding 回退搜索"""
+        """Embedding 回退搜索（带调试打印）"""
+        print(f"[ConceptRetriever._search_by_embedding] vector_store={'已设置' if self.vector_store else '未设置'}")
         nodes = self.search_by_embedding(name, top_k=3)
+        print(f"[ConceptRetriever._search_by_embedding] embedding search returned {len(nodes)} nodes for '{name}'")
+        if nodes:
+            for i, n in enumerate(nodes):
+                print(f"  [{i}] {n.name}: similarity={getattr(n, 'similarity_score', 'N/A')}")
         if nodes and nodes[0].similarity_score and nodes[0].similarity_score > 0.6:
             return nodes[0]
         return None
