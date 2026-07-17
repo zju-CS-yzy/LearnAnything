@@ -34,7 +34,7 @@ class Coordinator:
         result = coordinator.handle("给我出几道化学题")
     """
 
-    def __init__(self, collection_name: str = "learnanything_v1", top_k: int = 5, enabled_intents: List[str] = None):
+    def __init__(self, collection_name: str = "learnanything_v1", top_k: int = 5, enabled_intents: List[str] = None, graph_store=None):
         self.collection_name = collection_name
         self.top_k = top_k
         self.enabled_intents = enabled_intents or ["concept", "quiz", "job", "evaluate"]
@@ -42,20 +42,21 @@ class Coordinator:
         self._intent_router = IntentRouter()
         self._agents: Dict[str, BaseAgent] = {}
 
-        # P0-INT-6: 创建消息总线
+        # P0-INT-6: create message bus
         self._message_bus = MessageBus(enable_audit=True)
 
-        # 延迟初始化各 Agent（传入 message_bus）
+        # Lazy initialization of agents (pass message_bus)
         self._agents["concept"] = TutorAgent(collection_name=collection_name, top_k=top_k, message_bus=self._message_bus)
         self._agents["quiz"] = QuizAgent(collection_name=collection_name, top_k=top_k, message_bus=self._message_bus)
         self._agents["evaluate"] = CoachAgent(collection_name=collection_name, top_k=top_k, message_bus=self._message_bus)
         self._agents["job"] = HeadhunterAgent(message_bus=self._message_bus)
 
-        # P0-INT-6: 设置消息总线订阅
+        # P0-INT-6: set up message bus subscriptions
         self._setup_message_bus()
 
-        # P0-INT-1: 延迟初始化 P0 模块（避免立即连接数据库）
-        self._graph_store = None
+        # P0-INT-1: lazy initialization of P0 modules (avoid immediate database connection)
+        # P0-QUIZ-fix: support external shared GraphStore instance to avoid KuzuDB repeated connections / file locking
+        self._graph_store = graph_store
         self._retriever = None
         self._builder = None
         self._assembler = None

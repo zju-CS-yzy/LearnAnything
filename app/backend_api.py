@@ -53,7 +53,19 @@ from core.quiz_bank import (
     delete_question as qb_delete,
     get_stats as qb_stats,
 )
+from core.graph_store import GraphStore
 
+
+# ========== Global GraphStore cache (avoid KuzuDB repeated connections / file locking) ==========
+_graph_store_cache = {}  # subject -> GraphStore
+
+def get_graph_store(subject: str) -> GraphStore:
+    """Get or create shared GraphStore instance (P0-QUIZ-fix: avoid KuzuDB file locking)"""
+    key = f"{subject}_v1"
+    if key not in _graph_store_cache:
+        _graph_store_cache[key] = GraphStore(key)
+        print(f"[API] Created shared GraphStore for {key}")
+    return _graph_store_cache[key]
 
 
 # ========== 路径解析（兼容开发环境和 PyInstaller 打包环境） ==========
@@ -447,22 +459,30 @@ def ask_stream(request: AskRequest):
 @app.post("/api/quiz", response_model=QuizResponse)
 def generate_quiz(request: QuizRequest):
     """
-    出题接口。
+    Quiz API (P0-QUIZ-fix: use Coordinator + shared GraphStore).
 
-    基于知识库检索内容生成指定数量的题目。
+    Routes through Coordinator to enable P0 graph-education pipeline:
+    ConceptRetriever -> SubgraphBuilder -> ContextAssembler -> QuizAgent.
     """
-    quiz_agent = QuizAgent(
+    # P0-QUIZ-fix: use shared GraphStore to avoid KuzuDB file locking
+    graph_store = get_graph_store(request.subject)
+
+    coordinator = Coordinator(
         collection_name=f"{request.subject}_v1",
-        subject=request.subject,
         top_k=5,
-    )
-    result = quiz_agent.handle(
-        query=f"给我出{request.count}道{request.topic}题目",
-        n_questions=request.count,
+        graph_store=graph_store,  # shared GraphStore, avoids duplicate connections
     )
 
-    questions = result.get("questions", [])
-    # 转换为 Pydantic 模型
+    result = coordinator.handle(
+        query=f"give me {request.count} questions on {request.topic}",
+        user_id=request.user_id,
+    )
+
+    # Coordinator returns {"result": {"questions": [...], ...}}
+    agent_result = result.get("result", {})
+    questions = agent_result.get("questions", [])
+
+    # Convert to Pydantic model
     quiz_questions = [
         QuizQuestion(
             id=q.get("id", 0),
@@ -475,11 +495,11 @@ def generate_quiz(request: QuizRequest):
         for q in questions
     ]
 
-    subject_config = result.get("subject_config", {})
+    subject_config = agent_result.get("subject_config", {})
     return QuizResponse(
-        topic=result.get("topic", request.topic),
+        topic=agent_result.get("topic", request.topic),
         questions=quiz_questions,
-        subject_name=subject_config.get("name", "通用"),
+        subject_name=subject_config.get("name", "generic"),
         question_types=subject_config.get("question_types_used", ["single_choice", "short_answer"]),
     )
 
@@ -524,16 +544,19 @@ def start_evaluation(request: EvaluateStartRequest):
         )
 
         if gen_count > 0:
-            coach = CoachAgent(
+            # P0-QUIZ-fix: use Coordinator + shared GraphStore
+            graph_store = get_graph_store(request.subject)
+            coordinator = Coordinator(
                 collection_name=f"{request.subject}_v1",
-                subject=request.subject,
                 top_k=5,
+                graph_store=graph_store,
             )
-            quiz_result = coach.handle(
-                query=f"评测我的{request.topic}水平",
-                n_questions=gen_count,
+            result = coordinator.handle(
+                query=f"evaluate my {request.topic} level",
+                user_id=request.user_id,
             )
-            gen_questions = quiz_result.get("questions", [])
+            agent_result = result.get("result", {})
+            gen_questions = agent_result.get("questions", [])
         else:
             gen_questions = []
 
@@ -544,24 +567,26 @@ def start_evaluation(request: EvaluateStartRequest):
         instructions = f"本次评测包含 {len(bank_questions)} 道题库题目和 {len(gen_questions)} 道生成题目。"
 
     else:
-        # 默认：生成新题
-        coach = CoachAgent(
+        # Default: generate new questions (P0-QUIZ-fix: use Coordinator + shared GraphStore)
+        graph_store = get_graph_store(request.subject)
+        coordinator = Coordinator(
             collection_name=f"{request.subject}_v1",
-            subject=request.subject,
             top_k=5,
+            graph_store=graph_store,
         )
-        quiz_result = coach.handle(
-            query=f"评测我的{request.topic}水平",
-            n_questions=request.count,
+        result = coordinator.handle(
+            query=f"evaluate my {request.topic} level",
+            user_id=request.user_id,
         )
+        agent_result = result.get("result", {})
 
-        questions = quiz_result.get("questions", [])
+        questions = agent_result.get("questions", [])
         if not questions:
-            raise HTTPException(status_code=400, detail="无法生成评测题目，请确认知识库中已有材料")
+            raise HTTPException(status_code=400, detail="Cannot generate evaluation questions. Please verify knowledge base has materials.")
 
-        subject_config = quiz_result.get("subject_config", {})
-        subject_name = subject_config.get("name", "通用")
-        instructions = quiz_result.get("text", "").split("\n\n")[0] if quiz_result.get("text") else ""
+        subject_config = agent_result.get("subject_config", {})
+        subject_name = subject_config.get("name", "generic")
+        instructions = agent_result.get("text", "").split("\n\n")[0] if agent_result.get("text") else ""
 
     # 保存会话
     _eval_sessions[session_id] = {
