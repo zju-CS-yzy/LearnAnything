@@ -155,6 +155,7 @@ class QuizRequest(BaseModel):
     topic: str = Field(..., description="出题主题", min_length=1)
     subject: str = Field("generic", description="学科标识")
     count: int = Field(5, ge=1, le=20, description="题目数量")
+    user_id: Optional[str] = Field(None, description="用户ID（用于P0模块能力画像和自适应出题）")
 
 
 class QuizQuestion(BaseModel):
@@ -181,6 +182,7 @@ class EvaluateStartRequest(BaseModel):
     subject: str = Field("generic", description="学科标识")
     count: int = Field(5, ge=1, le=10, description="题目数量")
     mode: str = Field("generate", description="出题模式: generate(生成新题) / bank(从题库抽题) / mixed(混合)")
+    user_id: Optional[str] = Field(None, description="用户ID（用于P0模块能力画像）")
 
 class QuizBankQuestion(BaseModel):
     """题库题目"""

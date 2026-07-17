@@ -406,14 +406,16 @@ async function loadEdges() {
       return
     }
     const data = await resp.json()
-    const allEdges = (data.edges || []).map(edge => ({
-      data: {
-        id: `${edge.source}-${edge.type}-${edge.target}`,
-        source: edge.source,
-        target: edge.target,
-        type: edge.type,
-      }
-    }))
+    const allEdges = (data.edges || [])
+      .filter(edge => edge.type === 'BELONGS_TO')  // P30-FIX: 文档树只加载层级边，过滤同级顺序边
+      .map(edge => ({
+        data: {
+          id: `${edge.source}-${edge.type}-${edge.target}`,
+          source: edge.source,
+          target: edge.target,
+          type: edge.type,
+        }
+      }))
     if (allEdges.length > 0 && cy) {
       cy.add(allEdges)
     }

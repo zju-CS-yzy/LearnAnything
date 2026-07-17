@@ -342,26 +342,27 @@ function onImageError(e) {
 
 .tooltip-media-thumb {
   width: 100%;
-  aspect-ratio: 16 / 10;  /* LA-035-P28: 统一容器比例 */
   border-radius: 8px;
   overflow: hidden;
   background: var(--bg-hover, #f5f5f5);
   display: flex;
   align-items: center;
   justify-content: center;
+  max-height: 200px;  /* P28-FIX: 限制最大高度，但让宽度自适应 */
 }
 
-/* LA-035-P28: 单张图片时更大的显示区域 */
+/* P28-FIX: 单张图片时更大的显示区域，但高度自适应 */
 .tooltip-media-thumb.single {
-  aspect-ratio: 16 / 9;
-  max-height: 220px;
+  max-height: 260px;
 }
 
 .tooltip-media-thumb img {
-  width: 100%;
-  height: 100%;
-  object-fit: contain;  /* LA-035-P28: 保持比例，不裁剪 */
-  background: var(--bg-hover, #f5f5f5);
+  max-width: 100%;
+  max-height: 100%;
+  width: auto;        /* P28-FIX: 宽度自适应，保持原始比例 */
+  height: auto;       /* P28-FIX: 高度自适应 */
+  object-fit: contain;  /* P28-FIX: 保持比例，不裁剪 */
+  display: block;
 }
 
 .tooltip-media-placeholder {
