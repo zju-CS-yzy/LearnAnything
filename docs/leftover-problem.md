@@ -650,11 +650,14 @@
 - **状态**: 🟡 **已修复（待验证）**
 - **根因 1（2026-07-17 已确认）**: KuzuDB 文件锁定 — 后端服务运行时 Coordinator 创建新 GraphStore 被拒绝
 - **根因 2（2026-07-17 已确认）**: API 端点绕过 Coordinator — `/api/quiz` 和 `/api/evaluate/start` 直接调用 `QuizAgent`/`CoachAgent`，完全跳过 P0 流程（ConceptRetriever → SubgraphBuilder → ContextAssembler）
+- **根因 3（2026-07-17 已确认）**: QuizAgent 未订阅消息总线 — CoachAgent 评分后发布 `user_state`/`weak_area` 消息，但 QuizAgent 未订阅，无法自适应出题难度
 - **修复**:
   1. 全局 `GraphStore` 缓存：`_graph_store_cache = {}`，`get_graph_store(subject)` 返回共享实例，每个学科只创建一个 KuzuDB 连接
   2. `/api/quiz` 使用 `Coordinator` + 共享 `GraphStore`
   3. `/api/evaluate/start` (mixed/default 模式) 使用 `Coordinator` + 共享 `GraphStore`
   4. `Coordinator.__init__` 支持外部传入 `graph_store` 参数
-- **待验证**: 启动后端后，前端调用出题接口，检查日志是否有 `[Coordinator] P0-INT-1: using graph-education module` 或 `P0 pipeline: resolved X seed concepts` 等 P0 流程日志
+  5. QuizAgent 添加消息订阅：`_subscribe_to_message_bus()` → `on_ability_updated()` + `on_weak_area_detected()`
+  6. QuizAgent 自适应出题：`_theta_to_difficulty_hint()` 将 IRT theta 映射为难度提示，`_filter_context_by_weak_areas()` 优先从薄弱领域抽取上下文
+- **待验证**: 启动后端后，前端调用出题接口，检查日志是否有 `[Coordinator] P0-INT-1: using graph-education module` 或 `P0 pipeline: resolved X seed concepts` 等 P0 流程日志；检查 QuizAgent 是否收到 `ability_updated` / `weak_area_detected` 消息
 - **优先级**: P0
 
