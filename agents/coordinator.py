@@ -241,19 +241,44 @@ class Coordinator:
         return self._irt
 
     def _extract_topic_from_query(self, query: str) -> str:
-        """从查询中简单提取主题（去除常见出题关键词后取第一个有意义的短语）"""
-        # 去除常见出题关键词
+        """
+        从查询中提取主题关键词。
+
+        支持模式：
+          - "give me N questions on {topic}" -> {topic}
+          - "evaluate my {topic} level" -> {topic}
+          - "给我出 N 道 {topic} 题" -> {topic}
+          - "关于 {topic} 的 {num} 道 {action}" -> {topic}
+        """
+        import re
+        q = query.strip().lower()
+
+        # 模式 1: "... on/about/关于 {topic}"
+        m = re.search(r'(?:on|about|关于)\s+(.+?)(?:\s*$|\s+(?:的|question|题|quiz|test|exam|level))', q, re.IGNORECASE)
+        if m:
+            return m.group(1).strip()
+
+        # 模式 2: "evaluate my {topic} level"
+        m = re.search(r'evaluate\s+my\s+(.+?)\s+level', q, re.IGNORECASE)
+        if m:
+            return m.group(1).strip()
+
+        # 模式 3: 传统关键词过滤（去除常见出题/请求词）
         stop_words = [
             "出题", "题目", "面试题", "练习题", "测试题", "考题", "试题",
             "考我", "测试我", "考一下", "测一下", "做道题", "来道题",
             "给我", "出一道", "来一道", "来几题", "出几题", "给我出题",
             "关于", "的", "一下", "几道", "几题", "请", "帮我",
-            "quiz", "question", "exam", "test", "给我出", "帮我出",
+            "give me", "questions on", "question on", "quiz on",
+            "exam on", "test on", "evaluate my", "level",
+            "给我出", "帮我出",
         ]
         topic = query
         for w in stop_words:
-            topic = topic.replace(w, "")
+            topic = re.sub(r'\b' + re.escape(w) + r'\b', "", topic, flags=re.IGNORECASE)
+        topic = re.sub(r'\b\d+\s*(?:道|题|questions?|s)\b', "", topic, flags=re.IGNORECASE)  # 去除 "5 道" / "5 questions" / "5 s"
         topic = " ".join(topic.split()).strip()
+
         if not topic:
             topic = query
         return topic
