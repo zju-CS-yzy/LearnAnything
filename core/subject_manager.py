@@ -199,7 +199,7 @@ def list_subjects() -> List[Dict[str, Any]]:
 
 
 def delete_subject(subject_id: str) -> bool:
-    """删除学科（同时删除文件夹）"""
+    """删除学科（同时删除文件夹、图数据库、向量库、图片等）"""
     conn = _get_conn()
     try:
         conn.execute("DELETE FROM subject_documents WHERE subject_id = ?", (subject_id,))
@@ -211,11 +211,40 @@ def delete_subject(subject_id: str) -> bool:
         if subj_dir.exists():
             shutil.rmtree(subj_dir)
 
-        # 删除向量数据库
+        # 删除向量数据库（包括 wal/shm/journal 等附属文件）
         from config.settings import VECTOR_DB_DIR
         vec_db = VECTOR_DB_DIR / f"{subject_id}_v1.db"
         if vec_db.exists():
             vec_db.unlink()
+        # 删除 SQLite 附属文件
+        for suffix in ["-wal", "-shm", "-journal"]:
+            extra = vec_db.parent / f"{vec_db.name}{suffix}"
+            if extra.exists():
+                extra.unlink()
+
+        # LA-035-P29-fix: 删除 KuzuDB 图数据库
+        from config.settings import KNOWLEDGE_BASE_DIR
+        graph_db_dir = KNOWLEDGE_BASE_DIR / "graph_db"
+        graph_db_file = graph_db_dir / f"{subject_id}_v1_graph"
+        if graph_db_file.exists():
+            graph_db_file.unlink()
+            print(f"[SubjectDelete] Removed graph DB: {graph_db_file}")
+        # 删除 KuzuDB WAL 目录（如果有）
+        wal_dir = graph_db_dir / f"{subject_id}_v1_graph.wal"
+        if wal_dir.exists():
+            shutil.rmtree(wal_dir)
+            print(f"[SubjectDelete] Removed graph WAL: {wal_dir}")
+
+        # LA-035-P29-fix: 删除图片和缩略图目录
+        img_dir = KNOWLEDGE_BASE_DIR / f"{subject_id}_v1_images"
+        if img_dir.exists():
+            shutil.rmtree(img_dir)
+            print(f"[SubjectDelete] Removed images: {img_dir}")
+
+        thumb_dir = KNOWLEDGE_BASE_DIR / f"{subject_id}_v1_thumbnails"
+        if thumb_dir.exists():
+            shutil.rmtree(thumb_dir)
+            print(f"[SubjectDelete] Removed thumbnails: {thumb_dir}")
 
         return True
     except Exception as e:
