@@ -586,7 +586,7 @@
 ### 新增遗留问题（2026-07-17）
 
 #### LA-035-P27: 前端图片仍无法显示（RAG 学科重建后）
-- **状态**: 🟡 **后端修复完成，待前端验证**
+- **状态**: ✅ **已解决（2026-07-18 验证通过）**
 - **根因确认** (2026-07-17 更新):
   - Chunk 节点 `media_refs` 存储了 Windows 绝对路径（`D:\\MyCS\\...`），反斜杠在 JSON 中未转义，导致 `json.loads` 失败：`Invalid \escape`
   - `get_canonical_concepts` fallback 从 source_chunks 获取图片时，Chunk 的 `media_refs` 解析失败，返回空数组
@@ -602,17 +602,16 @@
   3. 图片正确显示（非空白/404）
 
 #### LA-035-P28: 节点悬浮窗图片自适应大小
-- **状态**: 🟡 **已修复（待验证）**
-- **问题描述**: 悬浮窗（GraphNodeTooltip.vue）中的图片被固定尺寸裁剪压缩，无法完整显示图片内容。
-- **修复** (2026-07-17):
-  1. `max-width` 从 340px 增大到 400px
-  2. 图片布局改为响应式网格：单张图片全宽 16:9（max-height 220px），多张图片 2 列 16:10
-  3. `object-fit: contain` 替代 `cover`，保持原始比例不裁剪
-  4. 添加 viewport 边界检测（右/下/上/左），防止 tooltip 超出屏幕
-  5. 添加 `max-height: 80vh` + `overflow-y: auto`，防止内容过多溢出
+- **状态**: 🟡 **二次修复（2026-07-18），待验证**
+- **问题描述**: 悬浮窗（GraphNodeTooltip.vue）中的图片被固定尺寸裁剪压缩，无法完整显示图片内容。首次修复使用 `aspect-ratio: 16/10` 强制容器比例，但用户反馈未成功实现。
+- **根因分析**: `aspect-ratio` 强制容器为固定比例，不适合所有图片（竖图、横图、正方形混用）。`width: 100%; height: 100%` 在容器内仍可能拉伸。
+- **二次修复** (2026-07-18):
+  1. 去掉 `.tooltip-media-thumb` 的 `aspect-ratio` 限制
+  2. 使用 `max-width: 100%; max-height: 100%; width: auto; height: auto` 让图片保持原始比例自适应
+  3. 容器使用 `max-height: 200px`（单张 260px）限制最大高度，防止图片过高
+  4. 保留 `object-fit: contain` 确保不裁剪
 - **修改文件**: `web-vue/src/components/graph/GraphNodeTooltip.vue`
-- **待验证**: 悬浮在带图片的节点上，检查图片是否完整显示、比例正确、不超出屏幕边界
-- **优先级**: P1
+- **待验证**: 悬浮在带图片的节点上，检查图片是否完整显示、原始比例是否保持、不裁剪不拉伸
 
 #### LA-035-P29: 删除学科后数据库未完全清除
 - **状态**: 🟡 **已修复（待验证）**
@@ -630,39 +629,44 @@
   2. 新学科的所有节点都是新创建的（无旧节点混入）
 - **优先级**: P1
 
-#### LA-035-P30: 文档树功能卡死
-- **状态**: 🟡 **已修复（待验证）**
-- **根因** (2026-07-17 更新): 不是节点数量问题，而是 BELONGS_TO / ADJACENT_TO 关系结构完全错误：
-  - BELONGS_TO 被误用于同级段落顺序（816 条 paragraph→paragraph），应仅用于层级归属
-  - ADJACENT_TO 混入跨层级关系（551 条 heading→paragraph），应仅用于同级顺序
+#### LA-035-P30: 文档树功能卡死 / 效果错乱
+- **状态**: 🟡 **二次修复（2026-07-18），待验证**
+- **根因 1（2026-07-17 已确认）**: BELONGS_TO / ADJACENT_TO 关系结构错误导致布局算法失败
+  - BELONGS_TO 被误用于同级段落顺序，ADJACENT_TO 混入跨层级关系
   - document 节点无出边，导致 167 个 heading 成为"伪根"
-  - `runTreeLayout` 假设严格树结构，面对混乱的图结构导致无限递归/位置冲突
-- **修复**:
-  1. 重写 `build_belongs_to_relations`：建立正确的层级结构（document→heading→paragraph/image_pseudo，heading→子heading）
-  2. 重写 `build_adjacent_relations`：仅连接同级 chunk（同一 heading 内的 paragraph→paragraph, image→image）
-  3. 删除旧数据所有错误边（1527 BELONGS_TO + 2221 ADJACENT_TO），重建为 564 BELONGS_TO + 216 ADJACENT_TO
-  4. 修复后结构：heading→paragraph 356, heading→heading 101, document→heading 82, heading→image_pseudo 25; paragraph→paragraph 215, image→image_pseudo 1
-  5. 根节点仅剩 5 document + 7 orphan paragraph（无 heading_path 归属）
-- **待验证**: 刷新前端切换到文档树视图，检查是否还卡死，布局是否正确（层次清晰，同级排列）
+- **根因 2（2026-07-18 新增）**: 文档树视图中加载了 ADJACENT_TO 边，导致长水平边线交叉；节点标签 30 字符过长互相重叠；节点间距太小
+- **首次修复** (2026-07-17):
+  1. 重写 `build_belongs_to_relations` / `build_adjacent_relations` 建立正确结构
+  2. 删除旧数据错误边，重建为 564 BELONGS_TO + 216 ADJACENT_TO
+  3. 根节点仅剩 5 document + 7 orphan paragraph
+- **二次修复** (2026-07-18):
+  1. `GraphView.vue` `loadEdges`: 过滤只加载 BELONGS_TO 边，排除 ADJACENT_TO（文档树视图不需要同级顺序边）
+  2. `GraphLayout.js` `runTreeLayout`: `layerWidth` 250→350, `nodeGap` 60→80, `treeGap` 120→150
+  3. `GraphLayout.js` `generateNodeLabel`: 标签截断从 30 字符缩短到 20 字符
+- **待验证**: 刷新前端切换到文档树视图，检查：
+  1. 无长水平边线（ADJACENT_TO 边已过滤）
+  2. 节点标签不重叠（间距增大 + 标签更短）
+  3. 层次清晰（document → heading → paragraph）
 - **优先级**: P1
 
 #### LA-040-P0-QUIZ: Agent 出题流程回退到旧方式
-- **状态**: 🟡 **已修复（待验证）**
+- **状态**: 🟡 **二次修复（2026-07-18），待验证**
 - **根因 1（2026-07-17 已确认）**: KuzuDB 文件锁定 — 后端服务运行时 Coordinator 创建新 GraphStore 被拒绝
-- **根因 2（2026-07-17 已确认）**: API 端点绕过 Coordinator — `/api/quiz` 和 `/api/evaluate/start` 直接调用 `QuizAgent`/`CoachAgent`，完全跳过 P0 流程（ConceptRetriever → SubgraphBuilder → ContextAssembler）
-- **根因 3（2026-07-17 已确认）**: QuizAgent 未订阅消息总线 — CoachAgent 评分后发布 `user_state`/`weak_area` 消息，但 QuizAgent 未订阅，无法自适应出题难度
-- **根因 4（2026-07-17 已确认）**: TutorAgent 未接入 P0 模块 — `/api/ask` 的 concept 意图只走传统 HybridRetriever，未使用知识图谱结构信息
-- **修复**:
-  1. 全局 `GraphStore` 缓存：`_graph_store_cache = {}`，`get_graph_store(subject)` 返回共享实例，每个学科只创建一个 KuzuDB 连接
-  2. `/api/quiz` 使用 `Coordinator` + 共享 `GraphStore`
-  3. `/api/evaluate/start` (mixed/default 模式) 使用 `Coordinator` + 共享 `GraphStore`
-  4. `Coordinator.__init__` 支持外部传入 `graph_store` 参数
-  5. QuizAgent 消息订阅：`_subscribe_to_message_bus()` → `on_ability_updated()` + `on_weak_area_detected()`
-  6. QuizAgent 自适应出题：`_theta_to_difficulty_hint()` + `_filter_context_by_weak_areas()`
-  7. TutorAgent P0 接入：`handle()` 接受 `graph_context` 参数，`_handle_with_graph_context()` 使用图谱上下文，`concept` 意图走 P0 流程
+- **根因 2（2026-07-17 已确认）**: API 端点绕过 Coordinator — `/api/quiz` 和 `/api/evaluate/start` 直接调用 `QuizAgent`/`CoachAgent`，完全跳过 P0 流程
+- **根因 3（2026-07-17 已确认）**: QuizAgent 未订阅消息总线 — CoachAgent 评分后发布消息，QuizAgent 未订阅
+- **根因 4（2026-07-17 已确认）**: TutorAgent 未接入 P0 模块 — `/api/ask` 的 concept 意图只走传统检索
+- **根因 5（2026-07-18 新增）**: `QuizRequest` / `EvaluateStartRequest` Pydantic 模型缺少 `user_id` 字段，导致 `request.user_id` 报错 `AttributeError`
+- **首次修复** (2026-07-17):
+  1. 全局 `GraphStore` 缓存避免 KuzuDB 文件锁定
+  2. `/api/quiz` 和 `/api/evaluate/start` 使用 `Coordinator` + 共享 `GraphStore`
+  3. QuizAgent 订阅消息总线（user_state, weak_area）
+  4. TutorAgent 接入 P0 模块（handle 接受 graph_context）
+- **二次修复** (2026-07-18):
+  1. `QuizRequest` 添加 `user_id: Optional[str] = None`
+  2. `EvaluateStartRequest` 添加 `user_id: Optional[str] = None`
 - **待验证**: 
-  1. 启动后端后，前端调用出题接口，检查日志是否有 `[Coordinator] P0-INT-1: using graph-education module` 或 `P0 pipeline: resolved X seed concepts` 等 P0 流程日志
-  2. 检查 QuizAgent 是否收到 `ability_updated` / `weak_area_detected` 消息
-  3. 前端聊天/提问，检查日志是否走 P0 流程（`concept` 意图应有子图构建日志）
+  1. 前端调用出题接口，检查是否 500 错误已消失，返回正常题目
+  2. 检查日志是否有 `P0-INT-1` 子图构建日志
+  3. 检查 QuizAgent 是否收到消息总线事件
 - **优先级**: P0
 
