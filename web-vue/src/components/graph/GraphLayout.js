@@ -14,14 +14,14 @@ export function generateNodeLabel(text, headingPath, fallback) {
   // 尝试提取 Markdown 标题
   const headerMatch = text.match(/^#+\s+(.+?)(?:\n|$)/m)
   if (headerMatch) {
-    return headerMatch[1].trim().slice(0, 30)
+    return headerMatch[1].trim().slice(0, 20)  // P30-FIX: 从 30 截短到 20，减少标签重叠
   }
 
   // 尝试提取 heading_path 中的最后一级
   if (headingPath) {
     const parts = headingPath.split('>').map(p => p.trim()).filter(Boolean)
     if (parts.length > 0) {
-      return parts[parts.length - 1].slice(0, 30)
+      return parts[parts.length - 1].slice(0, 20)  // P30-FIX: 从 30 截短到 20
     }
   }
 
@@ -31,8 +31,8 @@ export function generateNodeLabel(text, headingPath, fallback) {
     .replace(/\s+/g, ' ')
     .trim()
 
-  if (clean.length > 30) {
-    clean = clean.slice(0, 30) + '...'
+  if (clean.length > 20) {  // P30-FIX: 从 30 截短到 20
+    clean = clean.slice(0, 20) + '...'
   }
 
   return clean || fallback || '未知节点'
@@ -329,9 +329,9 @@ export function runTreeLayout(cy) {
     treeChildren[s].push(t)
   })
 
-  const layerWidth = 250
-  const nodeGap = 60
-  const treeGap = 120
+  const layerWidth = 350    // P30-FIX: 从 250 增大到 350，避免长标签重叠
+  const nodeGap = 80        // P30-FIX: 从 60 增大到 80，增加节点垂直间距
+  const treeGap = 150       // P30-FIX: 从 120 增大到 150，增加树间间距
 
   const subtreeHeight = {}
   function calcHeight(nodeId, visiting = new Set()) {
