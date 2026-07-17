@@ -602,7 +602,7 @@
   3. 图片正确显示（非空白/404）
 
 #### LA-035-P28: 节点悬浮窗图片自适应大小
-- **状态**: 🟡 **二次修复（2026-07-18），待验证**
+- **状态**: ✅ **已解决（2026-07-18 验证通过）**
 - **问题描述**: 悬浮窗（GraphNodeTooltip.vue）中的图片被固定尺寸裁剪压缩，无法完整显示图片内容。首次修复使用 `aspect-ratio: 16/10` 强制容器比例，但用户反馈未成功实现。
 - **根因分析**: `aspect-ratio` 强制容器为固定比例，不适合所有图片（竖图、横图、正方形混用）。`width: 100%; height: 100%` 在容器内仍可能拉伸。
 - **二次修复** (2026-07-18):
@@ -611,7 +611,8 @@
   3. 容器使用 `max-height: 200px`（单张 260px）限制最大高度，防止图片过高
   4. 保留 `object-fit: contain` 确保不裁剪
 - **修改文件**: `web-vue/src/components/graph/GraphNodeTooltip.vue`
-- **待验证**: 悬浮在带图片的节点上，检查图片是否完整显示、原始比例是否保持、不裁剪不拉伸
+- **验证结果**: 悬浮在带图片的节点上，图片完整显示、比例正确、不裁剪不拉伸
+- **优先级**: P1 → 已关闭
 
 #### LA-035-P29: 删除学科后数据库未完全清除
 - **状态**: 🟡 **已修复（待验证）**
@@ -630,24 +631,25 @@
 - **优先级**: P1
 
 #### LA-035-P30: 文档树功能卡死 / 效果错乱
-- **状态**: 🟡 **二次修复（2026-07-18），待验证**
+- **状态**: 🔴 **重新设计（2026-07-18）**
 - **根因 1（2026-07-17 已确认）**: BELONGS_TO / ADJACENT_TO 关系结构错误导致布局算法失败
   - BELONGS_TO 被误用于同级段落顺序，ADJACENT_TO 混入跨层级关系
   - document 节点无出边，导致 167 个 heading 成为"伪根"
-- **根因 2（2026-07-18 新增）**: 文档树视图中加载了 ADJACENT_TO 边，导致长水平边线交叉；节点标签 30 字符过长互相重叠；节点间距太小
-- **首次修复** (2026-07-17):
+- **根因 2（2026-07-18 已确认）**: 文档树视图中加载了 ADJACENT_TO 边，导致长水平边线交叉；节点标签 30 字符过长互相重叠；节点间距太小
+- **修复尝试 1** (2026-07-17):
   1. 重写 `build_belongs_to_relations` / `build_adjacent_relations` 建立正确结构
   2. 删除旧数据错误边，重建为 564 BELONGS_TO + 216 ADJACENT_TO
   3. 根节点仅剩 5 document + 7 orphan paragraph
-- **二次修复** (2026-07-18):
+- **修复尝试 2** (2026-07-18):
   1. `GraphView.vue` `loadEdges`: 过滤只加载 BELONGS_TO 边，排除 ADJACENT_TO（文档树视图不需要同级顺序边）
   2. `GraphLayout.js` `runTreeLayout`: `layerWidth` 250→350, `nodeGap` 60→80, `treeGap` 120→150
   3. `GraphLayout.js` `generateNodeLabel`: 标签截断从 30 字符缩短到 20 字符
-- **待验证**: 刷新前端切换到文档树视图，检查：
-  1. 无长水平边线（ADJACENT_TO 边已过滤）
-  2. 节点标签不重叠（间距增大 + 标签更短）
-  3. 层次清晰（document → heading → paragraph）
-- **优先级**: P1
+- **验证结果**: 2026-07-18 用户测试反馈："文档树视图和原先相比没变化" — 效果未改善，需要重新检查设计
+- **后续方向**: 需要重新审查文档树布局的整体设计，可能需要：
+  1. 检查前端是否正确切换视图（文档树 vs 知识图谱）
+  2. 检查后端 BELONGS_TO 边是否正确写入数据库
+  3. 重新设计文档树布局方案（dagre / 自定义 / 其他布局算法）
+- **优先级**: P1 → 延后处理
 
 #### LA-040-P0-QUIZ: Agent 出题流程回退到旧方式
 - **状态**: 🟡 **二次修复（2026-07-18），待验证**
@@ -655,18 +657,16 @@
 - **根因 2（2026-07-17 已确认）**: API 端点绕过 Coordinator — `/api/quiz` 和 `/api/evaluate/start` 直接调用 `QuizAgent`/`CoachAgent`，完全跳过 P0 流程
 - **根因 3（2026-07-17 已确认）**: QuizAgent 未订阅消息总线 — CoachAgent 评分后发布消息，QuizAgent 未订阅
 - **根因 4（2026-07-17 已确认）**: TutorAgent 未接入 P0 模块 — `/api/ask` 的 concept 意图只走传统检索
-- **根因 5（2026-07-18 新增）**: `QuizRequest` / `EvaluateStartRequest` Pydantic 模型缺少 `user_id` 字段，导致 `request.user_id` 报错 `AttributeError`
-- **首次修复** (2026-07-17):
-  1. 全局 `GraphStore` 缓存避免 KuzuDB 文件锁定
-  2. `/api/quiz` 和 `/api/evaluate/start` 使用 `Coordinator` + 共享 `GraphStore`
-  3. QuizAgent 订阅消息总线（user_state, weak_area）
-  4. TutorAgent 接入 P0 模块（handle 接受 graph_context）
-- **二次修复** (2026-07-18):
-  1. `QuizRequest` 添加 `user_id: Optional[str] = None`
-  2. `EvaluateStartRequest` 添加 `user_id: Optional[str] = None`
+- **根因 5（2026-07-18 已确认）**: `QuizRequest` / `EvaluateStartRequest` Pydantic 模型缺少 `user_id` 字段，导致 `request.user_id` 报错 `AttributeError`
+- **根因 6（2026-07-18 已确认）**: `_extract_topic_from_query` 主题提取失败 — 对英文出题请求"give me 5 questions on RAG 技术"提取出"give me 5 s on RAG 技术"（未去除英文停用词），导致 `ConceptRetriever.resolve` 找不到匹配概念
+- **根因 7（2026-07-18 已确认）**: `ConceptRetriever.resolve` 抛出 `ValueError` 当未找到匹配概念时，导致整个 P0 try 块崩溃，直接回退到旧模式
+- **修复 1** (2026-07-17): 全局 GraphStore 缓存、API 端点走 Coordinator、QuizAgent 消息订阅、TutorAgent P0 接入
+- **修复 2** (2026-07-18): `QuizRequest` / `EvaluateStartRequest` 添加 `user_id` 字段
+- **修复 3** (2026-07-18): 重写 `_extract_topic_from_query` — 使用正则提取 `on/about/关于 {topic}` 和 `evaluate my {topic} level` 模式，增加英文停用词，使用 `\b` 词边界匹配
+- **修复 4** (2026-07-18): `ConceptRetriever.resolve` 不再抛出 `ValueError`，返回空列表让 coordinator 自然回退
 - **待验证**: 
-  1. 前端调用出题接口，检查是否 500 错误已消失，返回正常题目
-  2. 检查日志是否有 `P0-INT-1` 子图构建日志
+  1. 前端调用出题接口，检查日志是否不再出现 `LA-0402001: 未找到匹配概念` 错误
+  2. 检查是否成功使用 P0 流程（`[Coordinator] 解析到 X 个种子概念` 日志）
   3. 检查 QuizAgent 是否收到消息总线事件
 - **优先级**: P0
 
