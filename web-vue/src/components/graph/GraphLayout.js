@@ -154,350 +154,87 @@ export function getTypeLabel(type) {
  * 5. 不同树共享子节点时，复制子节点到各自的树中
  */
 export function runTreeLayout(cy) {
-  // LA-035-P19: 支持 paragraph / heading / document / child / markdown / image / image_pseudo / formula_pseudo 所有 chunk 类型
+  // P30-FIX: 使用 dagre 布局替代自定义层次布局，与概念图谱保持一致风格
+  // 同时修复图片 chunk 被单独处理的问题（图片 chunk 有 parent_id，应包含在树中）
+
+  // 1. 找出所有 chunk 节点（包含图片 chunk，不单独排除）
   const chunkNodes = cy.nodes().filter(n => {
     const t = n.data('type')
     return t === 'child' || t === 'markdown' || t === 'image' || t === 'image_pseudo' || t === 'formula_pseudo' ||
            t === 'paragraph' || t === 'heading' || t === 'document'
   })
-  const chunkEdges = cy.edges().filter(e => {
-    const t = e.data('type')
-    return t === 'BELONGS_TO' || t === 'ADJACENT_TO'
-  })
 
   if (chunkNodes.length === 0) return
 
-  // P30-FIX: 大文档树性能保护 - 节点过多时使用简化网格布局
-  const MAX_CHUNK_NODES = 500
-  if (chunkNodes.length > MAX_CHUNK_NODES) {
-    console.warn(`[runTreeLayout] 文档节点过多 (${chunkNodes.length} > ${MAX_CHUNK_NODES})，使用简化网格布局避免卡死`)
-    const cols = Math.max(1, Math.ceil(Math.sqrt(chunkNodes.length)))
-    const gapX = 200
-    const gapY = 80
-    chunkNodes.forEach((node, idx) => {
+  console.log('[runTreeLayout] chunkNodes:', chunkNodes.length)
+  console.log('[runTreeLayout] 节点类型统计:', [...chunkNodes].map(n => n.data('type')).reduce((acc, t) => { acc[t] = (acc[t] || 0) + 1; return acc }, {}))
+
+  // 2. 分离树节点（有 parent_id 且 parent 存在）和孤立节点（parent 不存在）
+  const treeNodes = chunkNodes.filter(n => {
+    const parentId = n.data('parent_id')
+    if (!parentId) return true  // 没有 parent = 根节点
+    const parent = cy.getElementById(parentId)
+    return parent && parent.length > 0 && chunkNodes.has(parent)
+  })
+
+  const orphanNodes = chunkNodes.filter(n => {
+    const parentId = n.data('parent_id')
+    if (!parentId) return false  // 没有 parent = 根，不是孤立
+    const parent = cy.getElementById(parentId)
+    return !parent || parent.length === 0 || !chunkNodes.has(parent)
+  })
+
+  console.log('[runTreeLayout] treeNodes:', treeNodes.length, 'orphanNodes:', orphanNodes.length)
+  const docNodes = chunkNodes.filter(n => n.data('type') === 'document')
+  const rootDocs = treeNodes.filter(n => n.data('type') === 'document')
+  console.log('[runTreeLayout] Document节点:', docNodes.length, '作为树节点:', rootDocs.length)
+
+  // 3. 对树节点使用 dagre 布局（LR 从左到右，与概念图谱一致）
+  if (treeNodes.length > 0) {
+    treeNodes.layout({
+      name: 'dagre',
+      rankDir: 'LR',        // 从左到右，document 在左，paragraph 在右
+      rankSep: 100,         // 层间距（x 方向）
+      nodeSep: 20,          // 同一层节点间距（y 方向）
+      edgeSep: 10,          // 边间距
+      padding: 10,
+      fit: false,           // 不自动 fit，我们手动控制 zoom
+      animate: false,
+    }).run()
+  }
+
+  // 4. 孤立节点放右侧网格（不与树重叠）
+  if (orphanNodes.length > 0) {
+    const treeBBox = treeNodes.boundingBox()
+    const maxTreeWidth = treeBBox ? treeBBox.w : 0
+    const cols = Math.max(1, Math.ceil(Math.sqrt(orphanNodes.length)))
+    const gapX = 100
+    const gapY = 30
+    orphanNodes.forEach((node, idx) => {
       node.position({
-        x: (idx % cols) * gapX,
+        x: maxTreeWidth + 200 + (idx % cols) * gapX,
         y: Math.floor(idx / cols) * gapY,
       })
     })
-    // 边简化为直线
-    chunkEdges.forEach(e => e.style('curve-style', 'straight'))
-    return
   }
 
-  // 1. 构建子节点映射和父节点映射
-  const childrenMap = {}
-  const parentMap = {}
-  chunkEdges.forEach(e => {
-    const s = e.source().id()
-    const t = e.target().id()
-    childrenMap[s] = childrenMap[s] || []
-    childrenMap[s].push(t)
-    parentMap[t] = parentMap[t] || []
-    parentMap[t].push(s)
-  })
+  // 5. 手动 fit：所有节点（树 + 孤立）适应容器
+  const allNodes = treeNodes.union(orphanNodes)
+  const bbox = allNodes.boundingBox()
+  const container = cy.container()
+  const containerW = container.clientWidth
+  const containerH = container.clientHeight
 
-  // 2. 找到所有根节点（入度为0）
-  const rootIds = []
-  chunkNodes.forEach(n => {
-    const nid = n.id()
-    if (!parentMap[nid] || parentMap[nid].length === 0) {
-      rootIds.push(nid)
-    }
-  })
-
-  // P19-FIX-2: 收集所有从根可达的节点（用于识别孤立节点）
-  const treeReachable = new Set()
-  rootIds.forEach(rootId => {
-    const stack = [rootId]
-    while (stack.length > 0) {
-      const nid = stack.pop()
-      if (treeReachable.has(nid)) continue
-      treeReachable.add(nid)
-      const children = childrenMap[nid] || []
-      children.forEach(cid => stack.push(cid))
-    }
-  })
-
-  // P19-FIX-2: 孤立节点 = 在 chunkNodes 中但不可从任何根到达
-  // 这些节点也视为单节点树，排在最下方
-  const orphanIds = []
-  chunkNodes.forEach(n => {
-    const nid = n.id()
-    if (!treeReachable.has(nid)) {
-      orphanIds.push(nid)
-    }
-  })
-
-  // 合并根节点和孤立节点
-  const allRootIds = [...rootIds, ...orphanIds]
-
-  // P19-FIX-2: 按树大小排序（大节点多的树排在上面，孤立节点排在最后）
-  const treeSizeMap = {}
-  allRootIds.forEach(rootId => {
-    const visited = new Set()
-    const stack = [rootId]
-    while (stack.length > 0) {
-      const nid = stack.pop()
-      if (visited.has(nid)) continue
-      visited.add(nid)
-      const children = childrenMap[nid] || []
-      children.forEach(cid => stack.push(cid))
-    }
-    treeSizeMap[rootId] = visited.size
-  })
-
-  allRootIds.sort((a, b) => treeSizeMap[b] - treeSizeMap[a])
-
-  console.log('[runTreeLayout] 根节点数:', rootIds.length, '孤立节点数:', orphanIds.length, '总树数:', allRootIds.length)
-  console.log('[runTreeLayout] 节点类型统计:', [...chunkNodes].map(n => n.data('type')).reduce((acc, t) => { acc[t] = (acc[t] || 0) + 1; return acc }, {}))
-  // P30-DEBUG: document 节点统计
-  const docNodes = chunkNodes.filter(n => n.data('type') === 'document')
-  const rootDocs = rootIds.filter(id => docNodes.some(n => n.id() === id))
-  console.log('[runTreeLayout] Document节点:', docNodes.length, '作为根:', rootDocs.length, 'IDs:', docNodes.map(n => n.id()))
-  if (orphanIds.length > 0) {
-    console.log('[runTreeLayout] 孤立节点:', orphanIds)
+  let zoom = 0.5
+  if (bbox.w > 0 && bbox.h > 0) {
+    zoom = Math.min(containerH * 0.8 / bbox.h, containerW * 0.8 / bbox.w, 0.5)
+    zoom = Math.max(zoom, 0.15)
   }
+  cy.zoom(zoom)
+  cy.pan({ x: containerW * 0.05, y: containerH * 0.05 })
 
-  // 3. 复制共享子节点（入度 > 1 的节点）
-  cy.nodes('[isCopy = 1]').remove()
-  cy.edges('[isCopyEdge = 1]').remove()
-
-  const copyNodes = []
-  const copyEdges = []
-  const originalToCopies = {}
-
-  // P19-FIX-2: 使用排序后的 allRootIds（替代原来的 rootIds）
-  allRootIds.forEach((rootId, treeIdx) => {
-    const visitedInTree = new Set()
-    const stack = [{ originalId: rootId, parentTreeNodeId: null }]
-
-    while (stack.length > 0) {
-      const { originalId, parentTreeNodeId } = stack.pop()
-
-      let treeNodeId
-      if (visitedInTree.has(originalId)) {
-        if (!originalToCopies[originalId]) {
-          originalToCopies[originalId] = {}
-        }
-        if (!originalToCopies[originalId][treeIdx]) {
-          const copyId = `${originalId}_tree${treeIdx}`
-          originalToCopies[originalId][treeIdx] = copyId
-
-          const origNode = cy.getElementById(originalId)
-          copyNodes.push({
-            data: {
-              id: copyId,
-              label: origNode.data('label'),
-              type: origNode.data('type'),
-              source: origNode.data('source'),
-              page_number: origNode.data('page_number'),
-              text: origNode.data('text'),
-              heading_path: origNode.data('heading_path'),
-              media_refs: origNode.data('media_refs'), // LA-035-P24: 修复副本媒体数据缺失
-              image_path: origNode.data('image_path'), // LA-035-P24
-              thumbnail_path: origNode.data('thumbnail_path'), // LA-035-P24
-              width: origNode.data('width'), // LA-035-P24
-              height: origNode.data('height'), // LA-035-P24
-              originalId: originalId,
-              isCopy: 1,
-            }
-          })
-        }
-        treeNodeId = originalToCopies[originalId][treeIdx]
-      } else {
-        treeNodeId = originalId
-        visitedInTree.add(originalId)
-      }
-
-      if (parentTreeNodeId) {
-        copyEdges.push({
-          data: {
-            id: `${parentTreeNodeId}_to_${treeNodeId}`,
-            source: parentTreeNodeId,
-            target: treeNodeId,
-            type: 'BELONGS_TO',
-            isCopyEdge: visitedInTree.has(originalId) && originalId !== treeNodeId ? 1 : 0,
-          }
-        })
-      }
-
-      const childIds = childrenMap[originalId] || []
-      for (let i = childIds.length - 1; i >= 0; i--) {
-        stack.push({ originalId: childIds[i], parentTreeNodeId: treeNodeId })
-      }
-    }
-  })
-
-  if (copyNodes.length > 0) cy.add(copyNodes)
-  if (copyEdges.length > 0) cy.add(copyEdges)
-
-  // 存储副本映射用于高亮
-  cy.scratch('originalToCopies', originalToCopies)
-
-  // 4. 计算布局位置
-  const treeChildren = {}
-  chunkEdges.forEach(e => {
-    const s = e.source().id()
-    const t = e.target().id()
-    treeChildren[s] = treeChildren[s] || []
-    treeChildren[s].push(t)
-  })
-  copyEdges.forEach(e => {
-    const s = e.data.source
-    const t = e.data.target
-    treeChildren[s] = treeChildren[s] || []
-    treeChildren[s].push(t)
-  })
-
-  const layerWidth = 200    // P30-FIX-2: 从 350 减小到 200，减少水平间距
-  const nodeGap = 30        // P30-FIX-2: 从 80 减小到 30，减少节点垂直间距
-  const treeGap = 80        // P30-FIX-2: 从 150 减小到 80，减少树间间距
-
-  const subtreeHeight = {}
-  function calcHeight(nodeId, visiting = new Set()) {
-    // 循环引用保护：如果正在访问此节点，返回1避免无限递归
-    if (visiting.has(nodeId)) {
-      console.warn(`[runTreeLayout] Circular reference detected at ${nodeId}`)
-      return 1
-    }
-    if (subtreeHeight[nodeId] !== undefined) return subtreeHeight[nodeId]
-    const children = treeChildren[nodeId] || []
-    if (children.length === 0) {
-      subtreeHeight[nodeId] = 1
-      return 1
-    }
-    visiting.add(nodeId)
-    const count = children.reduce((sum, cid) => sum + calcHeight(cid, visiting), 0)
-    visiting.delete(nodeId)
-    subtreeHeight[nodeId] = count
-    return count
-  }
-
-  const positions = {}
-  function assignPos(nodeId, depth, startY, visiting = new Set()) {
-    // 循环引用保护
-    if (visiting.has(nodeId)) {
-      positions[nodeId] = { x: depth * layerWidth, y: startY }
-      return startY + nodeGap
-    }
-    visiting.add(nodeId)
-
-    const x = depth * layerWidth
-    const children = treeChildren[nodeId] || []
-
-    if (children.length === 0) {
-      positions[nodeId] = { x, y: startY }
-      visiting.delete(nodeId)
-      return startY + nodeGap
-    }
-
-    let currentY = startY
-    const childCenters = []
-
-    children.forEach(childId => {
-      const childEndY = assignPos(childId, depth + 1, currentY, visiting)
-      childCenters.push((currentY + childEndY - nodeGap) / 2)
-      currentY = childEndY
-    })
-
-    const firstY = childCenters[0]
-    const lastY = childCenters[childCenters.length - 1]
-    positions[nodeId] = { x, y: (firstY + lastY) / 2 }
-
-    visiting.delete(nodeId)
-    return currentY
-  }
-
-  let currentY = 0
-  // P19-FIX-2: 使用排序后的 allRootIds（替代原来的 rootIds）
-  allRootIds.forEach((rootId, treeIdx) => {
-    let treeRootId = rootId
-    if (originalToCopies[rootId] && originalToCopies[rootId][treeIdx]) {
-      treeRootId = originalToCopies[rootId][treeIdx]
-    }
-
-    const treeHeight = calcHeight(treeRootId) * nodeGap
-    assignPos(treeRootId, 0, currentY)
-    currentY += treeHeight + treeGap
-  })
-
-  // 5. 应用位置
-  Object.entries(positions).forEach(([nodeId, pos]) => {
-    const node = cy.getElementById(nodeId)
-    if (node.length > 0) {
-      node.position(pos)
-    }
-  })
-
-  // 5.5 为图片节点安排位置（放在所有文本树的右侧）
-  // P30-FIX: 兼容 image_pseudo 和 formula_pseudo 类型
-  const imageNodes = cy.nodes().filter(n => {
-    const t = n.data('type')
-    return t === 'image' || t === 'image_pseudo' || t === 'formula_pseudo'
-  })
-  if (imageNodes.length > 0) {
-    // 计算文本树的最右边界
-    let maxTreeX = 0
-    Object.values(positions).forEach(pos => {
-      maxTreeX = Math.max(maxTreeX, pos.x)
-    })
-    const imageStartX = maxTreeX + 250  // 在文本树右侧留 250px 间距
-    const imageGap = 80
-
-    imageNodes.forEach((imgNode, idx) => {
-      imgNode.position({
-        x: imageStartX,
-        y: 50 + idx * imageGap,
-      })
-    })
-  }
-
-  // 6. 适应视图
-  const allNodes = cy.nodes().filter(n => {
-    const t = n.data('type')
-    return t === 'child' || t === 'markdown' || t === 'image' || t === 'image_pseudo' || t === 'formula_pseudo' ||
-           t === 'paragraph' || t === 'heading' || t === 'document' ||
-           n.data('isCopy') === 1
-  })
-
-  if (allNodes.length > 0) {
-    const bbox = allNodes.boundingBox()
-    const container = cy.container()
-    const containerW = container.clientWidth || 800
-    const containerH = container.clientHeight || 600
-
-    // 防止 bbox 为 0 导致 zoom 为 Infinity
-    const bboxW = Math.max(bbox.w, 1)
-    const bboxH = Math.max(bbox.h, 1)
-
-    const zoomByWidth = (containerW * 0.9) / bboxW
-    const zoomByHeight = (containerH * 0.8) / bboxH
-    const zoom = Math.min(zoomByWidth, zoomByHeight, 1.0)
-
-    const finalZoom = Math.max(zoom, 0.1)
-    if (isFinite(finalZoom)) {
-      cy.zoom(finalZoom)
-      cy.pan({ x: 30, y: 30 })
-    } else {
-      console.warn('[runTreeLayout] Invalid zoom calculated, using default', { zoom, bboxW, bboxH, containerW, containerH })
-      cy.zoom(0.5)
-      cy.pan({ x: 30, y: 30 })
-    }
-  } else {
-    console.warn('[runTreeLayout] No nodes to layout')
-  }
-
-  // 动态调整边曲率：根据源节点和目标节点的相对 y 位置
-  adjustEdgeCurvature(cy)
+  console.log(`[runTreeLayout] dagre 布局完成，zoom=${zoom.toFixed(2)}，bbox=${JSON.stringify({w: Math.round(bbox.w), h: Math.round(bbox.h)})}`)
 }
-
-/**
- * 根据源节点和目标节点的相对 y 位置动态调整边曲率方向
- * - 目标更高（target.y < source.y）：向上凸（distance < 0）
- * - 目标更低（target.y > source.y）：向下凸（distance > 0）
- * - 大致相平：直线（distance = 0）
- */
 function adjustEdgeCurvature(cy) {
   const THRESHOLD = 5  // y 差值阈值，小于此值视为相平
   const DISTANCE = 40  // 曲率幅度
