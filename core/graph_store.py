@@ -214,6 +214,24 @@ class GraphStore:
 
         return self._conn
 
+    def delete_all(self):
+        """
+        删除整个 KùzuDB 数据库目录（所有数据和 Schema）。
+        用于学科删除时清理图数据库。等价于 init_schema(force=True)。
+        """
+        import shutil
+        with _db_cache_lock:
+            if self.db_path_str in _db_cache:
+                del _db_cache[self.db_path_str]
+        self._db = None
+        self._conn = None
+        if self.db_path.exists():
+            if self.db_path.is_dir():
+                shutil.rmtree(self.db_path)
+            else:
+                self.db_path.unlink()
+        print(f"[GraphStore] 已删除数据库: {self.db_path_str}")
+
 
 
     def _execute(self, conn, cypher):
