@@ -251,6 +251,10 @@ export function runTreeLayout(cy) {
 
   console.log('[runTreeLayout] 根节点数:', rootIds.length, '孤立节点数:', orphanIds.length, '总树数:', allRootIds.length)
   console.log('[runTreeLayout] 节点类型统计:', [...chunkNodes].map(n => n.data('type')).reduce((acc, t) => { acc[t] = (acc[t] || 0) + 1; return acc }, {}))
+  // P30-DEBUG: document 节点统计
+  const docNodes = chunkNodes.filter(n => n.data('type') === 'document')
+  const rootDocs = rootIds.filter(id => docNodes.some(n => n.id() === id))
+  console.log('[runTreeLayout] Document节点:', docNodes.length, '作为根:', rootDocs.length, 'IDs:', docNodes.map(n => n.id()))
   if (orphanIds.length > 0) {
     console.log('[runTreeLayout] 孤立节点:', orphanIds)
   }
@@ -346,9 +350,9 @@ export function runTreeLayout(cy) {
     treeChildren[s].push(t)
   })
 
-  const layerWidth = 350    // P30-FIX: 从 250 增大到 350，避免长标签重叠
-  const nodeGap = 80        // P30-FIX: 从 60 增大到 80，增加节点垂直间距
-  const treeGap = 150       // P30-FIX: 从 120 增大到 150，增加树间间距
+  const layerWidth = 200    // P30-FIX-2: 从 350 减小到 200，减少水平间距
+  const nodeGap = 30        // P30-FIX-2: 从 80 减小到 30，减少节点垂直间距
+  const treeGap = 80        // P30-FIX-2: 从 150 减小到 80，减少树间间距
 
   const subtreeHeight = {}
   function calcHeight(nodeId, visiting = new Set()) {
