@@ -202,7 +202,9 @@ def delete_subject(subject_id: str) -> bool:
     """删除学科（同时删除文件夹、图数据库、向量库、图片等）"""
     conn = _get_conn()
     try:
-        conn.execute("DELETE FROM subject_documents WHERE subject_id = ?", (subject_id,))
+        cursor = conn.execute("DELETE FROM subject_documents WHERE subject_id = ?", (subject_id,))
+        deleted_docs = cursor.rowcount
+        print(f"[SubjectDelete] 删除 {deleted_docs} 条 subject_documents 记录")
         conn.execute("DELETE FROM subjects WHERE id = ?", (subject_id,))
         conn.commit()
 
@@ -210,17 +212,20 @@ def delete_subject(subject_id: str) -> bool:
         subj_dir = get_subject_dir(subject_id)
         if subj_dir.exists():
             shutil.rmtree(subj_dir)
+            print(f"[SubjectDelete] 删除学科文件夹: {subj_dir}")
 
         # 删除向量数据库（包括 wal/shm/journal 等附属文件）
         from config.settings import VECTOR_DB_DIR
         vec_db = VECTOR_DB_DIR / f"{subject_id}_v1.db"
         if vec_db.exists():
             vec_db.unlink()
+            print(f"[SubjectDelete] 删除向量数据库: {vec_db}")
         # 删除 SQLite 附属文件
         for suffix in ["-wal", "-shm", "-journal"]:
             extra = vec_db.parent / f"{vec_db.name}{suffix}"
             if extra.exists():
                 extra.unlink()
+                print(f"[SubjectDelete] 删除向量数据库附属文件: {extra}")
 
         # LA-035-P29-fix: 使用 GraphStore.delete_all() 正确清理 KuzuDB（含全局缓存）
         try:
@@ -236,20 +241,22 @@ def delete_subject(subject_id: str) -> bool:
             graph_db_file = graph_db_dir / f"{subject_id}_v1_graph"
             if graph_db_file.exists():
                 graph_db_file.unlink()
+                print(f"[SubjectDelete] 手动删除图数据库: {graph_db_file}")
             wal_dir = graph_db_dir / f"{subject_id}_v1_graph.wal"
             if wal_dir.exists():
                 shutil.rmtree(wal_dir)
+                print(f"[SubjectDelete] 手动删除图数据库 WAL: {wal_dir}")
 
         # LA-035-P29-fix: 删除图片和缩略图目录
         img_dir = KNOWLEDGE_BASE_DIR / f"{subject_id}_v1_images"
         if img_dir.exists():
             shutil.rmtree(img_dir)
-            print(f"[SubjectDelete] Removed images: {img_dir}")
+            print(f"[SubjectDelete] 删除图片目录: {img_dir}")
 
         thumb_dir = KNOWLEDGE_BASE_DIR / f"{subject_id}_v1_thumbnails"
         if thumb_dir.exists():
             shutil.rmtree(thumb_dir)
-            print(f"[SubjectDelete] Removed thumbnails: {thumb_dir}")
+            print(f"[SubjectDelete] 删除缩略图目录: {thumb_dir}")
 
         return True
     except Exception as e:
