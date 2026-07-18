@@ -363,9 +363,9 @@ async function loadAllNodes() {
 
 async function loadChunkNodes() {
   try {
-    // P30-FIX: limit 从 500 增大到 1000，避免大文档 chunk 节点被截断
+    // P30-FIX: limit 从 500 增大到 5000，避免大文档 chunk 节点被截断
     const resp = await fetch(
-      `${window.location.origin}/api/knowledge-graph/${currentSubject.value}/nodes?limit=1000`
+      `${window.location.origin}/api/knowledge-graph/${currentSubject.value}/nodes?limit=5000`
     )
     if (!resp.ok) {
       console.warn('[GraphView] Nodes API failed:', resp.status)
@@ -399,9 +399,9 @@ async function loadChunkNodes() {
 
 async function loadEdges() {
   try {
-    // P30-FIX: limit 从 200 增大到 1000，避免 BELONGS_TO 边被截断
+    // P30-FIX: limit 从 200 增大到 5000，避免 BELONGS_TO 边被截断
     const resp = await fetch(
-      `${window.location.origin}/api/knowledge-graph/${currentSubject.value}/edges?limit=1000`
+      `${window.location.origin}/api/knowledge-graph/${currentSubject.value}/edges?limit=5000`
     )
     if (!resp.ok) {
       console.warn('[GraphView] Edges API failed:', resp.status)

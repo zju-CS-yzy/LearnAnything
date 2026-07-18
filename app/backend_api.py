@@ -1184,10 +1184,10 @@ def get_graph_stats(subject: str):
 
 
 @app.get("/api/knowledge-graph/{subject}/nodes")
-def list_graph_nodes(subject: str, limit: int = 1000):
+def list_graph_nodes(subject: str, limit: int = 5000):
     """
     获取图谱中的 Chunk 节点（用于前端全局浏览，排除 parent 节点）。
-    P30-FIX: 默认 limit 从 500 增大到 1000，避免大文档 chunk 节点被截断
+    P30-FIX: 默认 limit 从 500 增大到 5000，避免大文档 chunk 节点被截断
     """
     from core.graph_store import GraphStore
 
@@ -1243,14 +1243,15 @@ def list_graph_nodes(subject: str, limit: int = 1000):
 
 
 @app.get("/api/knowledge-graph/{subject}/edges")
-def list_graph_edges(subject: str, limit: int = 200):
+def list_graph_edges(subject: str, limit: int = 5000):
     """
     获取 Chunk 节点之间的边（排除 parent 节点相关的边）。
+    P30-FIX-2: limit 从 200 增大到 5000，避免大量 BELONGS_TO 边被截断
     """
     from core.graph_store import GraphStore
 
     # 限制最大返回数量，防止性能问题
-    limit = max(1, min(limit, 1000))
+    limit = max(1, min(limit, 5000))
 
     try:
         store = GraphStore(f"{subject}_v1")
