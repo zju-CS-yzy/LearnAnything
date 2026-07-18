@@ -651,6 +651,72 @@
   3. 重新设计文档树布局方案（dagre / 自定义 / 其他布局算法）
 - **优先级**: P1 → 延后处理
 
+---
+
+## 2026-07-18 更新（P30 文档树问题深度修复）
+
+### 🔴 根因分析（基于用户反馈）
+
+用户反馈的三大问题：
+1. **paragraph 和 heading 没有明显区分** — 所有 chunk 节点使用相同的 Cytoscape 样式
+2. **heading 包含被截断的 JSON 内容** — `generateNodeLabel` 未过滤 JSON 代码块，导致标签显示异常
+3. **heading 层级判断和 BELONGS_TO 算法可能有误** — 怀疑 `build_belongs_to_relations` 中层级关系判断不正确
+
+### 修复内容
+
+#### 修复1: 前端样式区分（P30-1）
+- **文件**: `web-vue/src/components/graph/GraphStyles.js`
+- **修改**: 添加 heading/paragraph/document 三种 chunk 类型的独立样式
+  - Heading: 圆角矩形、红色、90x36px
+  - Paragraph: 椭圆、蓝色、50x30px
+  - Document: 矩形、绿色、100x40px
+- **效果**: 文档树中不同类型节点一目了然
+
+#### 修复2: 边查询 LIMIT 截断（P30-2）
+- **文件**: `app/backend_api.py` `list_graph_edges`
+- **问题**: 硬编码 `LIMIT 100`，当 BELONGS_TO 边超过 100 时（如 RAG 学科 564 条），82% 的边被截断，导致大量节点断开连接
+- **修改**: 去掉硬编码 LIMIT，使用参数 `limit`（默认 500，最大 2000）
+- **文件**: `web-vue/src/components/graph/GraphView.vue` `loadEdges`
+- **修改**: limit 从 200 → 1000
+
+#### 修复3: 节点查询 LIMIT 截断（P30-3）
+- **文件**: `app/backend_api.py` `list_graph_nodes`
+- **修改**: 默认 limit 从 500 → 1000
+- **文件**: `web-vue/src/components/graph/GraphView.vue` `loadChunkNodes`
+- **修改**: limit 从 500 → 1000
+
+#### 修复4: chunk_type 不匹配（P30-4）
+- **问题**: `image_pseudo` / `formula_pseudo` 类型节点未被文档树布局识别
+- **修改**:
+  - `backend_api.py` `list_graph_nodes`: 图片字段条件从 `row[4] == 'image'` 放宽为 `in ('image', 'image_pseudo', 'formula_pseudo')`
+  - `GraphLayout.js` `runTreeLayout`: 兼容 `image_pseudo` 和 `formula_pseudo` 类型（5 处过滤）
+  - `GraphStyles.js`: 图片节点样式选择器兼容 `image_pseudo` 和 `formula_pseudo`
+
+#### 修复5: 大文档树触发简化网格（P30-5）
+- **问题**: `MAX_CHUNK_NODES = 200` 导致大文档树强制使用网格布局而非树形布局
+- **修改**: `MAX_CHUNK_NODES` 从 200 → 500
+
+#### 修复6: JSON 内容过滤（P30-6）
+- **文件**: `web-vue/src/components/graph/GraphLayout.js` `generateNodeLabel`
+- **修改**:
+  - 如果 text 以 JSON 开头（`{` 或 `[`），优先使用 `headingPath` 或 `fallback` 生成标签
+  - 清理逻辑增加代码块、图片引用、表格行过滤
+  - 避免 JSON 代码块被截断后显示为乱码标签
+
+### 待验证（用户回家后测试）
+1. 清除 Vite 缓存 + 浏览器缓存（`Ctrl+Shift+R`）
+2. 切换到文档树视图，检查节点类型是否区分（颜色/形状）
+3. 检查 heading 节点标签是否显示标题文本（而非 JSON 片段）
+4. 检查文档树是否呈现树形结构（document → heading → paragraph）
+5. 检查是否还有大量节点重叠在左上角
+6. 查看 DevTools Console 中的 `[runTreeLayout]` 日志
+
+### 潜在问题（待确认）
+- `build_belongs_to_relations` 中 `heading_by_path` 使用 heading_path 作为 key，如果文档中有相同的标题层次结构（重复 heading_path），只保留第一个，可能导致子段落连接到错误的 heading
+- 该问题在大多数文档中不常见，但如果用户文档中有重复标题，需要进一步修复
+
+---
+
 #### LA-040-P0-QUIZ: Agent 出题流程回退到旧方式
 - **状态**: ✅ **已解决（2026-07-18 验证通过）**
 - **修复历史**:

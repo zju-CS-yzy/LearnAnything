@@ -11,6 +11,20 @@
 export function generateNodeLabel(text, headingPath, fallback) {
   if (!text) return fallback || '未知节点'
 
+  // P30-FIX: 过滤 JSON 内容 — 如果 text 以 JSON 开头，优先使用 headingPath 或 fallback
+  const trimmedText = text.trim()
+  if (trimmedText.startsWith('{') || trimmedText.startsWith('[')) {
+    // 尝试从 headingPath 提取标签
+    if (headingPath) {
+      const parts = headingPath.split('>').map(p => p.trim()).filter(Boolean)
+      if (parts.length > 0) {
+        return parts[parts.length - 1].slice(0, 20)
+      }
+    }
+    // fallback 返回 ID 的简短标识
+    return fallback ? (fallback.split('_').pop() || fallback).slice(0, 20) : '未知节点'
+  }
+
   // 尝试提取 Markdown 标题
   const headerMatch = text.match(/^#+\s+(.+?)(?:\n|$)/m)
   if (headerMatch) {
@@ -25,8 +39,11 @@ export function generateNodeLabel(text, headingPath, fallback) {
     }
   }
 
-  // 清理 text
+  // 清理 text — 过滤掉 Markdown 语法、图片引用、表格标记
   let clean = text
+    .replace(/```[\s\S]*?```/g, '')  // 过滤代码块
+    .replace(/!\[[^\]]*\]\([^)]+\)/g, '')  // 过滤图片引用
+    .replace(/\|[^\n]*\|/g, '')  // 过滤表格行
     .replace(/[#*`\[\]\(\)]/g, '')
     .replace(/\s+/g, ' ')
     .trim()
@@ -137,10 +154,10 @@ export function getTypeLabel(type) {
  * 5. 不同树共享子节点时，复制子节点到各自的树中
  */
 export function runTreeLayout(cy) {
-  // LA-035-P19: 支持 paragraph / heading / document / child / markdown / image 所有 chunk 类型
+  // LA-035-P19: 支持 paragraph / heading / document / child / markdown / image / image_pseudo / formula_pseudo 所有 chunk 类型
   const chunkNodes = cy.nodes().filter(n => {
     const t = n.data('type')
-    return t === 'child' || t === 'markdown' || t === 'image' ||
+    return t === 'child' || t === 'markdown' || t === 'image' || t === 'image_pseudo' || t === 'formula_pseudo' ||
            t === 'paragraph' || t === 'heading' || t === 'document'
   })
   const chunkEdges = cy.edges().filter(e => {
@@ -151,7 +168,7 @@ export function runTreeLayout(cy) {
   if (chunkNodes.length === 0) return
 
   // P30-FIX: 大文档树性能保护 - 节点过多时使用简化网格布局
-  const MAX_CHUNK_NODES = 200
+  const MAX_CHUNK_NODES = 500
   if (chunkNodes.length > MAX_CHUNK_NODES) {
     console.warn(`[runTreeLayout] 文档节点过多 (${chunkNodes.length} > ${MAX_CHUNK_NODES})，使用简化网格布局避免卡死`)
     const cols = Math.max(1, Math.ceil(Math.sqrt(chunkNodes.length)))
@@ -410,7 +427,11 @@ export function runTreeLayout(cy) {
   })
 
   // 5.5 为图片节点安排位置（放在所有文本树的右侧）
-  const imageNodes = cy.nodes().filter(n => n.data('type') === 'image')
+  // P30-FIX: 兼容 image_pseudo 和 formula_pseudo 类型
+  const imageNodes = cy.nodes().filter(n => {
+    const t = n.data('type')
+    return t === 'image' || t === 'image_pseudo' || t === 'formula_pseudo'
+  })
   if (imageNodes.length > 0) {
     // 计算文本树的最右边界
     let maxTreeX = 0
@@ -431,7 +452,7 @@ export function runTreeLayout(cy) {
   // 6. 适应视图
   const allNodes = cy.nodes().filter(n => {
     const t = n.data('type')
-    return t === 'child' || t === 'markdown' || t === 'image' ||
+    return t === 'child' || t === 'markdown' || t === 'image' || t === 'image_pseudo' || t === 'formula_pseudo' ||
            t === 'paragraph' || t === 'heading' || t === 'document' ||
            n.data('isCopy') === 1
   })
@@ -514,12 +535,16 @@ export function runConceptLayout(cy) {
   cy.edges().filter(e => e.data('isCopyEdge') === '1').remove()
 
   // LA-035: 分离图片节点和概念节点
-  const imageNodes = cy.nodes().filter(n => n.data('type') === 'image')
+  // P30-FIX: 兼容 image_pseudo 和 formula_pseudo 类型
+  const imageNodes = cy.nodes().filter(n => {
+    const t = n.data('type')
+    return t === 'image' || t === 'image_pseudo' || t === 'formula_pseudo'
+  })
   const allConceptNodes = cy.nodes().filter(n => {
     const t = n.data('type')
     // P19-FIX: 包含所有非 chunk 节点（包括 type 为 undefined 的 concept 节点）
     // 只排除明确的 chunk / 图片类型
-    if (t === 'child' || t === 'parent' || t === 'markdown' || t === 'image') return false
+    if (t === 'child' || t === 'parent' || t === 'markdown' || t === 'image' || t === 'image_pseudo' || t === 'formula_pseudo') return false
     return true
   })
 

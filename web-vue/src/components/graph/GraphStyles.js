@@ -98,9 +98,48 @@ export function buildCyStyles() {
         'background-color': '#2ecc71',
       }
     },
-    // ========== 图片节点样式（LA-035）==========
+    // ========== Chunk 节点类型区分（P30: heading/paragraph/document 样式区分）==========
+    // Heading 节点 — 圆角矩形，红色，较大
     {
-      selector: 'node[chunkType="image"], node[?isImage]',
+      selector: 'node[chunkType="heading"]',
+      style: {
+        'shape': 'round-rectangle',
+        'background-color': '#e74c3c',
+        'width': 90,
+        'height': 36,
+        'font-size': '11px',
+        'text-wrap': 'wrap',
+        'text-max-width': 80,
+      }
+    },
+    // Paragraph 节点 — 椭圆，蓝色，较小
+    {
+      selector: 'node[chunkType="paragraph"]',
+      style: {
+        'shape': 'ellipse',
+        'background-color': '#3498db',
+        'width': 50,
+        'height': 30,
+        'font-size': '10px',
+      }
+    },
+    // Document 节点 — 矩形，绿色，较大
+    {
+      selector: 'node[chunkType="document"]',
+      style: {
+        'shape': 'rectangle',
+        'background-color': '#27ae60',
+        'width': 100,
+        'height': 40,
+        'font-size': '12px',
+        'text-wrap': 'wrap',
+        'text-max-width': 90,
+      }
+    },
+    // ========== 图片节点样式（LA-035）==========
+    // P30-FIX: 兼容 image_pseudo 和 formula_pseudo 类型
+    {
+      selector: 'node[chunkType="image"], node[chunkType="image_pseudo"], node[chunkType="formula_pseudo"], node[?isImage]',
       style: {
         'label': '📷',
         'font-size': '24px',
@@ -118,7 +157,7 @@ export function buildCyStyles() {
     },
     // 图片节点高亮
     {
-      selector: 'node[chunkType="image"]:selected, node[?isImage]:selected',
+      selector: 'node[chunkType="image"]:selected, node[chunkType="image_pseudo"]:selected, node[chunkType="formula_pseudo"]:selected, node[?isImage]:selected',
       style: {
         'border-width': 4,
         'border-color': COLORS.selected,
