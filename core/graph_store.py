@@ -600,9 +600,11 @@ class GraphStore:
             return code.rsplit('.', 1)[0]
 
         def _heading_path_parent(path):
-            if not path or '>' not in path:
+            # P30-FIX: 使用 ' > ' 作为分隔符（与 _build_heading_path 一致），
+            # 避免标题文本中包含 '>' 字符（如数学表达式）导致错误分割
+            if not path or ' > ' not in path:
                 return None
-            return path.rsplit('>', 1)[0].strip()
+            return path.rsplit(' > ', 1)[0].strip()
 
         # 1. 加载所有 chunks
         chunks = {}
