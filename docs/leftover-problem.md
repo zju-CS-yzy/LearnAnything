@@ -849,3 +849,101 @@
 - **优先级**: P2（项目整体完成后优化）
 - **备注**: 当前用户 workaround 是删除缓存文件后重启服务。这会导致首次查询时重建索引（耗时 1-3 秒），体验不佳。
 
+---
+
+### LA-040-P1-QUIZ-TYPES: QuizAgent 多题型支持（单选/多选/判断/填空/简答）
+- **状态**: ✅ **已实现（2026-07-18），待测试**
+- **问题描述**: `QuizAgent` 的 `QUIZ_GENERATION_PROMPT` 硬编码为单选题。配置文件中定义了单选/多选/判断/填空/简答/计算/编程 7 种题型，但 LLM prompt 只生成单选题，前端也无法选择题型。
+- **实现内容**:
+  1. 新增 `QUIZ_PROMPT_TEMPLATES` 字典：5 种题型模板（单选/多选/判断/填空/简答）
+  2. 新增 `_build_mixed_prompt()`：根据 `question_types` 参数动态组合 prompt，自动分配每类题型数量
+  3. `handle()` 方法：从 `kwargs` 接收 `question_types`，传递给 P0 路径和回退路径
+  4. `_generate_questions_llm_from_context()` / `_generate_questions_llm()` / `_generate_questions_old()`：均支持 `question_types` 参数
+  5. `_validate_and_clean_question()`：按题型分发到 5 个验证子方法（`_validate_single_choice` / `_validate_multiple_choice` / `_validate_true_false` / `_validate_fill_blank` / `_validate_short_answer`）
+  6. 回退生成（LLM 不可用时）：fallback 只支持单选/简答，按循环分配
+  7. 前端文本输出：增加题型标签前缀（【单选】【多选】【判断】【填空】【简答】）
+- **待测试项**:
+  1. 后端：通过 API 传入 `question_types=["single_choice", "multiple_choice", "true_false"]`，验证返回的 JSON 中各题目 `type` 字段正确
+  2. 后端：验证多选题 `answer` 为列表格式（如 `["A", "C"]`），判断题为 `"正确"/"错误"`，填空题为字符串或列表
+  3. 前端：需新增题型选择 UI（checkbox 组），传给 `Coordinator.handle(question_types=[...])`
+  4. CoachAgent：验证各题型的评分逻辑正确（`CoachAgent._score_multiple_choice` 等子方法）
+- **技术方案**: 纯后端修改，前端只需在出题界面增加 checkbox 组调用 `question_types` 参数
+- **依赖文件**: `agents/quiz_agent.py`（已修改）
+- **优先级**: P1（已实现，待前端联调测试）
+- **备注**: 计算/编程题因规则生成复杂，回退路径不支持，仅 LLM 可用时生成。若学科配置中启用了这两种类型但 LLM 不可用，会降级为单选/简答。
+
+---
+
+### LA-040-P1-VIS: 评测结果可视化（能力雷达图 + 错题本 + 进步曲线）
+- **状态**: 🟡 **新增待实现/待测试（2026-07-18）**
+- **问题描述**: `CoachAgent.evaluate()` 返回纯文本报告（总分、等级、每题反馈、薄弱点列表）。用户无法直观看到：
+  1. 各概念/题型的掌握度分布（雷达图）
+  2. 历史评测的 theta 值变化趋势（进步曲线）
+  3. 错题集中复习（错题本）
+  4. 各次评测的对比（多次测试后能力变化）
+- **期望效果**:
+  1. **能力雷达图**：以概念/题型为维度，展示当前掌握度（0-100%）
+  2. **进步曲线**：横轴为评测次数，纵轴为 IRT theta 值或百分比
+  3. **错题本**：按概念/题型分类，展示历史错题 + 正确答案 + 解析，支持重新出题
+  4. **评测历史列表**：每次评测的时间、总分、等级、薄弱点
+- **技术方案**:
+  1. 前端：新增 `/evaluate-report` 页面，使用 ECharts 或 Chart.js 绘制雷达图/折线图
+  2. 后端：
+     - `CoachAgent` 已有 `UserStateStore`（SQLite），可查询历史记录
+     - 新增 API `/api/evaluation/history?user_id=xxx` 返回历史评测数据
+     - 新增 API `/api/evaluation/weak-areas?user_id=xxx` 返回薄弱概念列表（带 streak_wrong）
+     - 新增 API `/api/evaluation/wrong-questions?user_id=xxx` 返回错题列表（从 `UserStateStore` 中 `is_correct=False` 的记录聚合）
+  3. 数据模型：`UserKnowledgeState` 已有 `test_count`, `correct_count`, `streak`, `mastery_level`，可直接计算掌握度
+- **前端组件设计**:
+  ```
+  EvaluateReportPage.vue
+  ├── 能力雷达图 (RadarChart: 各概念 mastery_level)
+  ├── 进步曲线 (LineChart: 历次评测 theta/percentage)
+  ├── 错题本 (WrongQuestionList: 按概念分组，可点击"重新练习")
+  ├── 评测历史 (HistoryTable: 时间、分数、等级、薄弱点)
+  └── 薄弱点建议 (WeakAreaSuggestions: TutorAgent 讲解推荐)
+  ```
+- **依赖**:
+  - 后端 API 扩展（`backend_api.py`）
+  - 前端页面 + 图表库
+  - `UserStateStore` 数据验证（需确认跨会话持久化正常）
+- **优先级**: P1（直接影响用户评测体验，但需等后端 P0 流程稳定后实施）
+- **备注**: 此功能依赖 `UserStateStore` 的跨会话持久化。若重启后数据丢失，需先修复 P0-INT-4 持久化问题。
+
+---
+
+### LA-040-P1-DIALOG: 多轮对话上下文机制（设计阶段，待讨论确认）
+- **状态**: 🟡 **设计完成（2026-07-18），待讨论确认后进入实现**
+- **问题描述**: 当前三个核心 Agent（TutorAgent / QuizAgent / CoachAgent）的 `handle()` 方法每次调用都是**独立查询**，无对话历史。用户连续提问时（如 "RAG 是什么？" → "它和 GraphRAG 有什么区别？"），系统无法解析指代（"它"），也无法记住之前的话题。这严重影响用户体验。
+- **设计文档**: `docs/design-dialog-context.md`（v0.1，913 行详细设计）
+- **核心设计**:
+  1. **三层数据模型**: `dialog_sessions`（会话）+ `dialog_messages`（消息）+ `dialog_topics`（话题追踪）→ SQLite 持久化
+  2. **对话上下文对象** (`DialogContext`): 包含 `history`（最近 N 轮消息）、`current_topic`（当前话题）、`topic_chain`（话题链）、`user_theta` / `weak_areas`（从 L1 记忆读取）
+  3. **指代解析** (`ReferenceResolver`): 规则为主（代词/省略主语/话题切换）→ 覆盖 80% 场景，LLM 可选用于复杂歧义
+  4. **Prompt 注入策略**: 将对话历史文本注入 LLM prompt（最近 3-5 轮），过长时自动摘要
+  5. **与现有系统连接**:
+     - **Agent 集体记忆 L1 层**: `DialogContext.user_theta` 读取 `UserKnowledgeState`，`DialogContext.weak_areas` 查询 `streak > 2` 记录；对话结束时生成摘要写入 `UserKnowledgeState.notes`
+     - **消息总线**: `DialogContextManager` 订阅 `user_state` / `weak_area` / `quiz` 事件，实时更新会话上下文
+     - **OpenClaw 参考**: 借鉴 `MEMORY.md` + `memory/*.md` 的分层归档思想（短期上下文 vs 长期记忆）
+  6. **会话生命周期**: 30 分钟超时、最大 20 轮保留、支持显式"新会话"重置
+- **实现路径（分 4 阶段，约 6-8 天）**:
+  1. **阶段 1（基础设施）**: `DialogContextManager` 类 + SQLite 表 + `BaseAgent.handle(context)` 扩展 + `Coordinator` 会话管理
+  2. **阶段 2（指代解析与话题追踪）**: `ReferenceResolver` + 话题提取 + 话题切换检测
+  3. **阶段 3（深度集成）**: `UserStateStore` 双向同步 + `MessageBus` 事件订阅 + Agent 个性化 Prompt（根据 theta 调整讲解深度）
+  4. **阶段 4（前端支持）**: 会话列表页面 + 对话界面话题标签 + "新会话"按钮 + 跨会话持久化验证
+- **关键设计决策**:
+  - 存储介质: SQLite（与 `UserStateStore` 同库，统一运维）
+  - 上下文注入: Prompt 文本注入（简单可解释，适合当前规模）
+  - 指代解析: 规则为主 + LLM 可选（成本可控）
+  - 历史保留: 最近 20 轮 / 1000 tokens（避免 prompt 过长）
+- **风险与缓解**:
+  - 指代解析错误: 规则 + 可配置开关 + 用户手动重置会话
+  - 上下文过长: 摘要机制 + Token 限制 + 截断策略
+  - 敏感信息泄露: 仅本地存储，不上传
+- **依赖**:
+  - `UserStateStore` 跨会话持久化（需先验证 P0-INT-4）
+  - `MessageBus` 已可用（P0-INT-6 已完成）
+  - 前端：新增会话管理 UI（约 2-3 天工作量）
+- **优先级**: P1（用户高频需求，但需先完成 P0 流程稳定 + 多题型测试）
+- **备注**: 此设计已考虑与现有 L1 记忆层和消息总线的无缝连接，不引入额外依赖。实现后可显著提升 TutorAgent 的连续讲解体验和 QuizAgent 的针对性出题效果。
+
