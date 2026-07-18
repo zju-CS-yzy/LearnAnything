@@ -755,3 +755,97 @@
 - **优先级**: P2
 - **备注**: 这是一个体验改进，不是 bug 修复。当前 Top-1 模式下子图扩展已能产生丰富的题目（11 节点 10 边），Top-N 模式会让出题覆盖更多相关知识点。
 
+---
+
+### LA-OPT-P2-001: 混合查询增强（图优先 + Embedding 并行回退）
+- **状态**: 🟡 **新增改进点（2026-07-18）**
+- **问题描述**: 当前 `ConceptRetriever.resolve()` 中 embedding 回退（策略 4）仅在策略 1~3 全部失败后才触发。这导致 embedding 的语义相似优势无法与图查询的精确性互补。理想情况下应同时执行图查询和向量检索，融合结果。
+- **期望效果**:
+  1. 图精确匹配 + 图模糊匹配 + 别名匹配（策略 1~3）仍作为最高优先级
+  2. **并行执行** HybridRetriever 向量检索（策略 4 改为并行而非串行回退）
+  3. 融合结果：图结果优先，向量结果补充（去重后追加）
+  4. 对于语义漂移风险（如查询 "RAG" 向量返回 "推荐系统"），用图路径验证过滤伪命中
+- **技术方案**:
+  1. `ConceptRetriever.resolve()` 新增 `mode` 参数：`"graph_only"` / `"hybrid"` / `"vector_fallback"`（默认 `"hybrid"`）
+  2. `"hybrid"` 模式下：先执行策略 1~3，同时异步执行向量检索
+  3. 结果融合：图结果 + 向量结果（通过 `graph_has_path(query, concept)` 验证向量结果是否和查询概念有图路径连接）
+  4. 增加置信度分数：精确匹配=1.0，模糊匹配=0.8，别名匹配=0.7，向量验证通过=0.6，未通过=0.3
+- **引用文献**: CatRAG [21]（语义漂移风险）、ReMindRAG [22]（记忆回放优化遍历）、Embeddings + Knowledge Graphs [33]（互补性论证）
+- **优先级**: P2（项目整体完成后优化）
+- **备注**: 参考论文 RAG vs. GraphRAG [17] 的"Selection + Integration"混合策略，在 MultiHop-RAG 上提升 +6.4 points。
+
+---
+
+### LA-OPT-P2-002: Embedding 自动别名扩展（CanonicalConcept 预计算别名 embedding）
+- **状态**: 🟡 **新增改进点（2026-07-18）**
+- **问题描述**: 当前 CanonicalConcept 的别名列表由 LLM 提取时生成，不够全面。用户可能用同义词查询（如"检索增强"对应"RAG"），但别名列表中未收录。用 embedding 预计算语义相似概念，可自动扩展别名。
+- **期望效果**:
+  1. 构建时：为每个 CanonicalConcept 计算 embedding
+  2. 构建时：遍历所有概念对，embedding 相似度 > 0.85 的自动加入 aliases 列表（带置信度）
+  3. 查询时：别名匹配（策略 3）能覆盖更多用户输入变体
+  4. 减少策略 4（向量回退）的触发频率
+- **技术方案**:
+  1. `GraphStore` 新增 `canonical_concept_embeddings` 表（或属性）
+  2. 构建阶段新增 `build_concept_embedding_aliases()` 方法
+  3. 使用智谱 GLM Embedding API（与现有 embedding 层复用）
+  4. 相似度阈值 0.85（与 ConceptDeduper 一致）
+- **引用文献**: Knowledge Graph Prompting for Multi-Document QA [4]（实体别名扩展）、Embeddings + Knowledge Graphs [33]（KG 增强语义搜索）
+- **优先级**: P2（项目整体完成后优化）
+- **备注**: 该优化会提升策略 1~3 的命中率，减少对 embedding 回退的依赖。
+
+---
+
+### LA-OPT-P2-003: 系统性评估基准（MultiHop 测试集）
+- **状态**: 🟡 **新增改进点（2026-07-18）**
+- **问题描述**: 当前无系统性评估手段验证检索策略的优劣。无法量化回答"我们的图查询 vs 向量检索在单跳/多跳任务上各表现如何"。
+- **期望效果**:
+  1. 建立测试集：按难度分 5 级（直接事实查找 → 单跳 → 双跳 → 多跳 → 全局摘要）
+  2. 每个难度 20 题，覆盖单跳事实、多跳推理、实体消歧、全局摘要等场景
+  3. 评估指标：R@K、MRR、Faithfulness、Answer Relevancy、Context Precision/Recall
+  4. 对比基线：图查询（当前策略）、向量检索（HybridRetriever）、混合策略（LA-OPT-P2-001）
+  5. 自动化测试脚本：输入测试集 → 运行三种策略 → 输出指标对比表
+- **技术方案**:
+  1. 使用 RAGAS [30] 框架评估生成质量
+  2. 参考 SR-RAG [18] 和 SOPRAG [35] 的评估方法论
+  3. 测试集可基于现有学科材料（如 RAG 文档）由 LLM 生成（类似 SOPRAG 的做法）
+  4. 人工审核 10% 的测试题确保质量
+- **引用文献**: RAGAS [30]（评估框架）、SR-RAG [18]（R@10 和 nugget coverage 评估）、SOPRAG [35]（MRR + Accuracy@K + 生成质量）、RAG vs. GraphRAG [17]（单跳/多跳/摘要任务分类）
+- **优先级**: P2（项目整体完成后优化）
+- **备注**: 这是验证所有检索策略优化（LA-OPT-P2-001/002）效果的必要基础设施。没有评估基准，优化方向无法量化。
+
+---
+
+### LA-OPT-P2-004: 向量检索近似索引（HNSW/FAISS）
+- **状态**: 🟡 **新增改进点（2026-07-18）**
+- **问题描述**: 当前 `VectorStore` 使用 SQLite 全表 cosine 相似度扫描。当文档量 > 10k 时，检索速度会显著下降。当前规模不大（RAG 学科数百 chunk），但长期需要近似索引。
+- **期望效果**:
+  1. 文档量 > 5k 时仍保持亚秒级检索延迟
+  2. 不破坏现有 SQLite 存储架构（增量升级）
+  3. 支持现有 BM25 + RRF 融合流程
+- **技术方案**:
+  1. 方案 A：集成 FAISS（Facebook AI Similarity Search）作为可选索引层
+  2. 方案 B：使用 ChromaDB 的 HNSW 索引（当前已用 ChromaDB，但实现的是 SQLite 封装）
+  3. 方案 C：评估 SQLite-VSS（SQLite 向量扩展）或 pgvector（迁移到 PostgreSQL）
+  4. 优先方案 A：FAISS 写入独立索引文件，查询时优先用 FAISS，回退时扫描 SQLite
+- **引用文献**: 无特定论文引用，属工程优化。参考 ChromaDB 官方文档和 FAISS wiki。
+- **优先级**: P2（项目整体完成后优化）
+- **备注**: 当前全表扫描在数百文档场景下延迟可接受（~50ms）。当用户扩展到数万文档时，此优化变为 P1。
+
+---
+
+### LA-OPT-P2-005: BM25 缓存自动更新
+- **状态**: 🟡 **新增改进点（2026-07-18）**
+- **问题描述**: 当前 `HybridRetriever` 的 BM25 索引在 `__init__` 时构建一次并缓存到 `knowledge_base/cache/bm25_*.pkl`。新增文档后不会自动重建，导致新文档无法被 BM25 检索到。
+- **期望效果**:
+  1. 新增文档后自动触发 BM25 索引重建（增量更新）
+  2. 或提供增量更新机制：将新文档加入现有 BM25 索引而不全量重建
+  3. 避免全量重建的开销（大量文档时耗时数秒）
+- **技术方案**:
+  1. 方案 A：文档导入 API 完成后，触发 `HybridRetriever.rebuild_bm25()` 回调
+  2. 方案 B：增量更新 — 新文档分词后加入 `tokenized_corpus`，调用 `BM25Okapi` 的更新机制（如果支持）
+  3. 方案 C：设置"索引 dirty"标志，首次查询时自动重建（懒加载）
+  4. 推荐方案 A：在 `backend_api.py` 的 `import_file` 或 `import_text` 后异步重建
+- **引用文献**: 无特定论文引用，属工程优化。
+- **优先级**: P2（项目整体完成后优化）
+- **备注**: 当前用户 workaround 是删除缓存文件后重启服务。这会导致首次查询时重建索引（耗时 1-3 秒），体验不佳。
+
