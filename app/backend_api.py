@@ -1174,9 +1174,10 @@ def get_graph_stats(subject: str):
 
 
 @app.get("/api/knowledge-graph/{subject}/nodes")
-def list_graph_nodes(subject: str, limit: int = 500):
+def list_graph_nodes(subject: str, limit: int = 1000):
     """
     获取图谱中的 Chunk 节点（用于前端全局浏览，排除 parent 节点）。
+    P30-FIX: 默认 limit 从 500 增大到 1000，避免大文档 chunk 节点被截断
     """
     from core.graph_store import GraphStore
 
@@ -1208,7 +1209,8 @@ def list_graph_nodes(subject: str, limit: int = 500):
                 "text": row[5] or "",
             }
             # LA-035: 图片字段（仅图片节点）
-            if row[4] == 'image':
+            # P30-FIX: 兼容 image_pseudo 类型（ImageConceptExtractor 创建的 pseudo chunk）
+            if row[4] in ('image', 'image_pseudo', 'formula_pseudo'):
                 node["image_path"] = row[6] or ""
                 node["thumbnail_path"] = row[7] or ""
                 node["width"] = row[8] or 0
