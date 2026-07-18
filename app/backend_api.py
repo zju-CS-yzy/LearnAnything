@@ -148,6 +148,7 @@ class AskResponse(BaseModel):
     agent: str
     duration_ms: float
     query_id: str
+    media: Optional[List[Dict[str, Any]]] = None  # LA-IMG: 关联的媒体资源
 
 
 class QuizRequest(BaseModel):
@@ -360,6 +361,10 @@ def ask_question(request: AskRequest):
     )
     print(f"[API] /api/ask returning answer length={len(result.get('text', ''))}")
 
+    # LA-IMG: 提取 metadata 中的媒体资源
+    metadata = result.get("metadata", {})
+    media = metadata.get("media") if isinstance(metadata, dict) else None
+
     return AskResponse(
         question=request.query,
         answer=result.get("text", ""),
@@ -367,6 +372,7 @@ def ask_question(request: AskRequest):
         agent=result.get("agent", ""),
         duration_ms=result.get("monitoring", {}).get("total_duration_ms", 0),
         query_id=result.get("monitoring", {}).get("query_id", ""),
+        media=media,
     )
 
 
@@ -405,11 +411,15 @@ def ask_stream(request: AskRequest):
         answer_text = result.get("text", "")
 
         # 发送元数据事件
+        # LA-IMG: 传递媒体资源到前端
+        metadata = result.get("metadata", {})
+        media = metadata.get("media") if isinstance(metadata, dict) else None
         meta = json.dumps({
             "intent": intent,
             "agent": agent_name,
             "query_id": query_id,
             "question": request.query,
+            "media": media,
         }, ensure_ascii=False)
         yield f"event: meta\ndata: {meta}\n\n"
 

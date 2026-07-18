@@ -43,7 +43,23 @@
                 <span class="agent-tag">{{ msg.agent }}</span>
                 <span class="time-tag">{{ msg.time }}</span>
               </div>
+              <!-- LA-IMG: 渲染 markdown，支持图片嵌入 -->
               <div class="message-body markdown-body" v-html="renderMarkdown(msg.text)"></div>
+              <!-- LA-IMG: 关联媒体资源展示区（如果 LLM 未在正文中引用，则在此展示） -->
+              <div class="message-media" v-if="msg.media && msg.media.length">
+                <div class="media-title">📷 相关图片/公式</div>
+                <div class="media-grid">
+                  <div class="media-item" v-for="(m, i) in msg.media" :key="i">
+                    <img
+                      :src="`/api/media/${encodeMediaPath(m.path)}`"
+                      :alt="m.caption"
+                      class="media-thumb"
+                      @click="openMediaModal(m)"
+                    />
+                    <div class="media-caption">{{ m.caption }}</div>
+                  </div>
+                </div>
+              </div>
               <div class="message-sources" v-if="msg.sources && msg.sources.length">
                 <div class="sources-title">📎 引用来源</div>
                 <div class="source-item" v-for="(src, i) in msg.sources" :key="i">
@@ -132,13 +148,38 @@ const quickHints = [
   'LangChain 的核心组件有哪些？',
 ]
 
+// LA-IMG: 自定义 marked renderer，处理图片路径和大小
+const mediaRenderer = new marked.Renderer()
+mediaRenderer.image = (href, title, text) => {
+  // 确保路径使用 /api/media/ 前缀
+  let src = href
+  if (src && !src.startsWith('http') && !src.startsWith('/api/media/')) {
+    src = `/api/media/${src}`
+  }
+  return `<img src="${src}" alt="${text || ''}" title="${title || ''}" class="chat-inline-image" loading="lazy" />`
+}
+
 function renderMarkdown(text) {
   if (!text) return ''
   try {
-    return marked.parse(text, { breaks: true })
+    return marked.parse(text, { breaks: true, renderer: mediaRenderer })
   } catch {
     return text
   }
+}
+
+// LA-IMG: 编码媒体路径（处理 Windows 反斜杠和 URL 编码）
+function encodeMediaPath(path) {
+  if (!path) return ''
+  // 将 Windows 反斜杠替换为正斜杠
+  return path.replace(/\\/g, '/')
+}
+
+// LA-IMG: 打开媒体大图预览（可扩展为 Lightbox）
+function openMediaModal(media) {
+  // 简单实现：在新标签页打开
+  const src = `/api/media/${encodeMediaPath(media.path)}`
+  window.open(src, '_blank')
 }
 
 function autoResize() {
@@ -190,6 +231,7 @@ async function sendMessage(presetText = null) {
     agent: '',
     time: new Date().toLocaleTimeString(),
     sources: [],
+    media: [],  // LA-IMG: 关联媒体资源
   }
   messages.value.push(aiMsg)
 
@@ -198,6 +240,10 @@ async function sendMessage(presetText = null) {
     for await (const { event, data } of stream) {
       if (event === 'meta') {
         aiMsg.agent = data.agent || 'TutorAgent'
+        // LA-IMG: 保存媒体资源
+        if (data.media && data.media.length) {
+          aiMsg.media = data.media
+        }
       } else if (event === 'chunk') {
         aiMsg.text += data.text || ''
         scrollToBottom()
@@ -436,6 +482,66 @@ onMounted(() => {
   display: -webkit-box;
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
+}
+
+/* LA-IMG: 内联图片样式（markdown 中引用的图片） */
+.chat-inline-image {
+  max-width: 100%;
+  max-height: 300px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border-color);
+  margin: 8px 0;
+  display: block;
+}
+
+/* LA-IMG: 媒体资源展示区 */
+.message-media {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px dashed var(--border-color);
+}
+
+.media-title {
+  font-size: var(--font-size-xs);
+  color: var(--text-muted);
+  margin-bottom: 8px;
+}
+
+.media-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+  gap: 8px;
+}
+
+.media-item {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  cursor: pointer;
+  transition: transform var(--transition-fast);
+}
+
+.media-item:hover {
+  transform: scale(1.03);
+}
+
+.media-thumb {
+  width: 100%;
+  aspect-ratio: 1;
+  object-fit: cover;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border-color);
+}
+
+.media-caption {
+  font-size: var(--font-size-xs);
+  color: var(--text-secondary);
+  margin-top: 4px;
+  text-align: center;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
 }
 
 .input-area {

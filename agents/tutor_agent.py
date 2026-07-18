@@ -48,13 +48,14 @@ class TutorAgent(BaseAgent):
             self._reranker = RerankerFactory.create()
         return self._reranker
 
-    def _generate_answer(self, query: str, context_chunks: List[Dict[str, Any]], context_text_override: str = None) -> str:
+    def _generate_answer(self, query: str, context_chunks: List[Dict[str, Any]], context_text_override: str = None, media: List[Dict[str, Any]] = None) -> str:
         """调用 LLM 生成润色后的自然语言回答。
 
         Args:
             query: 用户问题
             context_chunks: 上下文 chunk 列表
             context_text_override: 可选，直接使用提供的上下文文本（P0 图谱上下文）
+            media: 可选，关联的媒体资源列表（LA-IMG）
         """
         if not self._llm.available:
             # LLM 不可用时返回原始上下文拼接
@@ -78,6 +79,16 @@ class TutorAgent(BaseAgent):
         if not context:
             return "抱歉，未检索到与该问题相关的资料。"
 
+        # LA-IMG: 构建媒体引用提示
+        media_hint = ""
+        if media:
+            media_hint = "\n\n## 相关图片/公式资源\n"
+            media_hint += "以下是与该问题相关的图片或公式，请在回答中适当位置引用它们。"
+            media_hint += "引用格式：使用 markdown 图片语法，如 ![描述](/api/media/路径)。\n\n"
+            for i, m in enumerate(media[:5], 1):  # 最多引用 5 张
+                media_hint += f"[{i}] {m['caption']}:\n"
+                media_hint += f"![{m['caption']}](/api/media/{m['path']})\n\n"
+
         system_prompt = (
             "你是一位知识渊博的AI助教。请根据提供的参考资料，为用户的问题生成一个"
             "清晰、连贯、有结构的回答。要求：\n"
@@ -85,10 +96,12 @@ class TutorAgent(BaseAgent):
             "2. 引用资料中的关键信息来支撑回答\n"
             "3. 使用适当的段落、列表和标题来组织内容\n"
             "4. 遇到专业术语时简要解释\n"
-            "5. 如果资料不足以完全回答问题，诚实说明"
+            "5. 如果提供了图片/公式资源，请在讲解到相关内容时，用 markdown 图片语法引用"
+            "（格式：![描述](/api/media/路径)），让用户可以直观看到图示\n"
+            "6. 如果资料不足以完全回答问题，诚实说明"
         )
 
-        user_prompt = f"用户问题：{query}{source_note}\n\n参考资料：\n{context}\n\n请生成回答："
+        user_prompt = f"用户问题：{query}{source_note}\n\n参考资料：\n{context}{media_hint}\n\n请生成回答："
 
         messages = [{"role": "user", "content": user_prompt}]
 
@@ -123,7 +136,7 @@ class TutorAgent(BaseAgent):
         return self._handle_with_retrieval(query, filters)
 
     def _handle_with_graph_context(self, query: str, graph_context) -> Dict[str, Any]:
-        """使用 P0 图谱上下文生成回答"""
+        """使用 P0 图谱上下文生成回答（支持图片/公式嵌入）"""
         context_text = graph_context.text if hasattr(graph_context, 'text') else str(graph_context)
         concept_names = []
         if hasattr(graph_context, 'subgraph') and graph_context.subgraph:
@@ -132,9 +145,13 @@ class TutorAgent(BaseAgent):
         # P0-INT-6: 如果有薄弱领域，优先使用相关上下文
         if self._user_weak_areas:
             print(f"[TutorAgent] P0-INT-6: 优先覆盖薄弱领域: {self._user_weak_areas}")
-            # 在上下文前附加薄弱领域提示
             weak_hint = f"用户薄弱环节: {', '.join(self._user_weak_areas)}。请重点讲解这些概念。\n\n"
             context_text = weak_hint + context_text
+
+        # LA-IMG: 收集关联的媒体资源（图片/公式）
+        media = self._collect_related_media(graph_context)
+        if media:
+            print(f"[TutorAgent] LA-IMG: 找到 {len(media)} 个关联媒体资源")
 
         # 构建 chunks 列表（从 graph_context 中提取）
         context_chunks = []
@@ -147,8 +164,8 @@ class TutorAgent(BaseAgent):
                     "concept": getattr(node, 'name', ''),
                 })
 
-        # 生成回答
-        answer = self._generate_answer(query, context_chunks, context_text_override=context_text)
+        # 生成回答（传入媒体资源用于 prompt 提示）
+        answer = self._generate_answer(query, context_chunks, context_text_override=context_text, media=media)
 
         return {
             "text": answer,
@@ -156,9 +173,63 @@ class TutorAgent(BaseAgent):
                 "source": "p0_graph_context",
                 "concepts": concept_names,
                 "token_count": getattr(graph_context, 'token_count', 0),
+                "media": media,  # LA-IMG: 传递媒体资源到前端
             },
             "chunks": context_chunks,
         }
+
+    def _collect_related_media(self, graph_context) -> List[Dict[str, Any]]:
+        """LA-IMG: 从图谱上下文中收集关联的图片/公式资源
+
+        遍历 subgraph 中所有节点的 source_chunks，查询 GraphStore 获取 chunk 详情，
+        筛选出图片类型（image/image_pseudo/formula_pseudo）的 chunk，提取图片路径。
+        """
+        media = []
+        if not hasattr(graph_context, 'subgraph') or not graph_context.subgraph:
+            return media
+
+        # 收集所有 source_chunks 中的 chunk_id
+        chunk_ids = set()
+        for node in graph_context.subgraph.nodes:
+            if node.source_chunks:
+                for chunk_id in str(node.source_chunks).split(","):
+                    chunk_id = chunk_id.strip()
+                    if chunk_id:
+                        chunk_ids.add(chunk_id)
+
+        if not chunk_ids:
+            return media
+
+        # 通过 GraphStore 查询 chunk 详情（复用 ContextAssembler 的 graph_store 逻辑）
+        # 由于 TutorAgent 没有直接持有 graph_store，我们尝试通过 collection_name 构建
+        try:
+            from core.graph_store import GraphStore
+            store = GraphStore(self.collection_name)
+            store.init_schema()
+            conn = store._ensure_db()
+
+            id_str = ", ".join([f"'{cid}'" for cid in chunk_ids])
+            cypher = f"""
+                MATCH (c:Chunk)
+                WHERE c.chunk_id IN [{id_str}]
+                  AND c.chunk_type IN ('image', 'image_pseudo', 'formula_pseudo')
+                RETURN c.chunk_id, c.chunk_type, c.thumbnail_path, c.image_path, c.heading_path
+            """
+            result = conn.execute(cypher)
+            while result.has_next():
+                row = result.get_next()
+                thumbnail = row[2] or row[3]  # 优先使用缩略图
+                if thumbnail:
+                    media.append({
+                        "chunk_id": row[0],
+                        "type": row[1],  # image / image_pseudo / formula_pseudo
+                        "path": thumbnail,
+                        "caption": row[4] or "相关图片",  # heading_path 作为标题
+                    })
+        except Exception as e:
+            print(f"[TutorAgent] LA-IMG: 收集媒体资源失败: {e}")
+
+        return media
 
     def _handle_with_retrieval(self, query: str, filters: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """使用传统 HybridRetriever 检索生成回答"""
