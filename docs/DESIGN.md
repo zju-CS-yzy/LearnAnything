@@ -151,6 +151,135 @@ LearnAnything 是一个**通用知识学习系统**，从 IWork（AI大模型求
 
 ---
 
+### 3.4 RAG 架构定位与现有工作对比
+
+#### 3.4.1 四层架构在 RAG 系统中的定位
+
+标准 RAG 架构通常分为四个模块，我们的四层架构对应关系如下：
+
+| 模块 | 我们的对应部分 | 说明 |
+|------|-------------|------|
+| **分块（Chunking）** | MarkdownChunker | 生成 document / heading / paragraph / image_pseudo chunk |
+| **嵌入/索引（Embedding/Indexing）** | BM25 稀疏向量 + 智谱 GLM 密集向量 | 存储于 SQLite 向量库 |
+| **知识图谱构建（KG Construction）** | ✅ **四层图架构核心** | ExtractedConcept → CanonicalConcept → 关系边 |
+| **检索（Retrieval）** | 混合检索（BM25 + 向量 + 图谱遍历） | 由 HybridRetriever + ConceptRetriever 协同 |
+
+四层架构的工作位置：**在分块和嵌入之后，检索之前**。它不是"文本分块的 Embedding 部分"，而是**独立的知识图谱构建层**，在学术界常被称为 **GraphRAG Indexing Pipeline** 或 **Knowledge Graph Construction for RAG**。
+
+```
+输入文档 → [分块] → [嵌入] → [四层图构建] → [检索]
+              ↓         ↓            ↓
+         Chunk节点   向量表示   ExtractedConcept
+                                    ↓
+                              CanonicalConcept（去重）
+                                    ↓
+                              关系边（语义关联）
+```
+
+#### 3.4.2 设计独特性：与现有工作的对比
+
+**结论**：四层架构在现有文献中没有完全对应的等价设计，属于工程上的独特组合，但并非"从零发明的全新理论"。
+
+| 架构 | 节点类型 | 层级 | 概念去重 | 最接近我们的层 | 关键差异 |
+|------|---------|------|---------|------------|---------|
+| **Microsoft GraphRAG** [25] | Entity | 单层实体 | 有（Entity Resolution） | 单层实体 + 社区分层 | 单层实体，合并后删除旧节点；我们保留两层概念 |
+| **HippoRAG** [27] | Entity | 单层实体 | 无 | 单层实体 + PageRank | 无去重，无层级概念分离 |
+| **LightRAG** [26] | Entity | 单层实体 | 无 | 单层实体 + 高低级检索 | 双级检索但实体单层；无概念去重中间层 |
+| **DA-RAG** [28] | Chunk + Entity | 双层（Chunk + KG） | 无 | Chunk Layer + KG Layer | Chunk 对应我们的 Chunk，但 KG Layer 只有单层实体 |
+| **RAPTOR** [29] | Summary | 树形层级 | 无（聚类摘要） | 层级树 | 节点是文本摘要而非概念；无去重机制 |
+| **KET-RAG** [31] | Keyword-Entity-Triple | 三层 | 有 | 关键词→实体→三元组 | 桥接设计类似但粒度不同 |
+| **StructRAG** [32] | 结构化知识 | 层次推理 | 有 | 结构保持与提取 | 侧重逻辑结构保持，非概念去重分离 |
+
+**核心区别**：我们保留了"提取概念"（ExtractedConcept）和"规范概念"（CanonicalConcept）之间的**显式分离**。
+
+- **Microsoft GraphRAG** [25]：提取 entity → 直接做 entity resolution → 合并为统一节点。**没有保留"原始提取"和"去重后"两个层级。**
+- **DA-RAG** [28]：有 Chunk Layer 和 Knowledge Graph Layer，但 KG Layer 直接就是实体关系，没有"概念去重"的中间层。
+- **RAPTOR** [29]：有层级树（document → summary → higher-level），但节点是文本摘要，不是概念。
+
+我们的设计独特之处在于：
+1. **保留提取概念层**：每个 ExtractedConcept 可精确追溯回其来源 chunk，支持溯源和局部上下文重建。
+2. **独立规范概念层**：CanonicalConcept 通过 embedding 相似度去重合并，但不删除原始提取实例，而是建立映射关系。
+3. **source_chunks 字段**：规范概念直接关联原始 chunk ID，实现图→chunk→原始文本的精确回溯。
+
+> **准确表述**："我们采用了一种双层概念图谱架构：从文本 chunk 提取概念实例（ExtractedConcept），通过嵌入相似度去重合并为规范概念（CanonicalConcept），并保留原始提取实例以支持溯源。这种设计在保留概念溯源能力的同时，实现了语义去重，是对标准 GraphRAG 实体提取-消解流程的一种变体。"
+
+---
+
+### 3.5 层级知识图谱查询与向量检索的优势比较
+
+#### 3.5.1 学术界的一致结论
+
+**核心结论**：这不是"哪个更好"的问题，而是**不同场景下各自有优势，混合使用通常优于单一方法**。
+
+| 场景 | 向量检索 (Embedding→Chunk) | 图查询 (Graph Traversal) | 胜出方 | 证据来源 |
+|------|---------------------------|------------------------|--------|---------|
+| **单跳事实查找** | 直接匹配语义相似文本，速度快 | 需要遍历路径，开销大 | **向量** ✅ | RAG vs GraphRAG [17] |
+| **多跳推理** (如"A的妻子是谁？") | 无法发现跨 chunk 的关联 | 显式遍历关系链 A→marriedTo→B | **图** ✅ | RAG vs GraphRAG [17] |
+| **实体消歧** (同名不同人) | 容易混淆语义相似但实体不同的内容 | 节点唯一标识 + 关系上下文 | **图** ✅ | GraphRAG vs Vector RAG [24] |
+| **全局摘要/聚合** | 只能返回局部文本片段 | 社区检测 + 全局聚合 | **图** ✅ | Microsoft GraphRAG [25] |
+| **细粒度细节检索** | 精确匹配文本内容 | 实体粒度粗，可能丢失细节 | **向量** ✅ | RAG vs GraphRAG [17] |
+
+**关键论文证据**：
+
+> **RAG vs. GraphRAG: A Systematic Evaluation [17]**：
+> "RAG performs better on single-hop questions and those requiring fine-grained details, whereas GraphRAG is more effective for multi-hop and global summarization." 混合策略（Selection + Integration）在 MultiHop-RAG 上提升 **QA accuracy +6.4 points**。
+
+> **AMG-RAG [20]**：GraphRAG + 医学知识图谱在 MEDQA 上达到 **73.92%**，但移除搜索功能后下降到 **67.16%**（-6.76%），说明结构化检索对复杂领域至关重要。
+
+> **SR-RAG [18]**：在证据召回 R@10 上，GraphRAG 类方法（0.812）**显著优于**纯向量基线（0.643-0.738），但细粒度 PICOT 匹配上传统 RAG 仍有优势。
+
+#### 3.5.2 可衡量的评估指标
+
+从论文和业界实践中，指标分为**四个维度**：
+
+| 维度 | 指标 | 含义 | 适用场景 |
+|------|------|------|---------|
+| **检索质量** | Recall@K (R@K), MRR, Accuracy@K, Nugget Coverage (NC), Context Precision, Context Recall | 评估是否找全、排序质量、端到端准确率 | 检索阶段验证 |
+| **生成质量** | Faithfulness (忠实度), Answer Relevancy, Semantic Similarity (SS) | 答案是否基于检索内容、是否回答了问题、与参考答案的语义相似度 | 端到端 QA 评估 |
+| **多跳能力** | 多跳准确率, 证据链完整性, 推理步骤正确性 | 需要 N 步推理的问题的正确率、检索路径是否覆盖所有必要节点 | 复杂推理任务 |
+| **效率与成本** | Latency (P50/P95), Indexing Cost, Query Cost, Storage Overhead | 查询延迟、构建索引的 Token/时间成本、每次查询的 Token/计算成本、存储开销 | 工程部署 |
+
+> **RAGAS [30]** 框架专门评估 RAG 系统：Faithfulness (0.0-1.0) 衡量生成答案是否基于检索内容且无幻觉；Answer Relevancy 评估答案与问题的相关性；Context Precision/Recall 评估检索上下文的质量。
+
+#### 3.5.3 我们的检索策略：图优先 + 向量为辅
+
+当前 P0 模块（ConceptRetriever）的检索策略设计：
+
+| 策略 | 方法 | 数据层 | 是否使用 Embedding | 优势 |
+|------|------|--------|-------------------|------|
+| **1. 精确匹配** | `name = 'RAG'` | KùzuDB CanonicalConcept | ❌ 纯图查询 | 100% 精确，可解释性强 |
+| **2. 模糊匹配** | `name CONTAINS 'RAG'` | KùzuDB CanonicalConcept | ❌ 纯图查询 | 容错性强，无需 embedding 计算 |
+| **3. 别名匹配** | `aliases CONTAINS 'RAG'` | KùzuDB CanonicalConcept | ❌ 纯图查询 | 支持同义词和缩写 |
+| **4. Embedding 回退** | `vector_store.query("RAG")` | HybridRetriever → 向量检索 | ✅ **唯一使用 embedding** | 发现图查询未覆盖的新关联 |
+
+**关键设计原则**：前 3 个策略是**确定性的**（结果可预测、可解释），只有在全部失败时才触发 embedding 回退。**这与学术界推荐的"混合策略"方向一致。**
+
+> **CatRAG [21]** 指出"Static Graph Fallacy — 固定转移概率导致语义漂移"，但我们的设计通过**保留精确匹配作为最高优先级策略**，避免了纯 embedding 检索的语义漂移风险。
+
+> **ReMindRAG [22]** 的 LLM 引导图遍历 + 记忆回放虽然降低了 50% 查询成本，但引入了额外的 LLM 推理开销。我们的设计**不需要运行时 LLM 调用**，仅依赖图数据库查询和（可选的）向量检索，更适合低延迟场景。
+
+#### 3.5.4 为什么不全部 Embedding 化？
+
+**将 CanonicalConcept 全部 embedding 化并替换图查询，不会更好，反而会削弱图查询的核心优势。**
+
+| 维度 | 当前策略（图优先 + embedding 回退） | 全部 Embedding 化 |
+|------|-----------------------------------|-------------------|
+| **精确匹配** | 图查询 `name = 'RAG'` → 100% 准确 | 向量相似度 → 可能返回"RAG 综述"等近似结果 |
+| **同义词匹配** | 别名列表（手动/LLM 生成） | 向量天然支持语义相似 |
+| **未录入概念** | embedding 回退可找到新关联 | 能发现新关联 |
+| **多跳能力** | 图遍历 O(1)~O(n) 邻域遍历 | 需要多次向量查询 + 二次查询，效率低 |
+| **可解释性** | 路径清晰：RAG → DEPENDS_ON → 向量检索 | 黑盒：为什么返回这个概念？ |
+| **延迟** | 图查询 < 10ms | 向量检索 + 重排序 ≈ 50-200ms |
+
+**改进方向（不替换图查询，而是增强）**：
+1. **并行执行**：图查询与向量检索同时执行，结果融合
+2. **embedding 增强别名**：用 embedding 预计算概念别名，扩展别名列表
+3. **向量验证**：用 embedding 验证图查询结果的语义相关性（过滤伪命中）
+
+> **Embeddings + Knowledge Graphs: The Ultimate Tools for RAG [33]** 系统论证了向量嵌入与知识图谱的**互补性**：知识图谱提供显式结构和多跳能力，向量嵌入提供语义相似性和容错能力。两者的协同是 RAG 系统的最优架构。
+
+---
+
 ## 4. 数据模型
 
 ### 4.1 节点类型
