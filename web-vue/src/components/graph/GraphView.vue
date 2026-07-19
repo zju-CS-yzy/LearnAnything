@@ -24,16 +24,16 @@
           <button class="btn btn-sm" @click="searchNode">搜索</button>
         </div>
         <div class="toolbar-group">
-          <button 
-            class="btn btn-sm" 
+          <button
+            class="btn btn-sm"
             :class="{ 'btn-primary': viewMode === 'document' }"
-            @click="switchViewMode('document')" 
+            @click="switchViewMode('document')"
             title="文档结构树"
           >📄 文档树</button>
-          <button 
-            class="btn btn-sm" 
+          <button
+            class="btn btn-sm"
             :class="{ 'btn-primary': viewMode === 'concept' }"
-            @click="switchViewMode('concept')" 
+            @click="switchViewMode('concept')"
             title="知识图谱"
           >🧩 知识图谱</button>
           <button class="btn btn-sm" @click="fitGraph" title="适应窗口">⬜ 适应</button>
@@ -198,7 +198,7 @@ const isLoading = ref(false)
 const nodeCount = ref(0)
 const edgeCount = ref(0)
 
-// LA-035-P19: 视图模式 — 'document' 文档结构树 / 'concept' 知识图谱
+// LA-035-P19: 视图模式 - 'document' 文档结构树 / 'concept' 知识图谱
 const viewMode = ref('concept')
 
 // 构建选项
@@ -272,12 +272,16 @@ function initCy() {
     highlightNeighbors(node)
   })
 
-  // LA-035-P10: 鼠标悬停显示预览卡片（仅概念节点）
+  // LA-035-P10: 鼠标悬停显示预览卡片
+  // P39-FIX: 支持文档树节点（heading/paragraph/document）显示 tooltip
   cy.on('mouseover', 'node', (e) => {
     const node = e.target
     const nodeType = node.data('type') || ''
-    // 只对概念节点显示 tooltip
-    if (['child', 'parent', 'markdown'].includes(nodeType)) return
+    // 对 chunk 节点（child/parent/markdown/heading/paragraph/document）和概念节点都显示 tooltip
+    // 图片节点用特殊处理
+    if (nodeType === 'image' || nodeType === 'image_pseudo') {
+      // 图片节点 tooltip 保持原有逻辑
+    }
 
     if (tooltipTimer) clearTimeout(tooltipTimer)
 
@@ -294,16 +298,17 @@ function initCy() {
       name: node.data('label'),
       type: nodeType,
       description: node.data('description') || '',
+      text: node.data('text') || '',  // P39-FIX: 传递 text 供 tooltip 显示
       source_chunks: node.data('source_chunks') || [],
       media_refs: node.data('media_refs') || [],
     }
+    console.log('[GraphView] tooltipNode set, text length=', (tooltipNode.value.text || '').length, 'type=', nodeType)
     tooltipVisible.value = true
   })
 
   cy.on('mouseout', 'node', (e) => {
     const node = e.target
     const nodeType = node.data('type') || ''
-    if (['child', 'parent', 'markdown'].includes(nodeType)) return
 
     // 延迟关闭，允许鼠标移入 tooltip
     tooltipTimer = setTimeout(() => {
@@ -330,16 +335,20 @@ async function loadAllNodes() {
   try {
     if (!cy) return
     cy.elements().remove()
+    console.log('[GraphView] loadAllNodes start, viewMode=', viewMode.value)
 
     if (viewMode.value === 'document') {
-      // LA-035-P19: 文档结构树视图 — 只加载 Chunk 节点 + 结构边
+      // LA-035-P19: 文档结构树视图 - 只加载 Chunk 节点 + 结构边
       await loadChunkNodes()
+      console.log('[GraphView] after loadChunkNodes, nodes=', cy.nodes().length, 'edges=', cy.edges().length)
       await loadEdges()
+      console.log('[GraphView] after loadEdges, nodes=', cy.nodes().length, 'edges=', cy.edges().length)
       if (cy.nodes().length > 0) {
         runTreeLayout(cy)
+        console.log('[GraphView] after runTreeLayout, nodes=', cy.nodes().length, 'edges=', cy.edges().length)
       }
     } else {
-      // LA-035-P19: 知识图谱视图 — 只加载 CanonicalConcept + 语义边
+      // LA-035-P19: 知识图谱视图 - 只加载 CanonicalConcept + 语义边
       await loadConceptNodes()
       await loadSemanticEdges()
       if (cy.nodes().length > 0) {
@@ -354,11 +363,70 @@ async function loadAllNodes() {
 
     nodeCount.value = cy.nodes().length
     edgeCount.value = cy.edges().length
+    console.log('[GraphView] loadAllNodes final, nodes=', nodeCount.value, 'edges=', edgeCount.value)
   } catch (e) {
     console.error('[GraphView] 加载图谱失败:', e)
   } finally {
     isLoading.value = false
   }
+}
+
+// P34-FIX: 为文档树节点构建 UML 卡片标签
+// P38-FIX: 限制文字长度避免溢出，增大 lineHeight 和 padding
+function buildChunkCard(label, chunkType, text) {
+  const typeLabels = {
+    heading: '【标题】',
+    paragraph: '【段落】',
+    document: '【文档】',
+    child: '【片段】',
+    markdown: '【片段】',
+    image: '【图片】',
+    image_pseudo: '【图片】',
+    formula_pseudo: '【公式】',
+  }
+  const typeLabel = typeLabels[chunkType] || '【片段】'
+
+  // 限制标题长度，确保在卡片宽度内不换行
+  const titleMaxChars = 12
+  let title = (label || '未命名').slice(0, titleMaxChars)
+  if ((label || '').length > titleMaxChars) title += '…'
+
+  // 限制描述长度，确保不换行（中文字符约 10px 宽，卡片宽度约 140px，每行约 12-14 字符）
+  const descMaxChars = chunkType === 'paragraph' ? 22 : 14
+  const descRaw = (text || '').replace(/\s+/g, ' ').trim()
+  let desc = descRaw.slice(0, descMaxChars)
+  if (descRaw.length > descMaxChars) desc += '…'
+
+  let cardLabel = `${title}\n━━━━━━\n${typeLabel}`
+  if (desc) {
+    cardLabel += `\n━━━━━━\n${desc}`
+  }
+
+  // 基于最宽行计算卡片宽度（10px 字体 ≈ 10px/字符 + 20px 内边距）
+  const allLines = cardLabel.split('\n')
+  const maxChars = Math.max(...allLines.map(l => l.length))
+  const nodeWidth = Math.max(110, maxChars * 10 + 20)
+
+  // 基于实际行数计算卡片高度（无自动换行，\n 行数 = 实际渲染行数）
+  const lineHeight = 16  // 10px 字体 + 行间距
+  const padding = 24     // 上下各 12px
+  const cardHeight = Math.max(56, allLines.length * lineHeight + padding)
+
+  return { cardLabel, cardHeight, nodeWidth }
+}
+
+// P41-FIX: 计算图片 URL（参考 NodeDetailPanel 逻辑）
+function getChunkImageUrl(imagePath) {
+  if (!imagePath) return ''
+  const idx = imagePath.indexOf('_v1_images')
+  if (idx !== -1) {
+    const before = imagePath.substring(0, idx)
+    const sepIdx = Math.max(before.lastIndexOf('/'), before.lastIndexOf('\\'))
+    const subject = sepIdx !== -1 ? before.substring(sepIdx + 1) : before
+    const filename = imagePath.substring(imagePath.lastIndexOf('/') + 1).split('\\').pop()
+    return `${window.location.origin}/api/images/${subject.replace('_v1_images', '')}/${filename}`
+  }
+  return ''
 }
 
 async function loadChunkNodes() {
@@ -372,23 +440,39 @@ async function loadChunkNodes() {
       return
     }
     const data = await resp.json()
-    const chunkNodes = (data.nodes || []).map(n => ({
-      data: {
-        id: n.id,
-        label: generateNodeLabel(n.text, n.heading_path, n.id),
-        type: n.chunk_type || 'child',
-        chunkType: n.chunk_type || 'child',
-        source: n.source,
-        page_number: n.page_number,
-        text: n.text || '',
-        heading_path: n.heading_path || '',
-        // LA-035: 图片字段
-        image_path: n.image_path || '',
-        thumbnail_path: n.thumbnail_path || '',
-        width: n.width || 0,
-        height: n.height || 0,
+    const chunkNodes = (data.nodes || []).map(n => {
+      const label = generateNodeLabel(n.text, n.heading_path, n.id)
+      const chunkType = n.chunk_type || 'child'
+      const { cardLabel, cardHeight, nodeWidth } = buildChunkCard(label, chunkType, n.text)
+      // P41-FIX: 为图片 chunk 计算预览 URL
+      const imageUrl = (chunkType === 'image' || chunkType === 'image_pseudo')
+        ? getChunkImageUrl(n.image_path || n.thumbnail_path)
+        : ''
+      // Cytoscape background-image 需要 'none' 而非空字符串作为无效值
+      const bgImage = imageUrl || 'none'
+      return {
+        data: {
+          id: n.id,
+          label: label,
+          cardLabel: cardLabel,
+          cardHeight: cardHeight,
+          nodeWidth: nodeWidth,
+          type: chunkType,
+          chunkType: chunkType,
+          source: n.source,
+          page_number: n.page_number,
+          text: n.text || '',
+          heading_path: n.heading_path || '',
+          // LA-035: 图片字段
+          image_path: n.image_path || '',
+          thumbnail_path: n.thumbnail_path || '',
+          imageUrl: imageUrl,  // 用于 tooltip / 详情面板
+          bgImage: bgImage,    // P41-FIX: 用于 Cytoscape background-image（'none' 或 URL）
+          width: n.width || 0,
+          height: n.height || 0,
+        }
       }
-    }))
+    })
     if (chunkNodes.length > 0 && cy) {
       cy.add(chunkNodes)
     }
@@ -400,16 +484,31 @@ async function loadChunkNodes() {
 async function loadEdges() {
   try {
     // P30-FIX: limit 从 200 增大到 5000，避免 BELONGS_TO 边被截断
-    const resp = await fetch(
-      `${window.location.origin}/api/knowledge-graph/${currentSubject.value}/edges?limit=5000`
-    )
+    const url = `${window.location.origin}/api/knowledge-graph/${currentSubject.value}/edges?limit=5000`
+    console.log('[GraphView] loadEdges URL:', url)
+    const resp = await fetch(url)
     if (!resp.ok) {
       console.warn('[GraphView] Edges API failed:', resp.status)
       return
     }
     const data = await resp.json()
+    console.log('[GraphView] loadEdges API response, total edges returned:', data.count, 'edges array length:', (data.edges || []).length)
+
+    // P32-FIX: 收集已加载的节点ID，用于验证边的有效性
+    const loadedNodeIds = new Set()
+    cy.nodes().forEach(n => loadedNodeIds.add(n.id()))
+    console.log('[GraphView] loadedNodeIds count:', loadedNodeIds.size)
+
     const allEdges = (data.edges || [])
-      .filter(edge => edge.type === 'BELONGS_TO')  // P30-FIX: 文档树只加载层级边，过滤同级顺序边
+      .filter(edge => edge.type === 'BELONGS_TO')  // P30-FIX: 文档树只加载层级边
+      .filter(edge => {
+        // P32-FIX: 跳过悬空边（source 或 target 节点未加载）
+        const valid = loadedNodeIds.has(edge.source) && loadedNodeIds.has(edge.target)
+        if (!valid) {
+          console.warn('[GraphView] skipping dangling edge:', edge.source, '->', edge.target)
+        }
+        return valid
+      })
       .map(edge => ({
         data: {
           id: `${edge.source}-${edge.type}-${edge.target}`,
@@ -418,8 +517,13 @@ async function loadEdges() {
           type: edge.type,
         }
       }))
+    console.log('[GraphView] loadEdges after filter, BELONGS_TO edges:', allEdges.length)
+
     if (allEdges.length > 0 && cy) {
-      cy.add(allEdges)
+      const added = cy.add(allEdges)
+      console.log('[GraphView] loadEdges cy.add result, added elements:', added.length, 'cy.edges() after add:', cy.edges().length)
+    } else {
+      console.log('[GraphView] loadEdges skipped cy.add, allEdges.length=', allEdges.length, 'cy exists=', !!cy)
     }
   } catch (e) {
     console.error('[GraphView] 加载边失败:', e)
@@ -449,7 +553,7 @@ async function loadConceptNodes() {
           sourceChunks = sc.split(',').map(s => s.trim()).filter(Boolean)
         }
       }
-      
+
       // 解析 source_refs（后端返回的可能是数组）
       let sourceRefs = []
       const sr = c.source_refs || []
@@ -737,9 +841,11 @@ function searchNode() {
 }
 
 // ========== Phase 2: 概念操作 ==========
+// P39-FIX: isChunkNodeType 需要包含所有 chunk 类型（heading/paragraph/document/markdown/image_pseudo 等）
 function isChunkNodeType(nodeType) {
   if (!nodeType) return true
-  return ['child', 'parent'].includes(nodeType)
+  const chunkTypes = ['child', 'parent', 'markdown', 'heading', 'paragraph', 'document', 'image', 'image_pseudo', 'formula_pseudo']
+  return chunkTypes.includes(nodeType)
 }
 
 function typeLabel(type) {

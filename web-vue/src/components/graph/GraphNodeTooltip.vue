@@ -22,6 +22,12 @@
           <div class="tooltip-description">{{ node.description }}</div>
         </div>
 
+        <!-- P39-FIX: 原文摘要（chunk 节点） -->
+        <div v-if="node.text" class="tooltip-section">
+          <div class="tooltip-label">📝 原文摘要</div>
+          <div class="tooltip-description tooltip-text-preview">{{ textPreview }}</div>
+        </div>
+
         <!-- 来源 Chunk -->
         <div v-if="node.source_chunks && node.source_chunks.length > 0" class="tooltip-section">
           <div class="tooltip-label">
@@ -118,6 +124,27 @@ function onTooltipLeave() {
   tooltipHover = false
   emit('update:visible', false)
 }
+
+// P39-FIX: 调试日志
+const debugTooltipInfo = computed(() => {
+  const n = props.node
+  console.log('[GraphNodeTooltip] node received:', {
+    id: n?.id,
+    type: n?.type,
+    text_length: (n?.text || '').length,
+    text_preview: (n?.text || '').slice(0, 50),
+    has_text: !!n?.text,
+    visible: props.visible,
+  })
+  return null
+})
+
+// P39-FIX: 原文摘要预览（前 120 字符）
+const textPreview = computed(() => {
+  const text = props.node?.text || ''
+  if (text.length <= 120) return text
+  return text.slice(0, 120) + '...'
+})
 
 // 计算 tooltip 位置：节点右侧偏移，带边界检测
 const tooltipStyle = computed(() => {
@@ -304,6 +331,16 @@ function onImageError(e) {
   line-height: 1.6;
   color: var(--text-secondary, #555);
   word-break: break-word;
+}
+
+/* P39-FIX: 原文摘要预览样式 */
+.tooltip-text-preview {
+  max-height: 120px;
+  overflow-y: auto;
+  padding: 8px;
+  background: var(--bg-hover, #f8f9fa);
+  border-radius: 4px;
+  font-size: 12px;
 }
 
 .tooltip-source-list {

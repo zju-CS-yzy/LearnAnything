@@ -947,3 +947,160 @@
 - **优先级**: P1（用户高频需求，但需先完成 P0 流程稳定 + 多题型测试）
 - **备注**: 此设计已考虑与现有 L1 记忆层和消息总线的无缝连接，不引入额外依赖。实现后可显著提升 TutorAgent 的连续讲解体验和 QuizAgent 的针对性出题效果。
 
+
+
+---
+
+## 2026-07-19 更新
+
+### LA-035-P31: 删除学科报错 KNOWLEDGE_BASE_DIR referenced before assignment
+- **状态**: 🔴 **新增（今日优先）**
+- **问题描述**: 删除学科时后端报错：[SubjectDelete] Error: local variable 'KNOWLEDGE_BASE_DIR' referenced before assignment
+- **根因分析**: subject_manager.py delete_subject 函数中，except 块内包含 rom config.settings import KNOWLEDGE_BASE_DIR。Python 的局部变量规则：函数内任何位置的 import 都会使该变量成为局部变量。若 GraphStore.delete_all() 成功（不进入 except），该局部变量未赋值，后续代码引用即报错。
+- **修复方案**: 删除 except 块内的冗余 import，模块顶部已全局导入 KNOWLEDGE_BASE_DIR。
+- **优先级**: P0
+
+### LA-035-P32: 文档树节点/边数异常（441节点，仅34边）
+- **状态**: 🔴 **新增（今日优先）**
+- **问题描述**: 文档树视图显示节点 441，边 34。若构成 3 棵连通树，应有 438 条边。边数严重不足，且浏览器控制台却显示"没有孤立节点"。
+- **根因分析**:
+  1. ackend_api.py list_graph_edges 中 BELONGS_TO 和 ADJACENT_TO 查询硬编码 LIMIT 100，截断大量边（即使函数参数 limit=5000）
+  2. GraphLayout.js unTreeLayout 依赖 parent_id 字段识别树结构，但 loadChunkNodes 从未加载此字段 → 所有节点因 !parentId 被误判为根节点 → 控制台显示 "orphanNodes: 0"
+  3. 实际 BELONGS_TO 边未在前端被用于构建树，导致 dagre 只处理有边节点（极少数），大量无边节点被堆叠在默认位置
+- **修复方案**:
+  1. list_graph_edges: 去掉硬编码 LIMIT 100，使用传入的 limit 参数
+  2. unTreeLayout: 基于 BELONGS_TO 边（而非 parent_id）识别树结构、根节点、孤立节点
+  3. 验证数据库中实际边数是否匹配预期
+- **优先级**: P0
+
+### LA-035-P30: 文档树效果仍为纵向一列 + 连线混乱
+- **状态**: 🔴 **重新设计（依赖 P32）**
+- **问题描述**: 文档树视图节点全部纵向堆叠，连线混乱。用户反馈"和原先相比没变化"。
+- **根因**: 依赖 P32 修复。在边数正确、树结构识别正确后，dagre LR 布局应能呈现清晰的 document → heading → paragraph 层级结构。
+- **后续**: P32 修复后验证，若仍有问题再调整布局参数（rankSep、nodeSep、层间距等）。
+- **优先级**: P1（依赖 P32）
+
+---
+
+*记录日期：2026-07-19*
+
+
+---
+
+## 2026-07-19 第二次更新
+
+### LA-035-P31: 删除学科报错 KNOWLEDGE_BASE_DIR referenced before assignment
+- **状态**: ✅ **已解决**
+- **修复**: subject_manager.py 删除 except 块内冗余的 rom config.settings import KNOWLEDGE_BASE_DIR，避免 Python 局部变量作用域陷阱
+
+### LA-035-P32: 文档树节点/边数异常（441节点，仅34边）
+- **状态**: ✅ **已解决**
+- **修复**:
+  1. ackend_api.py list_graph_edges: 去掉硬编码 LIMIT 100，使用传入的 limit 参数
+  2. GraphLayout.js unTreeLayout: 重写为基于 BELONGS_TO 边识别树结构（替代错误的 parent_id 逻辑）
+  3. GraphView.vue loadEdges: 添加悬空边过滤和详细日志
+
+### LA-035-P30: 文档树效果仍为纵向一列 + 连线混乱
+- **状态**: ✅ **已解决（依赖 P32）**
+- **验证**: P32 修复后 dagre LR 布局正确呈现 document → heading → paragraph 层级结构
+
+### LA-035-P33: 文档树贝塞尔曲线弯曲方向
+- **状态**: 🔴 **新增（今日）**
+- **问题描述**: BELONGS_TO 边全部向下方凸弯曲，需要改为：子节点在父节点上方则向上凸，子节点在父节点下方则向下凸，y坐标相同则不弯曲
+- **根因**: unTreeLayout 未调用 djustEdgeCurvature
+- **修复方案**: 在 unTreeLayout 布局完成后调用 djustEdgeCurvature(cy)
+- **优先级**: P1
+
+### LA-035-P34: 文档树节点风格改为卡片形
+- **状态**: 🔴 **新增（今日）**
+- **问题描述**: 文档树节点目前是小圆点/简单形状，需改为与知识图谱 ConceptTree 相同的 UML 卡片风格
+- **修复方案**:
+  1. loadChunkNodes: 为 heading/paragraph/document 节点生成 cardLabel、cardHeight、nodeWidth
+  2. GraphStyles.js: 为 chunk 节点添加卡片样式选择器
+- **优先级**: P1
+
+### LA-035-P35: 孤立 paragraph chunk 排查
+- **状态**: 🔴 **新增（今日）**
+- **问题描述**: 部分 paragraph chunk 在文档树中显示为孤立节点。示例ID: md_RAG关键痛点和解决方案面试题_p_1_110631
+- **排查方向**: 检查该节点的 heading_path 是否匹配不到任何 heading，或 BELONGS_TO 关系未正确建立
+- **优先级**: P1
+
+### LA-035-P36: 文档树详情界面/悬浮窗内容补充
+- **状态**: 🔴 **新增（今日）**
+- **问题描述**: 文档树节点点击后详情面板和悬浮预览未显示原始 chunk 内容
+- **依赖**: P34 完成后实施
+- **优先级**: P2
+
+### LA-035-P37: 同级 paragraph chunk 标题区分
+- **状态**: 🔴 **新增（今日）**
+- **问题描述**: 很多同级 paragraph chunk 前端显示标题完全一致，需区分
+- **依赖**: P34 完成后评估
+- **优先级**: P2
+
+---
+
+*记录日期：2026-07-19*
+
+
+---
+
+## 2026-07-19 第三次更新
+
+### LA-035-P37: 同级 paragraph chunk 标题区分
+- **状态**: ✅ **已解决（自然解决）**
+- **说明**: P34 卡片化后 paragraph chunk 直接显示部分原文内容在卡片上，同级 paragraph 因内容不同而自然区分
+
+### LA-035-P33: 文档树贝塞尔曲线弯曲方向
+- **状态**: ✅ **已解决**
+- **修复**: unTreeLayout 布局完成后调用 djustEdgeCurvature(cy)
+
+### LA-035-P34: 文档树节点卡片风格
+- **状态**: ✅ **已解决**
+- **修复**: loadChunkNodes 添加 uildChunkCard，GraphStyles.js 添加卡片样式选择器
+
+### LA-035-P35: 孤立 paragraph chunk
+- **状态**: ✅ **已解决**
+- **修复**: uild_belongs_to_relations 为空 heading_path 的 paragraph 建立到 document 的 BELONGS_TO 关系
+
+### LA-035-P38: 卡片文字溢出
+- **状态**: 🔴 **新增（今日）**
+- **问题描述**: 卡片化后 chunk 因内容过长溢出到卡片外
+- **根因**: uildChunkCard 未考虑 Cytoscape 自动换行，lineHeight 和 padding 不足
+- **修复方案**: 限制标题/描述长度避免换行，增大 lineHeight 和 padding
+- **优先级**: P1
+
+### LA-035-P39: 详情面板/悬浮窗缺少 chunk 原文
+- **状态**: 🔴 **新增（今日）**
+- **问题描述**: 文档树节点点击后详情面板和悬浮预览未显示原始 chunk 内容
+- **修复方案**:
+  1. NodeDetailPanel.vue: 新增"原文内容"区域显示 
+ode.text
+  2. GraphNodeTooltip.vue: 新增原文摘要显示（前 120 字符）
+- **优先级**: P1
+
+---
+
+*记录日期：2026-07-19*
+
+
+---
+
+## 2026-07-19 第四次更新
+
+### LA-035-P40: 段落排序（原文顺序）
+- **状态**: ✅ **已解决**
+- **修复**: GraphLayout.js unTreeLayout 中 dagre 布局完成后调用 sortNodesByDocumentOrder
+- **原理**: chunk_id 字典序反映原文顺序（如 md_xxx_p_1_hash < md_xxx_p_2_hash）
+- **效果**: 同层级节点按原文顺序从上到下排列
+
+### LA-035-P41: 图片 chunk 预览
+- **状态**: ✅ **已解决**
+- **修复**:
+  1. GraphView.vue loadChunkNodes: 为 image/image_pseudo chunk 计算 imageUrl
+  2. GraphStyles.js: 图片节点使用 ackground-image: data(imageUrl) + ackground-fit: cover
+  3. 无 imageUrl 时回退到 📷 标签
+- **效果**: 文档树中图片 chunk 直接显示缩略图
+
+---
+
+*记录日期：2026-07-19*

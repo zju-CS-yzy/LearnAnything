@@ -1260,11 +1260,11 @@ def list_graph_edges(subject: str, limit: int = 5000):
 
         edges = []
         try:
-            result = conn.execute("""
+            result = conn.execute(f"""
                 MATCH (a:Chunk)-[r:BELONGS_TO]->(b:Chunk)
                 WHERE a.chunk_type <> 'parent' AND b.chunk_type <> 'parent'
                 RETURN a.chunk_id, b.chunk_id
-                LIMIT 100
+                LIMIT {limit}
             """)
             while result.has_next():
                 row = result.get_next()
@@ -1277,11 +1277,11 @@ def list_graph_edges(subject: str, limit: int = 5000):
             pass
 
         try:
-            result = conn.execute("""
+            result = conn.execute(f"""
                 MATCH (a:Chunk)-[r:ADJACENT_TO]->(b:Chunk)
                 WHERE a.chunk_type <> 'parent' AND b.chunk_type <> 'parent'
                 RETURN a.chunk_id, b.chunk_id
-                LIMIT 100
+                LIMIT {limit}
             """)
             while result.has_next():
                 row = result.get_next()

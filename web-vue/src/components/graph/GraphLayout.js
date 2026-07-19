@@ -154,86 +154,153 @@ export function getTypeLabel(type) {
  * 5. 不同树共享子节点时，复制子节点到各自的树中
  */
 export function runTreeLayout(cy) {
-  // P30-FIX: 使用 dagre 布局替代自定义层次布局，与概念图谱保持一致风格
-  // 同时修复图片 chunk 被单独处理的问题（图片 chunk 有 parent_id，应包含在树中）
+  // P40-FIX-v3: 逐棵树分别 dagre + 手动排列，避免多棵树重叠
+  console.log('[runTreeLayout] START, nodes=', cy.nodes().length, 'edges=', cy.edges().length)
 
-  // 1. 找出所有 chunk 节点（包含图片 chunk，不单独排除）
-  const chunkNodes = cy.nodes().filter(n => {
-    const t = n.data('type')
-    return t === 'child' || t === 'markdown' || t === 'image' || t === 'image_pseudo' || t === 'formula_pseudo' ||
-           t === 'paragraph' || t === 'heading' || t === 'document'
-  })
+  try {
+    const allNodes = cy.nodes()
+    const belongsEdges = cy.edges().filter(e => e.data('type') === 'BELONGS_TO')
+    console.log('[runTreeLayout] all nodes:', allNodes.length, 'BELONGS_TO edges:', belongsEdges.length)
 
-  if (chunkNodes.length === 0) return
-
-  console.log('[runTreeLayout] chunkNodes:', chunkNodes.length)
-  console.log('[runTreeLayout] 节点类型统计:', [...chunkNodes].map(n => n.data('type')).reduce((acc, t) => { acc[t] = (acc[t] || 0) + 1; return acc }, {}))
-
-  // 2. 分离树节点（有 parent_id 且 parent 存在）和孤立节点（parent 不存在）
-  const treeNodes = chunkNodes.filter(n => {
-    const parentId = n.data('parent_id')
-    if (!parentId) return true  // 没有 parent = 根节点
-    const parent = cy.getElementById(parentId)
-    return parent && parent.length > 0 && chunkNodes.has(parent)
-  })
-
-  const orphanNodes = chunkNodes.filter(n => {
-    const parentId = n.data('parent_id')
-    if (!parentId) return false  // 没有 parent = 根，不是孤立
-    const parent = cy.getElementById(parentId)
-    return !parent || parent.length === 0 || !chunkNodes.has(parent)
-  })
-
-  console.log('[runTreeLayout] treeNodes:', treeNodes.length, 'orphanNodes:', orphanNodes.length)
-  const docNodes = chunkNodes.filter(n => n.data('type') === 'document')
-  const rootDocs = treeNodes.filter(n => n.data('type') === 'document')
-  console.log('[runTreeLayout] Document节点:', docNodes.length, '作为树节点:', rootDocs.length)
-
-  // 3. 对树节点使用 dagre 布局（LR 从左到右，与概念图谱一致）
-  if (treeNodes.length > 0) {
-    treeNodes.layout({
-      name: 'dagre',
-      rankDir: 'LR',        // 从左到右，document 在左，paragraph 在右
-      rankSep: 100,         // 层间距（x 方向）
-      nodeSep: 20,          // 同一层节点间距（y 方向）
-      edgeSep: 10,          // 边间距
-      padding: 10,
-      fit: false,           // 不自动 fit，我们手动控制 zoom
-      animate: false,
-    }).run()
-  }
-
-  // 4. 孤立节点放右侧网格（不与树重叠）
-  if (orphanNodes.length > 0) {
-    const treeBBox = treeNodes.boundingBox()
-    const maxTreeWidth = treeBBox ? treeBBox.w : 0
-    const cols = Math.max(1, Math.ceil(Math.sqrt(orphanNodes.length)))
-    const gapX = 100
-    const gapY = 30
-    orphanNodes.forEach((node, idx) => {
-      node.position({
-        x: maxTreeWidth + 200 + (idx % cols) * gapX,
-        y: Math.floor(idx / cols) * gapY,
+    if (belongsEdges.length === 0) {
+      console.log('[runTreeLayout] no edges, using grid')
+      const cols = Math.max(1, Math.ceil(Math.sqrt(allNodes.length)))
+      allNodes.forEach((n, i) => {
+        n.position({ x: (i % cols) * 200, y: Math.floor(i / cols) * 80 })
       })
+      cy.fit(50)
+      return
+    }
+
+    // 1. 构建邻接表和入度表
+    const nodeIds = new Set()
+    allNodes.forEach(n => nodeIds.add(n.id()))
+
+    const inDegree = new Map()
+    const outChildren = new Map()
+    belongsEdges.forEach(e => {
+      const src = e.source().id()
+      const tgt = e.target().id()
+      if (!nodeIds.has(src) || !nodeIds.has(tgt)) return
+      inDegree.set(tgt, (inDegree.get(tgt) || 0) + 1)
+      if (!outChildren.has(src)) outChildren.set(src, [])
+      outChildren.get(src).push(tgt)
     })
+
+    // 2. 找到所有根节点（document 或入度为0）
+    const rootIds = []
+    allNodes.forEach(n => {
+      if (!inDegree.has(n.id())) rootIds.push(n.id())
+    })
+    console.log('[runTreeLayout] rootIds:', rootIds.length, rootIds)
+
+    // 3. 识别孤立节点（不在任何树中的节点）
+    const treeNodeIds = new Set()
+    rootIds.forEach(rid => {
+      const q = [rid]
+      while (q.length > 0) {
+        const id = q.shift()
+        treeNodeIds.add(id)
+        const children = outChildren.get(id)
+        if (children) {
+          children.forEach(cid => { if (!treeNodeIds.has(cid)) q.push(cid) })
+        }
+      }
+    })
+    const orphanNodes = allNodes.filter(n => !treeNodeIds.has(n.id()))
+    console.log('[runTreeLayout] treeNodes:', treeNodeIds.size, 'orphanNodes:', orphanNodes.length)
+
+    // 4. 对每棵树分别跑 dagre
+    const treeInfos = []
+    rootIds.forEach(rootId => {
+      // BFS 收集该树的所有节点
+      const ids = new Set()
+      const q = [rootId]
+      while (q.length > 0) {
+        const id = q.shift()
+        ids.add(id)
+        const children = outChildren.get(id)
+        if (children) {
+          children.forEach(cid => { if (!ids.has(cid)) q.push(cid) })
+        }
+      }
+
+      // 收集该树的 Cytoscape 元素
+      let eles = cy.collection()
+      ids.forEach(id => { eles = eles.union(cy.getElementById(id)) })
+      belongsEdges.forEach(e => {
+        if (ids.has(e.source().id()) && ids.has(e.target().id())) {
+          eles = eles.union(e)
+        }
+      })
+
+      // 对该树跑 dagre
+      eles.layout({
+        name: 'dagre',
+        rankDir: 'LR',
+        rankSep: 120,
+        nodeSep: 25,
+        edgeSep: 10,
+        padding: 15,
+        fit: false,
+        animate: false,
+      }).run()
+
+      const bbox = eles.boundingBox()
+      treeInfos.push({ rootId, ids, bbox })
+      console.log('[runTreeLayout] tree ' + rootId + ': ' + ids.size + ' nodes, bbox w=' + Math.round(bbox.w) + ' h=' + Math.round(bbox.h))
+    })
+
+    // 5. 按顺序把树从左到右排列（避免重叠）
+    let currentX = 100
+    treeInfos.forEach(info => {
+      const offsetX = currentX - info.bbox.x1
+      info.ids.forEach(id => {
+        const n = cy.getElementById(id)
+        n.position('x', n.position('x') + offsetX)
+      })
+      // 重新计算 bbox
+      let eles = cy.collection()
+      info.ids.forEach(id => eles = eles.union(cy.getElementById(id)))
+      const newBBox = eles.boundingBox()
+      currentX = newBBox.x2 + 150  // 树间距 150
+    })
+
+    // 6. 孤立节点放最右侧
+    if (orphanNodes.length > 0) {
+      const lastTreeX = treeInfos.length > 0 ? currentX : 200
+      const cols = Math.max(1, Math.ceil(Math.sqrt(orphanNodes.length)))
+      const gapX = 120
+      const gapY = 50
+      orphanNodes.forEach((n, idx) => {
+        n.position({
+          x: lastTreeX + (idx % cols) * gapX,
+          y: Math.floor(idx / cols) * gapY,
+        })
+      })
+    }
+
+    // 7. 调整边曲率
+    adjustEdgeCurvature(cy)
+
+    cy.fit(50)
+    console.log('[runTreeLayout] done')
+
+  } catch (err) {
+    console.error('[runTreeLayout] FATAL ERROR:', err.message)
+    console.error(err.stack)
+    // emergency fallback
+    try {
+      const nodes = cy.nodes()
+      const cols = Math.max(1, Math.ceil(Math.sqrt(nodes.length)))
+      nodes.forEach((n, i) => {
+        n.position({ x: (i % cols) * 200, y: Math.floor(i / cols) * 80 })
+      })
+      cy.fit(50)
+    } catch (e2) {
+      console.error('[runTreeLayout] fallback failed:', e2)
+    }
   }
-
-  // 5. 手动 fit：所有节点（树 + 孤立）适应容器
-  const allNodes = treeNodes.union(orphanNodes)
-  const bbox = allNodes.boundingBox()
-  const container = cy.container()
-  const containerW = container.clientWidth
-  const containerH = container.clientHeight
-
-  let zoom = 0.5
-  if (bbox.w > 0 && bbox.h > 0) {
-    zoom = Math.min(containerH * 0.8 / bbox.h, containerW * 0.8 / bbox.w, 0.5)
-    zoom = Math.max(zoom, 0.15)
-  }
-  cy.zoom(zoom)
-  cy.pan({ x: containerW * 0.05, y: containerH * 0.05 })
-
-  console.log(`[runTreeLayout] dagre 布局完成，zoom=${zoom.toFixed(2)}，bbox=${JSON.stringify({w: Math.round(bbox.w), h: Math.round(bbox.h)})}`)
 }
 function adjustEdgeCurvature(cy) {
   const THRESHOLD = 5  // y 差值阈值，小于此值视为相平
@@ -260,15 +327,10 @@ function adjustEdgeCurvature(cy) {
   })
 }
 
-// ========== 概念层 dagre 布局 ==========
-
 /**
- * 概念节点布局（分连通分量 → 每分量 dagre LR → 二维网格排列）
- * 
- * 策略：
- * 1. 正确识别连通分量（无向图 BFS，避免单节点假树）
- * 2. 每个连通分量独立跑 dagre LR（树内从左向右生长）
- * 3. 多棵树按网格排列（从上到下、从左到右，每棵树独立区域）
+ * P40-FIX: 按原始文档顺序重新排列同级节点
+ * 原理：chunk_id 的命名规则保证了字典序反映原文顺序
+ * 例如：md_文件名_p_1_hash < md_文件名_p_2_hash
  */
 export function runConceptLayout(cy) {
   // 清除之前可能创建的副本

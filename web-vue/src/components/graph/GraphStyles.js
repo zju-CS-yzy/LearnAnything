@@ -98,48 +98,78 @@ export function buildCyStyles() {
         'background-color': '#2ecc71',
       }
     },
-    // ========== Chunk 节点类型区分（P30: heading/paragraph/document 样式区分）==========
-    // Heading 节点 — 圆角矩形，红色，较大
+    // ========== 文档树节点卡片风格（P34）==========
+    // 通用卡片样式（heading/paragraph/document/child/markdown）
+    {
+      selector: 'node[chunkType="heading"], node[chunkType="paragraph"], node[chunkType="document"], node[chunkType="child"], node[chunkType="markdown"]',
+      style: {
+        'label': 'data(cardLabel)',
+        'text-wrap': 'wrap',
+        'text-max-width': 'data(nodeWidth)',
+        'text-valign': 'center',
+        'text-halign': 'center',
+        'font-size': '10px',
+        'color': '#fff',
+        'text-outline-color': 'rgba(0,0,0,0.5)',
+        'text-outline-width': 1,
+        'width': 'data(nodeWidth)',
+        'height': 'data(cardHeight)',
+        'border-width': 2,
+        'shape': 'round-rectangle',
+        'corner-radius': 8,
+      }
+    },
+    // Heading 节点 — 红色
     {
       selector: 'node[chunkType="heading"]',
       style: {
-        'shape': 'round-rectangle',
         'background-color': '#e74c3c',
-        'width': 90,
-        'height': 36,
-        'font-size': '11px',
-        'text-wrap': 'wrap',
-        'text-max-width': 80,
+        'border-color': '#c0392b',
       }
     },
-    // Paragraph 节点 — 椭圆，蓝色，较小
+    // Paragraph 节点 — 蓝色
     {
       selector: 'node[chunkType="paragraph"]',
       style: {
-        'shape': 'ellipse',
         'background-color': '#3498db',
-        'width': 50,
-        'height': 30,
-        'font-size': '10px',
+        'border-color': '#2980b9',
       }
     },
-    // Document 节点 — 矩形，绿色，较大
+    // Document 节点 — 绿色
     {
       selector: 'node[chunkType="document"]',
       style: {
-        'shape': 'rectangle',
         'background-color': '#27ae60',
-        'width': 100,
-        'height': 40,
-        'font-size': '12px',
-        'text-wrap': 'wrap',
-        'text-max-width': 90,
+        'border-color': '#1e8449',
       }
     },
-    // ========== 图片节点样式（LA-035）==========
-    // P30-FIX: 兼容 image_pseudo 和 formula_pseudo 类型
+    // 其他 chunk 节点 — 灰色
     {
-      selector: 'node[chunkType="image"], node[chunkType="image_pseudo"], node[chunkType="formula_pseudo"], node[?isImage]',
+      selector: 'node[chunkType="child"], node[chunkType="markdown"]',
+      style: {
+        'background-color': '#7f8c8d',
+        'border-color': '#616a6b',
+      }
+    },
+    // ========== 图片节点样式（P41: 背景图预览）==========
+    {
+      selector: 'node[chunkType="image"], node[chunkType="image_pseudo"]',
+      style: {
+        'label': '',
+        'background-image': 'data(bgImage)',
+        'background-fit': 'cover',
+        'background-color': '#f39c12',
+        'width': 80,
+        'height': 80,
+        'border-width': 2,
+        'border-color': '#e67e22',
+        'shape': 'round-rectangle',
+        'corner-radius': 6,
+      }
+    },
+    // 图片节点加载失败时的回退样式（bgImage 为 'none' 时显示 📷）
+    {
+      selector: 'node[chunkType="image"][bgImage = "none"], node[chunkType="image_pseudo"][bgImage = "none"]',
       style: {
         'label': '📷',
         'font-size': '24px',
@@ -148,16 +178,11 @@ export function buildCyStyles() {
         'color': '#fff',
         'width': 40,
         'height': 40,
-        'border-width': 2,
-        'border-color': '#e67e22',
-        'background-color': '#f39c12',
-        'shape': 'round-rectangle',
-        'corner-radius': 6,
       }
     },
     // 图片节点高亮
     {
-      selector: 'node[chunkType="image"]:selected, node[chunkType="image_pseudo"]:selected, node[chunkType="formula_pseudo"]:selected, node[?isImage]:selected',
+      selector: 'node[chunkType="image"]:selected, node[chunkType="image_pseudo"]:selected',
       style: {
         'border-width': 4,
         'border-color': COLORS.selected,

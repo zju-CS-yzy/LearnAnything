@@ -236,7 +236,7 @@ def delete_subject(subject_id: str) -> bool:
         except Exception as e:
             print(f"[SubjectDelete] GraphStore.delete_all() failed (fallback to manual delete): {e}")
             # 降级：手动删除文件（如果 GraphStore 方法失败）
-            from config.settings import KNOWLEDGE_BASE_DIR
+            # 注：KNOWLEDGE_BASE_DIR 已在模块顶部导入，此处无需重复导入
             graph_db_dir = KNOWLEDGE_BASE_DIR / "graph_db"
             graph_db_file = graph_db_dir / f"{subject_id}_v1_graph"
             if graph_db_file.exists():
