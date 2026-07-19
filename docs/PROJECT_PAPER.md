@@ -53,7 +53,7 @@ LearnAnything 的核心功能分为四大模块：
 - 图片解析（VLM 视觉语言模型：GLM-4V 图片描述）
 - 双层图谱构建：
   - 文档层（Chunk）：BELONGS_TO（层级）+ ADJACENT_TO（相邻）
-  - 概念层（CanonicalConcept）：SOLUTION（需求→技术）+ DEPENDS_ON（依赖）+ REQUIRES（通用依赖）
+  - 概念层（CanonicalConcept）：基于范式构建概念关系（详见3.1.3）
 - 概念去重（基于 embedding 相似度，阈值 0.85）
 - 语义连接（基于 parent_hint + LLM 二次确认）
 
@@ -1011,6 +1011,14 @@ LearnAnything/
 | Agent 数量 | 3+ | Quiz, Coach, Tutor, Coordinator |
 | 可视化节点数 | 441+ | 单学科测试数据 |
 | 可视化边数 | 967+ | BELONGS_TO 关系 |
+
+---
+
+## 附录 C：技术栈选型详解
+
+本附录对论文正文中提及的所有技术方案（含已选方案和备选方案）进行详细说明，包括其实现原理、解决需求、核心特性、技术思想，以及为什么适合或不适合 LearnAnything 项目。
+
+详见独立文档：`APPENDIX_C.md`
 
 ---
 
