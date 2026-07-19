@@ -1,0 +1,339 @@
+Found 13 graph databases:
+  - generic_v1_graph
+  - linear_algebra_v1_graph
+  - RAG_graph
+  - rag_v1_graph
+  - rag鎶€鏈痏v1_graph
+  - rag閹垛偓閺堢棌v1_graph
+  - rag閹垛偓閺堢棌v1_graph_v1_graph
+  - test_v1_graph
+  - transformer_v1_graph
+  - 绾挎€т唬鏁癬v1_graph
+  - 缁炬寧鈧傚敩閺佺櫖v1_graph
+  - 缁炬寧鈧傚敩閺佺櫖v1_graph_v1_graph
+  - 鏁板_v1_graph
+
+============================================================
+Subject: generic_v1
+DB Path: D:\MyCS\AI\Project\LearnAnything\knowledge_base\graph_db\generic_v1_graph
+============================================================
+
+Total CanonicalConcept: 0
+[WARN] No nodes found, cannot check field
+
+media_refs Statistics:
+   Valid media_refs:  0
+   Empty media_refs:  0
+   JSON parse failed: 0
+
+[WARN] No samples (all nodes have empty media_refs or parse failed)
+
+----------------------------------------
+Chunk nodes media_refs check:
+
+============================================================
+Subject: linear_algebra_v1
+DB Path: D:\MyCS\AI\Project\LearnAnything\knowledge_base\graph_db\linear_algebra_v1_graph
+============================================================
+
+Total CanonicalConcept: 0
+[WARN] No nodes found, cannot check field
+
+media_refs Statistics:
+   Valid media_refs:  0
+   Empty media_refs:  0
+   JSON parse failed: 0
+
+[WARN] No samples (all nodes have empty media_refs or parse failed)
+
+----------------------------------------
+Chunk nodes media_refs check:
+
+============================================================
+Subject: RAG
+DB Path: D:\MyCS\AI\Project\LearnAnything\knowledge_base\graph_db\RAG_graph
+============================================================
+[ERROR] Count query failed: Binder exception: Table CanonicalConcept does not exist.
+
+============================================================
+Subject: rag_v1
+DB Path: D:\MyCS\AI\Project\LearnAnything\knowledge_base\graph_db\rag_v1_graph
+============================================================
+
+Total CanonicalConcept: 756
+media_refs field EXISTS (sample type: str)
+
+media_refs Statistics:
+   Valid media_refs:  45
+   Empty media_refs:  711
+   JSON parse failed: 0
+
+Samples (first 5):
+
+  Sample 1:
+     ID: concept_canonical_fa44cdfd49
+     Name: 外部数据存储
+     media_refs: [
+  {
+    "type": "image",
+    "path": "rag_v1_images/tmp73gooyvh_mineru_0_ad270de0.png",
+    "caption": ""
+  }
+]
+
+  Sample 2:
+     ID: concept_canonical_987d141608
+     Name: 按需检索
+     media_refs: [
+  {
+    "type": "image",
+    "path": "rag_v1_images/tmpmevygvhq_mineru_9_61a2e27f.png",
+    "caption": ""
+  }
+]
+
+  Sample 3:
+     ID: concept_canonical_86f09bb651
+     Name: 用户输入单个查询
+     media_refs: [
+  {
+    "type": "image",
+    "path": "rag_v1_images/tmplfcgsmeb_mineru_3_36c70fbb.png",
+    "caption": ""
+  },
+  {
+    "type": "image",
+    "path": "rag_v1_images/tmplfcgsmeb_mineru_0_d0acf041.png",
+    "caption": ""
+  }
+]
+
+  Sample 4:
+     ID: concept_canonical_850fb612c3
+     Name: 检索增强模拟
+     media_refs: [
+  {
+    "type": "image",
+    "path": "rag_v1_images/tmpmevygvhq_mineru_11_e3860cdc.png",
+    "caption": ""
+  },
+  {
+    "type": "image",
+    "path": "rag_v1_images/tmp73gooyvh_mineru_0_ad270de0.png",
+    "caption": ""
+  }
+]
+
+  Sample 5:
+     ID: concept_canonical_d792f3f0b7
+     Name: 检索到的块
+     media_refs: [
+  {
+    "type": "image",
+    "path": "rag_v1_images/tmpmevygvhq_mineru_8_77e84a74.png",
+    "caption": ""
+  }
+]
+
+----------------------------------------
+Chunk nodes media_refs check:
+  Chunk 1: md_RAG优化相关面试题_doc_0_4dd2c4... | type=document
+    media_refs: NO
+    image_path: NO
+  Chunk 2: md_RAG优化相关面试题_p_1_664368... | type=paragraph
+    media_refs: NO
+    image_path: NO
+  Chunk 3: md_RAG优化相关面试题_h2_0_4d3270... | type=heading
+    media_refs: NO
+    image_path: NO
+  Chunk 4: md_RAG优化相关面试题_h2_1_d397d1... | type=heading
+    media_refs: NO
+    image_path: NO
+  Chunk 5: md_RAG优化相关面试题_h2_2_f67e9a... | type=heading
+    media_refs: YES
+    image_path: NO
+    preview: [{"type": "image", "path": "D:\MyCS\AI\Project\LearnAnything\knowledge_base\rag_v1_images\tmpmevygvh
+  Chunk 6: img_pseudo_md_RAG优化相关面试题_h2_2_... | type=image_pseudo
+    media_refs: YES
+    image_path: NO
+    preview: [{"type": "image", "path": "D:\MyCS\AI\Project\LearnAnything\knowledge_base\rag_v1_images\tmpmevygvh
+  Chunk 7: md_RAG优化相关面试题_p_2_0361eb... | type=paragraph
+    media_refs: YES
+    image_path: NO
+    preview: [{"type": "image", "path": "rag_v1_images/tmpmevygvhq_mineru_8_77e84a74.png", "caption": ""}]
+  Chunk 8: md_RAG优化相关面试题_h2_3_13100f... | type=heading
+    media_refs: NO
+    image_path: NO
+  Chunk 9: md_RAG优化相关面试题_p_3_1cfb6b... | type=paragraph
+    media_refs: NO
+    image_path: NO
+  Chunk 10: md_RAG优化相关面试题_p_4_745d33... | type=paragraph
+    media_refs: NO
+    image_path: NO
+
+============================================================
+Subject: rag鎶€鏈痏v1
+DB Path: D:\MyCS\AI\Project\LearnAnything\knowledge_base\graph_db\rag鎶€鏈痏v1_graph
+============================================================
+[ERROR] Count query failed: Binder exception: Table CanonicalConcept does not exist.
+
+============================================================
+Subject: rag閹垛偓閺堢棌v1
+DB Path: D:\MyCS\AI\Project\LearnAnything\knowledge_base\graph_db\rag閹垛偓閺堢棌v1_graph
+============================================================
+[ERROR] Count query failed: Binder exception: Table CanonicalConcept does not exist.
+
+============================================================
+Subject: rag閹垛偓閺堢棌v1_v1
+DB Path: D:\MyCS\AI\Project\LearnAnything\knowledge_base\graph_db\rag閹垛偓閺堢棌v1_graph_v1_graph
+============================================================
+[ERROR] Count query failed: Binder exception: Table CanonicalConcept does not exist.
+
+============================================================
+Subject: test_v1
+DB Path: D:\MyCS\AI\Project\LearnAnything\knowledge_base\graph_db\test_v1_graph
+============================================================
+
+Total CanonicalConcept: 0
+[WARN] No nodes found, cannot check field
+
+media_refs Statistics:
+   Valid media_refs:  0
+   Empty media_refs:  0
+   JSON parse failed: 0
+
+[WARN] No samples (all nodes have empty media_refs or parse failed)
+
+----------------------------------------
+Chunk nodes media_refs check:
+
+============================================================
+Subject: transformer_v1
+DB Path: D:\MyCS\AI\Project\LearnAnything\knowledge_base\graph_db\transformer_v1_graph
+============================================================
+
+Total CanonicalConcept: 139
+media_refs field EXISTS (sample type: str)
+
+media_refs Statistics:
+   Valid media_refs:  27
+   Empty media_refs:  112
+   JSON parse failed: 0
+
+Samples (first 5):
+
+  Sample 1:
+     ID: concept_canonical_b7f0d724f4
+     Name: 输入矩阵
+     media_refs: [
+  {
+    "type": "image",
+    "path": "transformer_v1_images/tmpj0u1pq5p_mineru_16_f23c76cc.png",
+    "caption": ""
+  }
+]
+
+  Sample 2:
+     ID: concept_canonical_7b4e730d27
+     Name: 注意力机制
+     media_refs: [
+  {
+    "type": "image",
+    "path": "transformer_v1_images/tmpj0u1pq5p_mineru_18_46c90111.png",
+    "caption": ""
+  }
+]
+
+  Sample 3:
+     ID: concept_canonical_e9b1ab57eb
+     Name: 前馈网络
+     media_refs: [
+  {
+    "type": "image",
+    "path": "transformer_v1_images/tmpj0u1pq5p_mineru_12_4ce968b3.png",
+    "caption": ""
+  }
+]
+
+  Sample 4:
+     ID: concept_canonical_05853d9ceb
+     Name: 缩放
+     media_refs: [
+  {
+    "type": "image",
+    "path": "transformer_v1_images/tmpj0u1pq5p_mineru_18_46c90111.png",
+    "caption": ""
+  }
+]
+
+  Sample 5:
+     ID: concept_canonical_95f4c75cda
+     Name: Query、Key、Value
+     media_refs: [
+  {
+    "type": "image",
+    "path": "transformer_v1_images/tmpj0u1pq5p_mineru_18_46c90111.png",
+    "caption": ""
+  }
+]
+
+----------------------------------------
+Chunk nodes media_refs check:
+  Chunk 1: md_五_深度解析Transformer_doc_0_d25... | type=document
+    media_refs: NO
+    image_path: NO
+  Chunk 2: md_五_深度解析Transformer_p_1_4c3a1... | type=paragraph
+    media_refs: NO
+    image_path: NO
+  Chunk 3: md_五_深度解析Transformer_h1_0_608c... | type=heading
+    media_refs: NO
+    image_path: NO
+  Chunk 4: md_五_深度解析Transformer_p_2_49c29... | type=paragraph
+    media_refs: NO
+    image_path: NO
+  Chunk 5: md_五_深度解析Transformer_p_3_33544... | type=paragraph
+    media_refs: NO
+    image_path: NO
+  Chunk 6: md_五_深度解析Transformer_p_4_4c600... | type=paragraph
+    media_refs: NO
+    image_path: NO
+  Chunk 7: md_五_深度解析Transformer_p_5_4843b... | type=paragraph
+    media_refs: NO
+    image_path: NO
+  Chunk 8: md_五_深度解析Transformer_h1_1_0341... | type=heading
+    media_refs: NO
+    image_path: NO
+  Chunk 9: md_五_深度解析Transformer_h1_2_f562... | type=heading
+    media_refs: NO
+    image_path: NO
+  Chunk 10: md_五_深度解析Transformer_p_6_2f2fc... | type=paragraph
+    media_refs: NO
+    image_path: NO
+
+============================================================
+Subject: 绾挎€т唬鏁癬v1
+DB Path: D:\MyCS\AI\Project\LearnAnything\knowledge_base\graph_db\绾挎€т唬鏁癬v1_graph
+============================================================
+[ERROR] Count query failed: Binder exception: Table CanonicalConcept does not exist.
+
+============================================================
+Subject: 缁炬寧鈧傚敩閺佺櫖v1
+DB Path: D:\MyCS\AI\Project\LearnAnything\knowledge_base\graph_db\缁炬寧鈧傚敩閺佺櫖v1_graph
+============================================================
+[ERROR] Count query failed: Binder exception: Table CanonicalConcept does not exist.
+
+============================================================
+Subject: 缁炬寧鈧傚敩閺佺櫖v1_v1
+DB Path: D:\MyCS\AI\Project\LearnAnything\knowledge_base\graph_db\缁炬寧鈧傚敩閺佺櫖v1_graph_v1_graph
+============================================================
+[ERROR] Count query failed: Binder exception: Table CanonicalConcept does not exist.
+
+============================================================
+Subject: 鏁板_v1
+DB Path: D:\MyCS\AI\Project\LearnAnything\knowledge_base\graph_db\鏁板_v1_graph
+============================================================
+[ERROR] Count query failed: Binder exception: Table CanonicalConcept does not exist.
+
+============================================================
+Diagnosis complete
+============================================================

@@ -96,9 +96,14 @@
             </div>
           </div>
         </div>
-        <div v-if="node.description" class="info-section">
-          <div class="info-label">概念描述</div>
-          <div class="info-text">{{ node.description }}</div>
+        <!-- P39-FIX: chunk 原文内容 -->
+        <div v-if="isChunkNode && node.text" class="info-section">
+          <div class="info-label">📝 原文内容</div>
+          <div class="info-text chunk-text">{{ node.text }}</div>
+        </div>
+        <div v-else-if="isChunkNode" class="info-section">
+          <div class="info-label">📝 原文内容</div>
+          <div class="info-text chunk-text" style="color: #999;">（无文本内容）</div>
         </div>
 
         <div v-if="node.parent_hint" class="info-section">
@@ -220,6 +225,20 @@ const props = defineProps({
 })
 
 defineEmits(['close', 'extract', 'expand', 'focus', 'navigate-to-chunk'])
+
+// P39-FIX: 调试日志 — 当 node 变化时打印关键字段
+const debugNodeInfo = computed(() => {
+  const n = props.node
+  console.log('[NodeDetailPanel] node received:', {
+    id: n?.id,
+    type: n?.type,
+    isChunkNode: props.isChunkNode,
+    text_length: (n?.text || '').length,
+    text_preview: (n?.text || '').slice(0, 50),
+    has_text: !!n?.text,
+  })
+  return null
+})
 
 // LA-035: 图片弹窗状态
 const showFullImage = ref(false)
@@ -449,6 +468,13 @@ function relationLabel(relation) {
   padding: 8px;
   background: var(--bg-hover, #f8f9fa);
   border-radius: 4px;
+}
+
+/* P39-FIX: chunk 原文内容区域更大 */
+.chunk-text {
+  max-height: 400px;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 .source-chunk-list {

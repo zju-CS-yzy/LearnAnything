@@ -659,6 +659,9 @@ class GraphStore:
 
         created = 0
 
+        # P35-FIX: 预先建立 source → document 映射
+        doc_by_source = {d['source']: d['id'] for d in docs}
+
         # 3. 建立 heading → heading (层级)
         heading_to_parent = {}
         for h in headings:
@@ -702,9 +705,20 @@ class GraphStore:
                         created += 1
                     except Exception as e:
                         print(f"[GraphStore] heading→child BELONGS_TO failed: {e}")
+            else:
+                # P35-FIX: heading_path 为空的节点直接关联到对应 document
+                doc_id = doc_by_source.get(src)
+                if doc_id:
+                    try:
+                        self._execute(conn, f"""
+                            MATCH (a:Chunk {{chunk_id: '{esc(doc_id)}'}}), (b:Chunk {{chunk_id: '{esc(child['id'])}'}})
+                            CREATE (a)-[:BELONGS_TO]->(b)
+                        """)
+                        created += 1
+                    except Exception as e:
+                        print(f"[GraphStore] doc→orphan BELONGS_TO failed: {e}")
 
         # 5. 建立 document → 顶层 heading (无父 heading 的 heading)
-        doc_by_source = {d['source']: d['id'] for d in docs}
         for h in headings:
             if h['id'] not in heading_to_parent:
                 doc_id = doc_by_source.get(h['source'])
