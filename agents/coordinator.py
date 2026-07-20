@@ -24,6 +24,7 @@ from agents.quiz_agent import QuizAgent
 from agents.coach_agent import CoachAgent
 from agents.headhunter_agent import HeadhunterAgent
 from agents.message_bus import MessageBus, Message
+from core.dialog_context import DialogContextManager
 
 
 class Coordinator:
@@ -62,24 +63,48 @@ class Coordinator:
         self._builder = None
         self._assembler = None
         self._irt = None
+        
+        # 阶段 1: 延迟初始化 DialogContextManager
+        self._dialog_manager = None
 
     def handle(self, query: str, filters: Optional[Dict[str, Any]] = None, user_id: Optional[str] = None, session_id: Optional[str] = None) -> Dict[str, Any]:
         """
         处理用户查询的统一入口。
+        阶段 1: 新增对话上下文管理（会话持久化、指代解析、历史注入）。
 
         Returns:
             {
                 "question": str,
                 "text": str,
-                "intent": {"original": ..., "resolved": ..., "confidence": ..., "fallback": ...},
+                "intent": {...},
                 "agent": str,
                 "result": dict,
-                "monitoring": {"query_id": ..., "total_duration_ms": ...},
+                "monitoring": {...},
+                "session_id": str,  # 阶段 1 新增
             }
         """
         start_time = time.time()
         monitor = get_monitor()
         query_id = monitor.start_query(query, user_id=user_id, session_id=session_id)
+
+        # 阶段 1 增强: 会话管理（含跨学科切换检测）
+        if self._dialog_manager is None:
+            self._dialog_manager = DialogContextManager()
+        actual_user_id = user_id or "anonymous"
+        print(f"\n[Coordinator] ====== 新请求 ======")
+        print(f"[Coordinator] 用户: {actual_user_id}, 查询: {query[:60]}...")
+        print(f"[Coordinator] 当前学科: {self.collection_name}")
+        
+        sid, session_info = self._dialog_manager.get_or_create_session(
+            user_id=actual_user_id,
+            subject_id=self.collection_name,
+            session_id=session_id
+        )
+        
+        # 使用增强版 build_context（含全局画像 + 学科隔离）
+        dialog_context = self._dialog_manager.build_context(sid)
+        turn_number = dialog_context.turn_number + 1 if dialog_context else 1
+        print(f"[Coordinator] 会话就绪: turn_number={turn_number}")
 
         # 意图路由
         resolved_intent, original_intent = self._intent_router.route(query, self.enabled_intents)
@@ -112,6 +137,22 @@ class Coordinator:
             intent_info["fallback"] = True
             agent = self._agents["concept"]
 
+        # 阶段 1: 指代解析
+        resolved_query = query
+        if dialog_context:
+            resolved_query = self._dialog_manager.resolve_references(query, dialog_context)
+            if resolved_query != query:
+                print(f"[Coordinator] 阶段1: 指代解析 '{query}' -> '{resolved_query}'")
+
+        # 阶段 1: 保存用户消息
+        self._dialog_manager.save_message(
+            session_id=sid,
+            turn_number=turn_number,
+            role="user",
+            content=query,
+            intent=resolved_intent
+        )
+
         # P0-INT-1: 对 quiz / concept 意图使用图谱教育模块组装上下文
         if resolved_intent in ("quiz", "concept"):
             try:
@@ -120,7 +161,7 @@ class Coordinator:
                 retriever = self._get_retriever(graph_store)
 
                 # 提取主题
-                topic = self._extract_topic_from_query(query)
+                topic = self._extract_topic_from_query(resolved_query)
                 print(f"[Coordinator] 提取主题: {topic}")
                 seed_concepts = retriever.resolve([topic])
 
@@ -135,21 +176,40 @@ class Coordinator:
                     graph_context = assembler.assemble(subgraph, budget=budget)
                     print(f"[Coordinator] 组装上下文: {graph_context.token_count} tokens")
 
-                    # 将组装后的上下文传递给 Agent
-                    agent_result = agent.handle(query, filters=filters, graph_context=graph_context)
+                    # 阶段 1: 传递 context 给 Agent
+                    agent_result = agent.handle(resolved_query, context=dialog_context, filters=filters, graph_context=graph_context)
                 else:
                     print(f"[Coordinator] 无匹配概念，回退到旧方式")
-                    agent_result = agent.handle(query, filters=filters)
+                    agent_result = agent.handle(resolved_query, context=dialog_context, filters=filters)
             except Exception as e:
                 print(f"[Coordinator] P0 模块调用失败，回退到旧模式: {e}")
                 import traceback
                 traceback.print_exc()
-                agent_result = agent.handle(query, filters=filters)
+                agent_result = agent.handle(resolved_query, context=dialog_context, filters=filters)
         else:
-            # 非 quiz/concept 意图，原方式执行
-            agent_result = agent.handle(query, filters=filters)
+            # 非 quiz/concept 意图，原方式执行（但传递 context）
+            agent_result = agent.handle(resolved_query, context=dialog_context, filters=filters)
 
         total_duration_ms = (time.time() - start_time) * 1000
+
+        # 阶段 1: 保存 Agent 回复
+        self._dialog_manager.save_message(
+            session_id=sid,
+            turn_number=turn_number,
+            role="agent",
+            content=agent_result.get("text", ""),
+            agent_name=agent.agent_name,
+            intent=resolved_intent,
+            metadata={"query_id": query_id}
+        )
+
+        # 阶段 1: 更新会话状态（turn_count, updated_at, current_topic）
+        current_topic = topic if 'topic' in locals() and topic else None
+        self._dialog_manager.update_session(
+            sid,
+            turn_count=turn_number,
+            current_topic=current_topic
+        )
 
         # 结束监控
         final_metrics = {
@@ -202,6 +262,7 @@ class Coordinator:
                 "query_id": query_id,
                 "total_duration_ms": round(total_duration_ms, 2),
             },
+            "session_id": sid,  # 阶段 1 新增
         }
 
     # ==================== P0-INT-1: 辅助方法 ====================

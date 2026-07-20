@@ -210,10 +210,51 @@ export function runTreeLayout(cy) {
     const orphanNodes = allNodes.filter(n => !treeNodeIds.has(n.id()))
     console.log('[runTreeLayout] treeNodes:', treeNodeIds.size, 'orphanNodes:', orphanNodes.length)
 
-    // 4. 对每棵树分别跑 dagre
-    const treeInfos = []
+    // 4. 对每棵树分别递归布局（P40: 按 chunk_id 原文顺序排序）
+    const RANK_SEP = 220   // 父节点与子节点的水平间距
+    const NODE_GAP = 40    // 同级子树之间的垂直间距
+    const TREE_GAP = 200   // 不同文档树之间的水平间距
+
+    // 4a. 辅助函数：后序遍历计算子树尺寸
+    function computeTreeMetrics(nodeId) {
+      const node = cy.getElementById(nodeId)
+      const nodeWidth = node.data('nodeWidth') || node.width() || 160
+      const nodeHeight = node.data('cardHeight') || node.height() || 80
+      const children = outChildren.get(nodeId) || []
+      // 按 chunk_id 字典序排序，反映原文顺序
+      const sortedChildren = [...children].sort((a, b) => a.localeCompare(b))
+      if (sortedChildren.length === 0) {
+        return { nodeWidth, nodeHeight, subtreeHeight: nodeHeight, childMetrics: [] }
+      }
+      const childMetrics = sortedChildren.map(childId => computeTreeMetrics(childId))
+      const totalChildrenHeight = childMetrics.reduce((sum, m) => sum + m.subtreeHeight, 0) + (childMetrics.length - 1) * NODE_GAP
+      const subtreeHeight = Math.max(nodeHeight, totalChildrenHeight)
+      return { nodeWidth, nodeHeight, subtreeHeight, childMetrics }
+    }
+
+    // 4b. 辅助函数：前序遍历放置节点坐标
+    function layoutTreeNodes(nodeId, metrics, offsetX, offsetY, positions) {
+      const { nodeWidth, nodeHeight, subtreeHeight, childMetrics } = metrics
+      const children = outChildren.get(nodeId) || []
+      const sortedChildren = [...children].sort((a, b) => a.localeCompare(b))
+      // 父节点放置在子树左侧垂直中心
+      const nodeX = offsetX + nodeWidth / 2
+      const nodeY = offsetY + subtreeHeight / 2
+      positions.set(nodeId, { x: nodeX, y: nodeY })
+      if (sortedChildren.length === 0) return
+      const totalChildrenHeight = childMetrics.reduce((sum, m) => sum + m.subtreeHeight, 0) + (childMetrics.length - 1) * NODE_GAP
+      let currentY = offsetY + subtreeHeight / 2 - totalChildrenHeight / 2
+      sortedChildren.forEach((childId, i) => {
+        const childMetrics = metrics.childMetrics[i]
+        layoutTreeNodes(childId, childMetrics, offsetX + nodeWidth + RANK_SEP, currentY, positions)
+        currentY += childMetrics.subtreeHeight + NODE_GAP
+      })
+    }
+
+    // 4c. 为每棵树计算递归布局
+    let currentX = 100
     rootIds.forEach(rootId => {
-      // BFS 收集该树的所有节点
+      // BFS 收集该树的所有节点（用于日志和后续孤立节点计算）
       const ids = new Set()
       const q = [rootId]
       while (q.length > 0) {
@@ -224,51 +265,32 @@ export function runTreeLayout(cy) {
           children.forEach(cid => { if (!ids.has(cid)) q.push(cid) })
         }
       }
-
-      // 收集该树的 Cytoscape 元素
-      let eles = cy.collection()
-      ids.forEach(id => { eles = eles.union(cy.getElementById(id)) })
-      belongsEdges.forEach(e => {
-        if (ids.has(e.source().id()) && ids.has(e.target().id())) {
-          eles = eles.union(e)
-        }
-      })
-
-      // 对该树跑 dagre
-      eles.layout({
-        name: 'dagre',
-        rankDir: 'LR',
-        rankSep: 120,
-        nodeSep: 25,
-        edgeSep: 10,
-        padding: 15,
-        fit: false,
-        animate: false,
-      }).run()
-
-      const bbox = eles.boundingBox()
-      treeInfos.push({ rootId, ids, bbox })
-      console.log('[runTreeLayout] tree ' + rootId + ': ' + ids.size + ' nodes, bbox w=' + Math.round(bbox.w) + ' h=' + Math.round(bbox.h))
-    })
-
-    // 5. 按顺序把树从左到右排列（避免重叠）
-    let currentX = 100
-    treeInfos.forEach(info => {
-      const offsetX = currentX - info.bbox.x1
-      info.ids.forEach(id => {
+      // 递归计算尺寸并放置坐标
+      const positions = new Map()
+      const metrics = computeTreeMetrics(rootId)
+      layoutTreeNodes(rootId, metrics, currentX, 50, positions)
+      positions.forEach((pos, id) => {
         const n = cy.getElementById(id)
-        n.position('x', n.position('x') + offsetX)
+        n.position(pos)
       })
-      // 重新计算 bbox
-      let eles = cy.collection()
-      info.ids.forEach(id => eles = eles.union(cy.getElementById(id)))
-      const newBBox = eles.boundingBox()
-      currentX = newBBox.x2 + 150  // 树间距 150
+      // 计算该树的 bbox 以确定下一棵树的起始位置
+      let maxX = -Infinity, minY = Infinity, maxY = -Infinity
+      ids.forEach(id => {
+        const n = cy.getElementById(id)
+        const pos = n.position()
+        const w = n.data('nodeWidth') || n.width() || 160
+        const h = n.data('cardHeight') || n.height() || 80
+        maxX = Math.max(maxX, pos.x + w / 2)
+        minY = Math.min(minY, pos.y - h / 2)
+        maxY = Math.max(maxY, pos.y + h / 2)
+      })
+      currentX = maxX + TREE_GAP
+      console.log('[runTreeLayout] tree ' + rootId + ': ' + ids.size + ' nodes, recursive layout, height=' + Math.round(metrics.subtreeHeight))
     })
 
     // 6. 孤立节点放最右侧
     if (orphanNodes.length > 0) {
-      const lastTreeX = treeInfos.length > 0 ? currentX : 200
+      const lastTreeX = rootIds.length > 0 ? currentX : 200
       const cols = Math.max(1, Math.ceil(Math.sqrt(orphanNodes.length)))
       const gapX = 120
       const gapY = 50

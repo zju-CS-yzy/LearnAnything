@@ -965,11 +965,13 @@
 - **问题描述**: 文档树视图显示节点 441，边 34。若构成 3 棵连通树，应有 438 条边。边数严重不足，且浏览器控制台却显示"没有孤立节点"。
 - **根因分析**:
   1. ackend_api.py list_graph_edges 中 BELONGS_TO 和 ADJACENT_TO 查询硬编码 LIMIT 100，截断大量边（即使函数参数 limit=5000）
-  2. GraphLayout.js unTreeLayout 依赖 parent_id 字段识别树结构，但 loadChunkNodes 从未加载此字段 → 所有节点因 !parentId 被误判为根节点 → 控制台显示 "orphanNodes: 0"
+  2. GraphLayout.js 
+unTreeLayout 依赖 parent_id 字段识别树结构，但 loadChunkNodes 从未加载此字段 → 所有节点因 !parentId 被误判为根节点 → 控制台显示 "orphanNodes: 0"
   3. 实际 BELONGS_TO 边未在前端被用于构建树，导致 dagre 只处理有边节点（极少数），大量无边节点被堆叠在默认位置
 - **修复方案**:
   1. list_graph_edges: 去掉硬编码 LIMIT 100，使用传入的 limit 参数
-  2. unTreeLayout: 基于 BELONGS_TO 边（而非 parent_id）识别树结构、根节点、孤立节点
+  2. 
+unTreeLayout: 基于 BELONGS_TO 边（而非 parent_id）识别树结构、根节点、孤立节点
   3. 验证数据库中实际边数是否匹配预期
 - **优先级**: P0
 
@@ -997,7 +999,8 @@
 - **状态**: ✅ **已解决**
 - **修复**:
   1. ackend_api.py list_graph_edges: 去掉硬编码 LIMIT 100，使用传入的 limit 参数
-  2. GraphLayout.js unTreeLayout: 重写为基于 BELONGS_TO 边识别树结构（替代错误的 parent_id 逻辑）
+  2. GraphLayout.js 
+unTreeLayout: 重写为基于 BELONGS_TO 边识别树结构（替代错误的 parent_id 逻辑）
   3. GraphView.vue loadEdges: 添加悬空边过滤和详细日志
 
 ### LA-035-P30: 文档树效果仍为纵向一列 + 连线混乱
@@ -1007,8 +1010,10 @@
 ### LA-035-P33: 文档树贝塞尔曲线弯曲方向
 - **状态**: 🔴 **新增（今日）**
 - **问题描述**: BELONGS_TO 边全部向下方凸弯曲，需要改为：子节点在父节点上方则向上凸，子节点在父节点下方则向下凸，y坐标相同则不弯曲
-- **根因**: unTreeLayout 未调用 djustEdgeCurvature
-- **修复方案**: 在 unTreeLayout 布局完成后调用 djustEdgeCurvature(cy)
+- **根因**: 
+unTreeLayout 未调用 djustEdgeCurvature
+- **修复方案**: 在 
+unTreeLayout 布局完成后调用 djustEdgeCurvature(cy)
 - **优先级**: P1
 
 ### LA-035-P34: 文档树节点风格改为卡片形
@@ -1052,7 +1057,8 @@
 
 ### LA-035-P33: 文档树贝塞尔曲线弯曲方向
 - **状态**: ✅ **已解决**
-- **修复**: unTreeLayout 布局完成后调用 djustEdgeCurvature(cy)
+- **修复**: 
+unTreeLayout 布局完成后调用 djustEdgeCurvature(cy)
 
 ### LA-035-P34: 文档树节点卡片风格
 - **状态**: ✅ **已解决**
@@ -1114,7 +1120,8 @@ ode.text
   6. 当前节点放置在子树左侧中间位置（y = 子树中心）
   7. 返回当前节点的 bbox 给父节点
 - **关键优势**: 完全手动计算坐标，不依赖 dagre 的排序算法，同级节点顺序完全可控
-- **实现文件**: web-vue/src/components/graph/GraphLayout.js — 新增 layoutTreeRecursive 函数，替换 unTreeLayout 中的逐树 dagre 逻辑
+- **实现文件**: web-vue/src/components/graph/GraphLayout.js — 新增 layoutTreeRecursive 函数，替换 
+unTreeLayout 中的逐树 dagre 逻辑
 
 ### LA-035-P31~P41 整体状态
 | 问题 | 状态 | 备注 |
@@ -1132,3 +1139,246 @@ ode.text
 ---
 
 *记录日期：2026-07-19*
+
+
+---
+
+## 2026-07-19 最终进展更新
+
+### 今日已解决问题
+
+| 问题编号 | 问题描述 | 状态 |
+|:---|:---|:---|
+| LA-035-P31 | 删除学科报错 KNOWLEDGE_BASE_DIR | ✅ 已解决 |
+| LA-035-P32 | 边数异常（硬编码 LIMIT 100） | ✅ 已解决 |
+| LA-035-P33 | 贝塞尔曲线方向 | ✅ 已解决 |
+| LA-035-P34 | 卡片节点风格 | ✅ 已解决 |
+| LA-035-P35 | 孤立 paragraph chunk | ✅ 已解决 |
+| LA-035-P38 | 卡片文字溢出 | ✅ 已解决 |
+| LA-035-P39 | 详情面板/悬浮窗原文 | ✅ 已解决 |
+| LA-035-P41 | 图片 chunk 预览 | ✅ 已解决 |
+
+### 今日未解决问题（遗留）
+
+| 问题编号 | 问题描述 | 状态 | 计划 |
+|:---|:---|:---|:---|
+| LA-035-P40 | 段落排序（原文顺序） | 🟡 方案确定，待实现 | **明天优先** |
+| LA-035-P43+ | MinerU 相关问题批量记录 | 待评估 | 低优先级 |
+
+### 今日工程论文进展
+
+- **版本**: v0.6 (commit a29f619)
+- **主要完成内容**:
+  1. 论文整体结构搭建（介绍→功能→分模块→创新点→总结）
+  2. 3.1节重构（语义分解思想+概念分解实现+范式连接+parent_hint）
+  3. 3.2节拆分（文档树+概念图谱双视图）
+  4. 3.3节补充（多Agent架构+4层记忆管理）
+  5. 附录C新增（30+技术方案详解）
+
+### 明天计划
+
+#### P0（最高优先级）
+1. **LA-035-P40: 段落排序实现**
+   - 实现递归子树布局算法
+   - 从根节点出发，按 chunk_id 排序子节点
+   - 递归计算子树 bbox，子树从上到下排列
+   - 叶节点返回自身大小
+   - 测试并验证3棵树的段落顺序正确
+
+#### P1（如有时间）
+2. **论文细化**
+   - 根据用户反馈补充/调整内容
+   - 可能补充：性能数据、截图占位、案例说明
+
+---
+
+*记录日期：2026-07-19*
+
+
+---
+
+## 2026-07-20 凌晨更新
+
+### 问题状态变更
+
+#### 已解决（标记为 ✅）
+- **LA-035-P37**: 同级 paragraph chunk 标题区分 → ✅ **已解决（自然解决）**
+- **LA-035-P40**: 段落排序（递归子树布局）→ ✅ **已解决（2026-07-20）**
+  - 实现两阶段递归布局：`computeTreeMetrics`（后序遍历计算子树尺寸）+ `layoutTreeNodes`（前序遍历放置坐标）
+  - 同级节点按 `chunk_id` 字典序从上到下排列，反映原文顺序
+  - 父节点位于所有子树左侧垂直中心，子节点按原文顺序从上到下排列
+  - 常数：`RANK_SEP=220`，`NODE_GAP=40`，`TREE_GAP=200`
+  - 文件修改：`web-vue/src/components/graph/GraphLayout.js`
+  - 构建状态：`npm run build` 通过（2026-07-20 09:20）
+  - P34 卡片化后 paragraph chunk 直接显示部分原文内容在卡片上，同级 paragraph 因内容不同而自然区分
+  
+- **LA-020**: 贝塞尔曲线端点不精确 → ✅ **已解决（接受限制）**
+  - Cytoscape.js 的 bezier 边不支持精确连接点控制（如 Visio 的连接点系统）
+  - 当前通过 adjustEdgeCurvature 实现上下凸效果，已满足使用需求
+  - 精确连接点控制需要 Cytoscape.js 本身支持，属框架限制
+
+#### 新增问题
+- **LA-044**: 对话记录持久化与 Agent 记忆层写入（阶段 1 实现中）
+  - **状态**: 🟡 **阶段 1 基础设施已实现，测试中**
+  - **实现内容**:
+    1. `core/dialog_context.py` — DialogContextManager + DialogContext + SQLite 表（dialog_sessions, dialog_messages）
+    2. `agents/base_agent.py` — 扩展 handle(context) 签名（向后兼容）
+    3. `agents/coordinator.py` — 会话管理、指代解析、消息保存、context 传递
+    4. `agents/tutor_agent.py` — Prompt 注入对话历史（graph_context + retrieval 双路径）
+    5. `agents/quiz_agent.py` / `agents/coach_agent.py` — 接收并传递 context
+    6. `core/graph_education/types.py` — UserKnowledgeState 扩展 notes 字段
+    7. `scripts/test_dialog_context.py` — 6 项测试全部通过
+  - **测试验证**:
+    - 会话创建与恢复
+    - 消息持久化（4 条消息正确存储）
+    - DialogContext 构建（topic/turn_number/history）
+    - 指代解析（代词替换 + 省略主语补全）
+    - 跨会话持久化（模拟重启后数据恢复）
+    - 会话超时（30 分钟无活动自动过期）
+  - **优先级**: P1
+  - **依赖**: 无
+  - **后续**: 阶段 2（指代解析增强 + 话题追踪）、阶段 3（UserStateStore 双向同步）、阶段 4（前端 UI）
+
+### 遗留问题完整清单（截至 2026-07-20 00:40）
+
+#### 🔴 P0（阻塞/高优先级）
+| 编号 | 问题 | 状态 |
+|:---|:---|:---|
+| LA-035-P36 | 文档树详情面板/悬浮窗内容补充 | 🔴 未开始 |
+
+#### 🟡 P1（重要）
+| 编号 | 问题 | 状态 |
+|:---|:---|:---|
+| LA-044 | 对话记录持久化与 Agent 记忆层 | 🟡 阶段 1+ 完成 |
+| LA-027 | YAML 范式模板配置（v2.0：含 relation_map + gap 可视化设计） | 🟡 配置已最终确认，待测试 |
+| LA-025 | 概念图谱质量评估 | 🟡 未完全解决 |
+| LA-019 | 文件系统变更感知 | 🔴 未解决 |
+| LA-018 | MinerU 图片解析问题 | 🔴 未解决 |
+| LA-017 | MarkdownChunker 图片合并 | 🔴 未解决 |
+
+#### 🟢 P2（一般）
+| 编号 | 问题 | 状态 |
+|:---|:---|:---|
+| LA-016 | MinerU chunk 遗漏图片 | 🔴 未解决 |
+| LA-012 | 连接覆盖率指标实现 | 🟡 未完全解决 |
+| LA-010 | 评估参数权重未实际可配置 | 🔴 未解决 |
+| LA-009 | 大文件处理 | 🔴 未解决 |
+| LA-008 | 多文件导入 | 🔴 未解决 |
+| LA-007 | 公式/表格提取 | 🔴 未解决 |
+| LA-006 | 前端加载状态 | 🔴 未解决 |
+| LA-005 | 错误处理 | 🔴 未解决 |
+| LA-003 | 用户能力可视化 | 🔴 未解决 |
+| LA-001 | 概念去重阈值调参 | 🟡 未完全解决 |
+
+#### ✅ 已解决（今日）
+| 编号 | 问题 |
+|:---|:---|
+| LA-035-P31~P41 | 文档树相关问题（除 P40 外全部解决） |
+| LA-035-P37 | 同级 paragraph chunk 标题区分 |
+| LA-035-P40 | 段落排序（原文顺序）→ ✅ 已解决（2026-07-20，递归子树布局实现）|
+| LA-020 | 贝塞尔曲线端点不精确 |
+
+---
+
+## 2026-07-21 00:00 更新
+
+### LA-046: Gap 检测逻辑缺失
+- **状态**: 🔴 **新增（明日优先）**
+- **问题描述**: paradigms.yaml v2.0 中定义了 `gap_visualization` 和 `fallback` 配置（`allow_skip_levels`, `mark_as_gap`, `ideal_chain`），但后端代码完全未实现 gap 检测逻辑。当前当 SemanticLinker 遇到 `technology→technology` 这类非法连接时，只能直接拒绝，导致下层 technology 变成孤立节点，无法体现"缺少中间层 requirement"的语义。
+- **期望效果**: 
+  - 当实际连接跨越 `ideal_chain` 中的多个层级时，标记为 gap 连接
+  - 前端用虚线/特殊样式显示 gap 连接
+  - 可选：创建虚拟节点填充 gap（`create_virtual_nodes: false` 时跳过）
+- **依赖**: paradigms.yaml v2.0 的 `ideal_chain`, `relation_map`, `fallback` 配置
+- **修改范围**: `core/semantic_linker.py`（gap 检测）+ 前端（gap 可视化）
+- **优先级**: P0
+
+### LA-047: 智能问答缺少引用能力
+- **状态**: 🔴 **新增（明日优先）**
+- **问题描述**: TutorAgent 回答用户问题时，没有说明回答中的知识来自用户提供的材料中的哪部分。用户希望像 ConceptTree 详情面板那样，精确到章节和页码。
+- **期望效果**:
+  - LLM 回答中引用来源 chunk（heading_path + page_number）
+  - 引用可点击跳转到对应文档位置
+  - 引用格式：`[来源: 第3章 RAG架构 > 3.2 检索策略 (P15)]`
+- **技术方案**:
+  1. RAG 检索时记录来源 chunk 的 `heading_path` 和 `page_number`
+  2. Prompt 中要求 LLM 在回答末尾添加引用列表
+  3. 前端解析引用标记，渲染为可点击链接
+  4. 或：在 chunk text 中插入 `<ref id="xxx">` 标记，前端高亮
+- **修改范围**: `agents/tutor_agent.py`（Prompt + 引用解析）+ `web-vue/src/components/`（引用渲染）
+- **优先级**: P0
+
+### LA-048: TutorAgent Markdown 渲染失效
+- **状态**: 🔴 **新增（明日优先）**
+- **问题描述**: LLM 回答中的 Markdown 标题（如 `#### 3. 应用与编排层`、`### 总结`）没有被正确识别和渲染，而是作为纯文本显示。
+- **期望效果**: Markdown 标题、列表、代码块、加粗等格式正确渲染
+- **可能原因**:
+  1. 前端 Markdown 解析器配置问题（如未启用 heading 渲染）
+  2. Markdown 文本被转义（`#` 变成 `\#`）
+  3. CSS 样式覆盖了 heading 样式（如颜色与背景相同）
+- **排查步骤**:
+  1. 检查前端接收到的原始文本是否包含 `#`
+  2. 检查 Markdown 渲染组件配置（如 `marked.js` 或 `markdown-it` 的 heading 插件）
+  3. 检查 CSS 是否有 `.h3, .h4 { color: inherit }` 之类覆盖
+- **修改范围**: `web-vue/src/components/`（Markdown 渲染组件）
+- **优先级**: P0
+
+### LA-049: 图片媒体引用失败
+- **状态**: 🔴 **新增（明日优先）**
+- **问题描述**: TutorAgent 回答时尝试引用材料中的图片，但前端显示为破碎图片图标。后端报错有两种：
+  1. **Cypher 语法错误**: `MATCH (c:Chunk) WHERE c.chunk_id IN [...]` 中 chunk_id 格式错误（包含 `"` 引号和 JSON 数组嵌套）
+  2. **404 媒体文件不存在**: `/api/media/pseudo_md_xxx` 返回 404，说明图片文件未正确生成或路径映射错误
+- **期望效果**: LLM 引用图片时，前端正确显示图片缩略图，点击可放大查看
+- **可能原因**:
+  1. `collect_media_resources()` 构造 Cypher 查询时未正确转义 chunk_id（混合了 JSON 字符串和数组）
+  2. `image_pseudo` chunk 的媒体文件未生成到 `/static/media/` 目录
+  3. `/api/media/` 路由未正确处理 `image_pseudo` 类型的 chunk
+- **排查步骤**:
+  1. 检查 `collect_media_resources()` 中 chunk_id 列表的构造逻辑
+  2. 检查 MinerU 输出后图片是否被正确保存到 static 目录
+  3. 检查 `/api/media/` 路由对 `image_pseudo` chunk 的处理
+- **修改范围**: `agents/tutor_agent.py`（媒体收集 Cypher）+ 后端媒体路由 + 前端图片渲染
+- **优先级**: P0
+
+---
+
+## 2026-07-20 12:32 更新
+
+### LA-044 状态更新：阶段 1 增强版（跨学科记忆分层）
+
+**状态**: 🟡 **阶段 1+ 已完成**
+
+**新增实现（12:22-12:32）**:
+1. `core/dialog_context.py`（重写为增强版）
+   - 新增 `UserProfile` 数据类（跨学科共享画像）
+   - 新增 `user_profiles` 表
+   - 跨学科切换检测（`get_or_create_session` 自动暂停旧学科会话）
+   - `build_context()` 分层组装：全局画像 + 学科隔离记忆
+   - 详细日志打印（后端控制台可观察记忆调用过程）
+2. `agents/coordinator.py` — 集成 `build_context()` + 学科切换日志 + 上下文组装日志
+3. `agents/tutor_agent.py` — Prompt 注入日志 + 上下文长度统计
+4. `scripts/test_cross_subject_memory.py` — 跨学科隔离测试（全部通过）
+
+**跨学科记忆分层设计**:
+- 全局共享：用户画像（职业/技术栈/经验）、通用薄弱领域
+- 学科隔离：当前话题、学科薄弱点、对话历史、会话摘要
+
+**控制台日志输出示例**:
+```
+[Coordinator] ====== New Request ======
+[DialogContextManager] >>> Cross-subject switch detected <<<: transformer -> rag
+[DialogContextManager] Suspended old session, created new subject session
+[DialogContextManager] [DialogContext] session=..., subject=rag, turn=2, history=4, profile=Backend Engineer
+[TutorAgent] Context assembly: source=graph(P0), ref_len=..., history=injected, prompt_total=3500 chars
+```
+
+**测试验证**:
+- 会话隔离（RAG vs Transformer 不同 session_id）
+- 历史隔离（Transformer 无 GraphRAG 内容）
+- 画像共享（两学科均识别 "Backend Engineer"）
+- 薄弱点共享（两学科均知道 "Linear Algebra" 薄弱）
+- Prompt 分层（[User Profile][Current Subject][Dialog History]）
+
+---
+
+*记录日期：2026-07-20*

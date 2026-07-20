@@ -6,7 +6,9 @@ Agent 基类
 """
 
 from abc import ABC, abstractmethod
-from typing import Dict, Any
+from typing import Dict, Any, Optional
+
+from core.dialog_context import DialogContext
 
 
 class BaseAgent(ABC):
@@ -23,9 +25,14 @@ class BaseAgent(ABC):
         pass
 
     @abstractmethod
-    def handle(self, query: str, **kwargs) -> Dict[str, Any]:
+    def handle(self, query: str, context: Optional[DialogContext] = None, **kwargs) -> Dict[str, Any]:
         """
         处理用户查询。
+
+        Args:
+            query: 用户查询文本（已解析指代后的完整文本）
+            context: 对话上下文（阶段 1 新增，可选，向后兼容）
+            **kwargs: 其他参数（如 filters, graph_context 等）
 
         Returns:
             {

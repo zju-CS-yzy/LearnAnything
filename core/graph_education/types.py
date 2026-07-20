@@ -183,6 +183,7 @@ class UserKnowledgeState:
     first_tested: Optional[datetime] = None
     updated_at: datetime = field(default_factory=datetime.now)
     source_of_latest_update: str = ""
+    notes: str = ""  # 阶段 1 新增：对话摘要（跨会话记忆）
 
 
 @dataclass

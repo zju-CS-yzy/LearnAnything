@@ -48,14 +48,15 @@ class TutorAgent(BaseAgent):
             self._reranker = RerankerFactory.create()
         return self._reranker
 
-    def _generate_answer(self, query: str, context_chunks: List[Dict[str, Any]], context_text_override: str = None, media: List[Dict[str, Any]] = None) -> str:
-        """调用 LLM 生成润色后的自然语言回答。
+    def _generate_answer(self, query: str, context_chunks: List[Dict[str, Any]], context_text_override: str = None, media: List[Dict[str, Any]] = None, history_text: str = None) -> str:
+        """调用 LLM 生成润色后的自然语言回答（阶段 1：支持对话历史注入）。
 
         Args:
             query: 用户问题
             context_chunks: 上下文 chunk 列表
             context_text_override: 可选，直接使用提供的上下文文本（P0 图谱上下文）
             media: 可选，关联的媒体资源列表（LA-IMG）
+            history_text: 可选，对话历史文本（阶段 1 新增）
         """
         if not self._llm.available:
             # LLM 不可用时返回原始上下文拼接
@@ -89,6 +90,24 @@ class TutorAgent(BaseAgent):
                 media_hint += f"[{i}] {m['caption']}:\n"
                 media_hint += f"![{m['caption']}](/api/media/{m['path']})\n\n"
 
+        # 阶段 1: 对话历史提示
+        history_hint = ""
+        if history_text:
+            # 统计历史文本信息
+            history_lines = history_text.strip().split('\n')
+            history_turns = sum(1 for line in history_lines if line.startswith('用户:') or line.startswith('TutorAgent:'))
+            history_tokens = len(history_text)
+            print(f"[TutorAgent] 阶段1: 注入对话历史 {history_turns} 轮, {history_tokens} 字符")
+            history_hint = f"\n\n{history_text}\n\n"
+        
+        # 记录上下文组装日志
+        print(f"[TutorAgent] 上下文组装:")
+        print(f"  - 资料来源: {'图谱(P0)' if context_text_override else '检索'}")
+        print(f"  - 参考资料长度: {len(context)} 字符")
+        print(f"  - 对话历史: {'已注入' if history_hint else '无'}")
+        print(f"  - 媒体资源: {len(media) if media else 0} 个")
+        print(f"  - 薄弱领域: {len(self._user_weak_areas)} 个")
+
         system_prompt = (
             "你是一位知识渊博的AI助教。请根据提供的参考资料，为用户的问题生成一个"
             "清晰、连贯、有结构的回答。要求：\n"
@@ -98,10 +117,15 @@ class TutorAgent(BaseAgent):
             "4. 遇到专业术语时简要解释\n"
             "5. 如果提供了图片/公式资源，请在讲解到相关内容时，用 markdown 图片语法引用"
             "（格式：![描述](/api/media/路径)），让用户可以直观看到图示\n"
-            "6. 如果资料不足以完全回答问题，诚实说明"
+            "6. 如果资料不足以完全回答问题，诚实说明\n"
+            "7. 如果提供了对话历史，请注意保持与上下文的连贯性，回答应与之前的对话相关联"
         )
 
-        user_prompt = f"用户问题：{query}{source_note}\n\n参考资料：\n{context}{media_hint}\n\n请生成回答："
+        user_prompt = f"{history_hint}用户问题：{query}{source_note}\n\n参考资料：\n{context}{media_hint}\n\n请生成回答："
+        
+        # 记录最终 prompt 长度
+        total_prompt_len = len(system_prompt) + len(user_prompt)
+        print(f"[TutorAgent] Prompt 总长度: {total_prompt_len} 字符 (system={len(system_prompt)}, user={len(user_prompt)})")
 
         messages = [{"role": "user", "content": user_prompt}]
 
@@ -118,42 +142,52 @@ class TutorAgent(BaseAgent):
             # 降级：返回原始上下文
             return "\n\n---\n\n".join(c.get("text", "")[:500] for c in context_chunks)
 
-    def handle(self, query: str, filters: Optional[Dict[str, Any]] = None, graph_context=None, **kwargs) -> Dict[str, Any]:
+    def handle(self, query: str, context: Optional[Any] = None, filters: Optional[Dict[str, Any]] = None, graph_context=None, **kwargs) -> Dict[str, Any]:
         """
         概念讲解主入口。
-
-        Args:
-            query: 用户问题
-            filters: 过滤条件
-            graph_context: P0 图谱上下文（ConceptRetriever -> SubgraphBuilder -> ContextAssembler 产出）
+        阶段 1 增强: 支持对话上下文注入（含跨学科记忆分层）。
         """
+        print(f"\n[TutorAgent] ====== handle 调用 ======")
+        print(f"[TutorAgent] 查询: {query[:60]}...")
+        
+        # 阶段 1 增强: 记录对话上下文信息
+        if context is not None and hasattr(context, 'get_log_summary'):
+            print(f"[TutorAgent] 接收上下文: {context.get_log_summary()}")
+        elif context is not None:
+            print(f"[TutorAgent] 接收上下文: turn={getattr(context, 'turn_number', 'N/A')}, subject={getattr(context, 'subject_id', 'N/A')}")
+        else:
+            print(f"[TutorAgent] 无对话上下文（独立查询）")
+
         # P0-INT-1: 如果提供了图谱上下文，直接使用图谱上下文生成回答
         if graph_context is not None:
             print(f"[TutorAgent] P0-INT-1: 使用图谱上下文生成回答")
-            return self._handle_with_graph_context(query, graph_context)
+            return self._handle_with_graph_context(query, graph_context, context=context)
 
         # 否则使用传统检索方式
-        return self._handle_with_retrieval(query, filters)
+        return self._handle_with_retrieval(query, filters, context=context)
 
-    def _handle_with_graph_context(self, query: str, graph_context) -> Dict[str, Any]:
-        """使用 P0 图谱上下文生成回答（支持图片/公式嵌入）"""
+    def _handle_with_graph_context(self, query: str, graph_context, context=None) -> Dict[str, Any]:
+        """使用 P0 图谱上下文生成回答（支持图片/公式嵌入 + 对话上下文 + 详细日志）"""
+        print(f"\n[TutorAgent] ====== _handle_with_graph_context ======")
+        
         context_text = graph_context.text if hasattr(graph_context, 'text') else str(graph_context)
         concept_names = []
         if hasattr(graph_context, 'subgraph') and graph_context.subgraph:
             concept_names = [n.name for n in graph_context.subgraph.nodes]
+        print(f"[TutorAgent] 图谱概念: {concept_names[:5]}")
 
-        # P0-INT-6: 如果有薄弱领域，优先使用相关上下文
+        # P0-INT-6: 薄弱领域提示
         if self._user_weak_areas:
             print(f"[TutorAgent] P0-INT-6: 优先覆盖薄弱领域: {self._user_weak_areas}")
             weak_hint = f"用户薄弱环节: {', '.join(self._user_weak_areas)}。请重点讲解这些概念。\n\n"
             context_text = weak_hint + context_text
 
-        # LA-IMG: 收集关联的媒体资源（图片/公式）
+        # LA-IMG: 媒体资源
         media = self._collect_related_media(graph_context)
         if media:
             print(f"[TutorAgent] LA-IMG: 找到 {len(media)} 个关联媒体资源")
 
-        # 构建 chunks 列表（从 graph_context 中提取）
+        # 构建 chunks
         context_chunks = []
         if hasattr(graph_context, 'subgraph') and graph_context.subgraph:
             for node in graph_context.subgraph.nodes:
@@ -164,8 +198,19 @@ class TutorAgent(BaseAgent):
                     "concept": getattr(node, 'name', ''),
                 })
 
-        # 生成回答（传入媒体资源用于 prompt 提示）
-        answer = self._generate_answer(query, context_chunks, context_text_override=context_text, media=media)
+        # 阶段 1 增强: 注入对话历史
+        history_text = ""
+        if context is not None and hasattr(context, 'to_prompt_context'):
+            history_text = context.to_prompt_context(max_turns=5)
+            if history_text:
+                print(f"[TutorAgent] 对话历史注入: {len(history_text)} 字符")
+            else:
+                print(f"[TutorAgent] 对话历史为空（新会话）")
+
+        # 生成回答
+        print(f"[TutorAgent] 调用 LLM 生成回答...")
+        answer = self._generate_answer(query, context_chunks, context_text_override=context_text, media=media, history_text=history_text)
+        print(f"[TutorAgent] 回答生成完成: {len(answer)} 字符")
 
         return {
             "text": answer,
@@ -173,7 +218,8 @@ class TutorAgent(BaseAgent):
                 "source": "p0_graph_context",
                 "concepts": concept_names,
                 "token_count": getattr(graph_context, 'token_count', 0),
-                "media": media,  # LA-IMG: 传递媒体资源到前端
+                "media": media,
+                "has_context": bool(history_text),
             },
             "chunks": context_chunks,
         }
@@ -231,8 +277,8 @@ class TutorAgent(BaseAgent):
 
         return media
 
-    def _handle_with_retrieval(self, query: str, filters: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        """使用传统 HybridRetriever 检索生成回答"""
+    def _handle_with_retrieval(self, query: str, filters: Optional[Dict[str, Any]] = None, context=None) -> Dict[str, Any]:
+        """使用传统 HybridRetriever 检索生成回答（阶段 1：支持对话上下文）"""
         # 查询改写
         queries = self._rewriter.rewrite(query, n_variants=3)
 
@@ -251,7 +297,11 @@ class TutorAgent(BaseAgent):
             # 兼容旧缓存结构（纯 chunks 列表）
             elif isinstance(cached_data, list):
                 chunks = cached_data
-                answer = self._generate_answer(query, chunks)
+                # 阶段 1: 注入对话历史
+                history_text = ""
+                if context is not None and hasattr(context, 'to_prompt_context'):
+                    history_text = context.to_prompt_context(max_turns=5)
+                answer = self._generate_answer(query, chunks, history_text=history_text)
                 return {
                     "text": answer,
                     "metadata": {"cache_hit": True, "hit_type": cached.get("hit_type", "unknown")},
@@ -280,8 +330,13 @@ class TutorAgent(BaseAgent):
         # MMR 多样性
         final_results = self._apply_mmr(query, reranked, n_results=self.top_k)
 
+        # 阶段 1: 注入对话历史
+        history_text = ""
+        if context is not None and hasattr(context, 'to_prompt_context'):
+            history_text = context.to_prompt_context(max_turns=5)
+
         # 调用 LLM 生成润色回答
-        answer = self._generate_answer(query, final_results)
+        answer = self._generate_answer(query, final_results, history_text=history_text)
 
         # 写入缓存（新结构：包含 chunks 和 answer）
         cache_data = {
@@ -290,7 +345,7 @@ class TutorAgent(BaseAgent):
         }
         self._cache.set(queries[0], query_embedding, cache_data)
 
-        return {"text": answer, "metadata": {"chunks": len(final_results)}, "chunks": final_results}
+        return {"text": answer, "metadata": {"chunks": len(final_results), "has_context": bool(history_text)}, "chunks": final_results}
 
     def _apply_mmr(self, query: str, candidates: List[Dict[str, Any]], n_results: int = 5, lambda_param: float = 0.7) -> List[Dict[str, Any]]:
         import numpy as np

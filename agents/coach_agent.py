@@ -139,8 +139,8 @@ class CoachAgent(BaseAgent):
                 self._llm_client = None
         return self._llm_client
 
-    def handle(self, query: str, n_questions: int = 5, filters: Optional[Dict[str, Any]] = None, **kwargs) -> Dict[str, Any]:
-        """生成评测题目（原逻辑保留）"""
+    def handle(self, query: str, context: Optional[Any] = None, n_questions: int = 5, filters: Optional[Dict[str, Any]] = None, **kwargs) -> Dict[str, Any]:
+        """生成评测题目（阶段 1：支持对话上下文）。"""
         topic = self._extract_topic(query)
 
         config = self._get_subject_config()
@@ -148,7 +148,8 @@ class CoachAgent(BaseAgent):
         question_types = list(config.get("question_types", {}).keys())
 
         quiz_agent = self._get_quiz_agent()
-        quiz_result = quiz_agent.handle(topic + " 评测题", n_questions=n_questions, filters=filters)
+        # 阶段 1: 传递 context 给 QuizAgent（如果 QuizAgent 支持）
+        quiz_result = quiz_agent.handle(topic + " 评测题", context=context, n_questions=n_questions, filters=filters)
 
         instructions = f"""【能力评测】
 

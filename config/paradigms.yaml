@@ -1,20 +1,90 @@
-# LearnAnything 范式配置文件
-# 定义概念提取的范式、概念类型、关系类型和 LLM 提示词附加内容
+# LearnAnything 范式配置文件 v2.0
+# 定义概念提取的范式、概念类型、关系类型、关系作用域、层级规则和 LLM 提示词
+#
+# v2.0 变更:
+#   - relation_map 方向: parent → child（source_type 通过 relation 连接到 target_type）
+#   - engineering 简化: 仅保留 requirement / technology 两种 type
+#   - 去掉 max_skip_depth: gap 层数自然计算（由 ideal_chain 中位置差决定）
+#   - prompt_addon: 融入降级策略和关系合法性约束
 
 paradigms:
+
+  # ============================================================================
+  # 范式 1: 理论归纳
+  # 适用: 理论学科（物理、数学、计算机科学理论等）
+  # 理想链条: definition → law → application → extension
+  # ============================================================================
   theory:
     name: "理论归纳"
     description: "适合理论学科（物理、数学等）：定义→规律→应用→扩展"
+    icon: "📚"
+    color: "#4A90D9"
+    is_builtin: true
+
     types:
       definition: "定义性概念"
       law: "规律/原理"
       application: "应用场景"
       extension: "扩展/变体"
+
     relations:
       DEFINES: "定义了"
       HAS_LAW: "阐述了"
       APPLIES_TO: "应用于"
       EXTENDS: "扩展了"
+
+    # 关系作用域映射（parent_type → {relation: [child_types]}）
+    # 表示: parent 节点可以通过 relation 连接到哪些 child 节点
+    relation_map:
+      definition:
+        HAS_LAW: [law]           # 定义引出规律
+        APPLIES_TO: [application] # 定义应用于场景
+        EXTENDS: [extension]      # 定义被扩展（语义适配）
+      law:
+        APPLIES_TO: [application] # 规律应用于场景
+        EXTENDS: [extension]      # 规律被扩展
+      application:
+        EXTENDS: [extension]      # 应用被扩展
+
+    # parent_hint 的合法性约束（child_type: [allowed_parent_types]）
+    parent_rules:
+      definition: []                    # 定义是顶层，无 parent
+      law: [definition]                 # 规律的 parent 必须是定义
+      application: [definition, law]    # 应用的 parent 可以是定义或规律
+      extension: [definition, law, application]  # 扩展的 parent 可以是定义/规律/应用
+
+    # 理想概念层级链条（用于 gap 检测和可视化）
+    ideal_chain:
+      - definition
+      - law
+      - application
+      - extension
+
+    # 降级策略（资料不完整时）
+    fallback:
+      allow_skip_levels: true           # 允许跳过缺失的中间层
+      mark_as_gap: true                 # 降级连接时创建 gap 记录
+      create_virtual_nodes: false       # 不自动创建虚拟节点（避免幻觉）
+
+    # 断裂点可视化配置
+    gap_visualization:
+      enabled: true
+      virtual_node:
+        shape: "circle"
+        radius: 12
+        fill: "transparent"
+        stroke_width: 2
+        stroke_dasharray: "4,2"
+        label_template: "+ {{type_label}}"
+        hover_hint: "缺少{{type_label}}，点击补充"
+      skip_link:
+        stroke_dasharray: "4,4"
+        color: "#bdc3c7"
+        opacity: 0.6
+      supplemented_node:
+        badge: "✓"
+        badge_color: "#27ae60"
+
     prompt_addon: |
       ## 理论归纳范式 — 概念类型判断标准（严格遵循）
 
@@ -42,80 +112,295 @@ paradigms:
       - "APPLIES_TO": 片段展示了理论的应用（文本中有实践案例）
       - "EXTENDS": 片段扩展了基础理论（文本中有分支/变体描述）
 
-      ## 重要约束
-      - 优先识别"原理层面"的概念，对"实现细节"的提取要克制。
-      - 如果文本中某个技术只是被提及名称而没有解释原理，不要将其作为核心概念提取。
-      - 优先提取文本中"被解释"的概念，而非"被提及"的概念。
+      ## parent_hint 填写规则（含降级策略）
 
+      【理想连接】（资料完整时优先使用）
+      - law 的 parent_hint → definition（规律基于定义）
+      - application 的 parent_hint → definition 或 law（应用基于定义或规律）
+      - extension 的 parent_hint → definition 或 law 或 application（扩展基于上层概念）
+
+      【降级连接】（资料缺少中间层时允许）
+      - 如果资料中没有明确的 definition：
+        → law 的 parent_hint 可以留空（作为顶层节点）
+      - 如果资料中缺少 law：
+        → application 的 parent_hint 可以直接指向 definition（跳过规律层）
+      - 如果资料中缺少 application：
+        → extension 的 parent_hint 可以直接指向 definition 或 law（跳过应用层）
+
+      【禁止行为】
+      - 不要为了补全链条而编造不存在的概念
+      - 如果资料中只有定义和应用，没有规律，直接连接它们
+      - 图谱的完整性不如概念的真实性重要
+
+      ## 关系合法性约束
+      【合法连接】（parent --relation--> child）
+      - definition --HAS_LAW--> law
+      - definition --APPLIES_TO--> application
+      - definition --EXTENDS--> extension
+      - law --APPLIES_TO--> application
+      - law --EXTENDS--> extension
+      - application --EXTENDS--> extension
+
+      【非法连接】
+      - law --HAS_LAW--> definition（方向反了）
+      - application --APPLIES_TO--> definition（方向反了）
+      - 同一 type 的自我连接
+
+  # ============================================================================
+  # 范式 2: 工程分解（v2.0 简化版）
+  # 适用: 技术类知识（工程实践、系统设计、算法实现等）
+  # 理想链条: requirement → technology
+  # v2.0 变更: 删去 sub_requirement / sub_technology，仅保留 requirement / technology
+  # ============================================================================
   engineering:
     name: "工程分解"
-    description: "适合技术类知识：需求→技术→子需求→子技术"
+    description: "适合技术类知识：需求→技术"
+    icon: "🔧"
+    color: "#E67E22"
+    is_builtin: true
+
     types:
       requirement: "需求/目标"
       technology: "技术/方法"
-      sub_requirement: "子需求/子目标"
-      sub_technology: "子技术/实现细节"
+
     relations:
-      REQUIRES: "需要"
       IMPLEMENTS: "实现了"
-      HAS_SUB: "包含子需求"
-      HAS_IMPL: "具体实现"
+      DEPEND_ON: "依赖于"
+
+    # 关系作用域映射（parent_type → {relation: [child_types]}）
+    #
+    # 本范式的图谱结构是一个有向无环图（DAG），不是严格的树。
+    # 虽然 relation_map 在 type 层面是双向的（requirement→technology 和 technology→requirement），
+    # 但在实例层面必须保证无环：同一个 requirement 实例不能既作为 technology 的 parent（通过 IMPLEMENTS），
+    # 又作为 technology 的 child（通过 DEPEND_ON）。
+    #
+    # 后端建图时会进行增量环检测，发现会形成环的边将被拒绝。
+    #
+    # IMPLEMENTS: 需求驱动技术（"为了解决X，采用Y"）
+    # DEPEND_ON:  技术分解出子需求（"Y需要满足Z"、"Y的前提是Z"），Z 必须是新需求，不能是 X
+    #
+    relation_map:
+      requirement:
+        IMPLEMENTS: [technology]    # 需求实现为技术
+      technology:
+        DEPEND_ON: [requirement]    # 技术分解出子需求/约束
+
+    # parent_hint 的合法性约束
+    parent_rules:
+      requirement: [technology]    # 子需求的 parent 可以是技术（通过 DEPEND_ON）
+      technology: [requirement]    # 技术的 parent 是需求（通过 IMPLEMENTS）
+
+    # 理想概念层级链条
+    ideal_chain:
+      - requirement    # 顶层驱动需求
+      - technology     # 技术方案
+      - requirement    # 技术分解出的子需求/约束（gap 检测时视为同层重复）
+
+    # 降级策略
+    fallback:
+      allow_skip_levels: true
+      mark_as_gap: true
+      create_virtual_nodes: false
+
+    # 断裂点可视化配置
+    gap_visualization:
+      enabled: true
+      virtual_node:
+        shape: "circle"
+        radius: 12
+        fill: "transparent"
+        stroke_width: 2
+        stroke_dasharray: "4,2"
+        label_template: "+ {{type_label}}"
+        hover_hint: "缺少{{type_label}}，点击补充"
+      skip_link:
+        stroke_dasharray: "4,4"
+        color: "#bdc3c7"
+        opacity: 0.6
+      supplemented_node:
+        badge: "✓"
+        badge_color: "#27ae60"
+
     prompt_addon: |
       ## 工程分解范式 — 概念类型判断标准（严格遵循）
 
-      本范式关注问题解决的完整链条：需求→技术→子需求→子技术。
+      本范式关注问题解决链条：需求↔技术（双向关联）。
+      注意：本范式的概念图是一个有向无环图（DAG），不是树。requirement 既可以是顶层驱动，也可以是从 technology 分解出的子需求。
 
-      **"requirement"**: 当一个概念描述的是问题、需求、目标或挑战。
-      - 判断标准：文本中是否有"需要..."、"为了..."、"问题"、"挑战"、"瓶颈"等需求性表述。
-      - ⚠️ 如果文本中隐含了"为什么要做这件事"的动机，必须提取为需求。
-      - 示例："需要提高模型训练效率" → requirement
+      **"requirement"**: 需求/目标/挑战/约束（两种出现位置）
+      - 【位置A：顶层驱动】描述整个系统要解决的问题或目标。
+        - 判断标准："需要..."、"为了..."、"问题"、"挑战"、"瓶颈"
+        - 示例："需要提高模型训练效率" → requirement（顶层驱动）
+      - 【位置B：技术分解出的子需求】描述某个技术方案必须满足的约束或前提条件。
+        - 判断标准：文本描述某个技术时，提到的"还需保证..."、"前提是..."、"必须满足..."
+        - 示例："多GPU并行训练需要保证梯度同步正确" → "保证梯度同步正确"是 requirement（从"多GPU并行训练"分解出的子需求）
+      - ⚠️ 关键区分：如果需求是在技术描述之后出现的（"采用Y，需要满足Z"），Z 是子需求；如果需求是在技术之前出现的（"为了解决X，采用Y"），X 是顶层驱动需求。
 
-      **"technology"**: 当一个概念描述的是解决某个需求的技术、方法或架构。
-      - 判断标准：是否有"使用..."、"基于..."、"采用..."、"架构"等实现性表述。
-      - 示例："Transformer架构" → 这是解决序列建模问题的技术。
+      **"technology"**: 技术/方法/架构/方案。
+      - 判断标准："使用..."、"基于..."、"采用..."、"架构"
+      - 示例："Transformer架构" → technology
 
-      **"sub_requirement"**: 当一个概念是某个大需求下的子目标或约束条件。
-      - 判断标准：是否有"同时需要..."、"还需保证..."、"在...的前提下"等表述。
-      - 示例："需要保证梯度同步正确" → 这是"多GPU并行训练"下的子需求。
+      ## 关系类型判断标准（核心：两种关系有本质不同的语义）
 
-      **"sub_technology"**: 当一个概念是某个大技术下的具体实现细节或组件。
-      - 判断标准：是否有"具体..."、"组件"、"模块"、"算法"等细化表述。
-      - 示例："Ring AllReduce算法" → 这是"多GPU并行训练"下的子技术。
+      **"IMPLEMENTS" — 需求实现为技术**
+      - 语义："为了解决[需求]，采用[技术]"
+      - 方向：requirement --IMPLEMENTS--> technology
+      - 使用场景：文本先提需求/问题，再给出技术方案
+      - 示例："为了提升训练效率，采用多GPU并行训练" → "提升训练效率" IMPLEMENTS "多GPU并行训练"
+      - ⚠️ IMPLEMENTS 的 source 必须是【顶层驱动需求】，child 是技术方案
 
-      ## 关系类型判断标准
-      - "REQUIRES": 片段描述了某种需求或目标（文本中有问题/挑战/动机）
-      - "IMPLEMENTS": 片段描述了某种技术实现（文本中有解决方案/架构）
-      - "HAS_SUB": 片段包含子需求或子目标（文本中有分解的动机/约束）
-      - "HAS_IMPL": 片段包含具体实现细节（文本中有组件/算法描述）
+      **"DEPEND_ON" — 技术分解出子需求**
+      - 语义："[技术]需要满足[子需求]"、"[技术]的前提是[约束条件]"
+      - 方向：technology --DEPEND_ON--> requirement
+      - 使用场景：文本描述某个技术时，提到该技术必须满足的约束、前提或子目标
+      - 示例："多GPU并行训练需要保证梯度同步正确" → "多GPU并行训练" DEPEND_ON "保证梯度同步正确"
+      - 示例："分布式训练要求负载均衡" → "分布式训练" DEPEND_ON "负载均衡"
+      - ⚠️ DEPEND_ON 的 source 是技术，child 是【从该技术分解出的子需求/约束】
+      - ⚠️ 子需求与顶层需求是同一个 type（requirement），但语义不同：顶层需求驱动整个系统，子需求是技术的约束条件
+      - ⚠️【防环约束】DEPEND_ON 的 child 必须是"新的"子需求，绝不能指向已经驱动该技术的顶层需求。
+        如果 "提升训练效率" 已经通过 IMPLEMENTS 驱动了 "多GPU并行训练"，
+        那么 "多GPU并行训练" 绝不能 DEPEND_ON "提升训练效率"（否则会形成环）。
 
-      ## 重要约束
-      - 每提取一个"technology"或"sub_technology"，必须检查文本中是否有对应的"requirement"或"sub_requirement"。
-      - 如果文本中确实有需求表述但没有被提取，必须补充。
-      - 如果文本中没有明确的需求表述（纯技术介绍），则将最核心的技术描述标记为"technology"，其余为"sub_technology"。
+      ## parent_hint 填写规则
 
-      ## parent_hint 填写规则（用于构建概念间的层级连接）
-      - 提取 "technology" 时：如果文本明确提到它是为了解决某个 "requirement"，则 parent_hint 填写那个 requirement 的名称。
-      - 提取 "sub_requirement" 时：如果文本明确提到它是为了实现某个 "technology" 而分解出的子目标，则 parent_hint 填写那个 technology 的名称。
-      - 提取 "sub_technology" 时：如果文本明确提到它是为了解决某个 "sub_requirement"，则 parent_hint 填写那个 sub_requirement 的名称。
-      - 如果文本中没有明确的上层关联，parent_hint 留空。
-      - 示例："为了提升训练效率，采用多GPU并行训练，具体使用Ring AllReduce算法" →
-        - requirement: "提升训练效率", parent_hint: ""
-        - technology: "多GPU并行训练", parent_hint: "提升训练效率"
-        - sub_technology: "Ring AllReduce算法", parent_hint: "多GPU并行训练"
+      【IMPLEMENTS 边】（requirement → technology）
+      - technology 的 parent_hint → 驱动它的顶层 requirement
+      - 示例："多GPU并行训练" 的 parent_hint = "提升训练效率"
 
+      【DEPEND_ON 边】（technology → requirement）
+      - 子 requirement 的 parent_hint → 分解出它的 technology
+      - 示例："保证梯度同步正确" 的 parent_hint = "多GPU并行训练"
+
+      【降级】（资料不完整时）
+      - 如果资料中只有技术没有需求：technology 的 parent_hint 留空
+      - 如果技术描述中未明确提及子需求：不提取子需求，不编造
+
+      ## 关系合法性约束
+      【合法连接】
+      - requirement --IMPLEMENTS--> technology（需求驱动技术）
+      - technology --DEPEND_ON--> requirement（技术分解出子需求）
+
+      【非法连接】
+      - technology --IMPLEMENTS--> requirement（语义颠倒：技术不能"实现"需求）
+      - requirement --DEPEND_ON--> technology（语义错误：需求不能"依赖"技术）
+      - 同一 type 的自我连接
+      - 循环连接（如 A IMPLEMENTS B, B DEPEND_ON A）
+
+      ## 【重要】环检测规则（防环约束）
+
+      虽然 relation_map 在 type 层面允许 requirement ↔ technology 双向连接，
+      但在实例层面，同一个 requirement 绝不能既作为 technology 的 parent（IMPLEMENTS），
+      又作为该 technology 的 child（DEPEND_ON）。
+
+      判定方法：如果 requirement_X --IMPLEMENTS--> technology_Y 已经存在，
+      则 technology_Y --DEPEND_ON--> requirement_X 必须被拒绝（会形成环）。
+
+      错误示例（会形成环）：
+      "为了提升训练效率，采用多GPU并行训练"
+      ❌ → requirement: "提升训练效率"
+      ❌ → technology: "多GPU并行训练", parent_hint="提升训练效率"
+      ❌ → 边: "多GPU并行训练" --DEPEND_ON--> "提升训练效率"  [非法！会形成环]
+
+      正确示例（无环）：
+      "为了提升训练效率，采用多GPU并行训练。多GPU并行训练需要保证梯度同步正确。"
+      → requirement(顶层): "提升训练效率"
+      → technology: "多GPU并行训练", parent_hint="提升训练效率"
+      → requirement(子需求): "保证梯度同步正确", parent_hint="多GPU并行训练"
+      → 边: "提升训练效率" --IMPLEMENTS--> "多GPU并行训练"  [层级边]
+      → 边: "多GPU并行训练" --DEPEND_ON--> "保证梯度同步正确"  [无环：子需求是新的概念]
+
+      ## 提取示例
+
+      例1（完整资料）：
+      "为了提升训练效率，采用多GPU并行训练。多GPU并行训练需要保证梯度同步正确。"
+      → requirement(顶层): "提升训练效率", parent_hint=""
+      → technology: "多GPU并行训练", parent_hint="提升训练效率"
+      → requirement(子需求): "保证梯度同步正确", parent_hint="多GPU并行训练"
+      → 边: "提升训练效率" --IMPLEMENTS--> "多GPU并行训练"
+      → 边: "多GPU并行训练" --DEPEND_ON--> "保证梯度同步正确"
+
+      例2（资料缺少顶层需求）：
+      "采用多GPU并行训练"
+      → technology: "多GPU并行训练", parent_hint=""（降级：无需求）
+
+      例3（技术描述中无子需求）：
+      "为了提升训练效率，采用多GPU并行训练"
+      → requirement: "提升训练效率", parent_hint=""
+      → technology: "多GPU并行训练", parent_hint="提升训练效率"
+      （不提取"保证梯度同步正确"，因为资料未提及）
+
+  # ============================================================================
+  # 范式 3: 层级归纳
+  # 适用: 通用知识、认知科学、综述类材料
+  # 理想链条: fact → concept → method → evaluation
+  # ============================================================================
   hierarchical:
     name: "层级归纳"
     description: "适合认知科学：事实→概念→方法→评价"
+    icon: "🧠"
+    color: "#9B59B6"
+    is_builtin: true
+
     types:
       fact: "事实/数据"
       concept: "概念/定义"
       method: "方法/技术"
       evaluation: "评价/反思"
+
     relations:
       OBSERVES: "观察到"
       DEFINES_AS: "定义为"
       USES: "使用了"
       EVALUATES: "评价为"
+
+    # 关系作用域映射（parent_type → {relation: [child_types]}）
+    relation_map:
+      fact:
+        DEFINES_AS: [concept]    # 事实定义为概念
+      concept:
+        USES: [method]           # 概念使用方法
+      method:
+        EVALUATES: [evaluation]  # 方法被评价（语义适配：evaluation 是末端 type）
+
+    # parent_hint 的合法性约束
+    parent_rules:
+      fact: []                          # 事实是顶层
+      concept: [fact]                   # 概念的 parent 可以是事实
+      method: [fact, concept]           # 方法的 parent 可以是事实（降级）或概念（理想）
+      evaluation: [fact, concept, method]  # 评价的 parent 可以是事实/概念/方法
+
+    # 理想概念层级链条
+    ideal_chain:
+      - fact
+      - concept
+      - method
+      - evaluation
+
+    # 降级策略
+    fallback:
+      allow_skip_levels: true
+      mark_as_gap: true
+      create_virtual_nodes: false
+
+    # 断裂点可视化配置
+    gap_visualization:
+      enabled: true
+      virtual_node:
+        shape: "circle"
+        radius: 12
+        fill: "transparent"
+        stroke_width: 2
+        stroke_dasharray: "4,2"
+        label_template: "+ {{type_label}}"
+        hover_hint: "缺少{{type_label}}，点击补充"
+      skip_link:
+        stroke_dasharray: "4,4"
+        color: "#bdc3c7"
+        opacity: 0.6
+      supplemented_node:
+        badge: "✓"
+        badge_color: "#27ae60"
+
     prompt_addon: |
       ## 层级归纳范式 — 概念类型判断标准（严格遵循）
 
@@ -143,21 +428,47 @@ paradigms:
       - "USES": 片段使用了某种方法（文本中有技术/操作描述）
       - "EVALUATES": 片段对方法或结果进行评价（文本中有反思/批评）
 
+      ## parent_hint 填写规则（含降级策略）
+
+      【理想连接】（资料完整时优先使用）
+      - concept 的 parent_hint → fact（概念抽象事实）
+      - method 的 parent_hint → concept（方法使用概念）
+      - evaluation 的 parent_hint → method（评价方法）
+
+      【降级连接】（资料缺少中间层时允许）
+      - 如果资料中没有明确的事实：
+        → concept 的 parent_hint 可以留空（作为顶层节点）
+      - 如果资料中缺少概念：
+        → method 的 parent_hint 可以指向 fact（跳过概念层）
+      - 如果资料中缺少方法：
+        → evaluation 的 parent_hint 可以指向 concept 或 fact（跳过方法层）
+
+      【禁止行为】
+      - 不要为了补全链条而编造不存在的概念
+      - 如果资料中只有事实和评价，没有概念和方法，直接连接它们
+      - 图谱的完整性不如概念的真实性重要
+
+      ## 关系合法性约束
+      【合法连接】（parent --relation--> child）
+      - fact --DEFINES_AS--> concept
+      - concept --USES--> method
+      - method --EVALUATES--> evaluation
+      - fact --DEFINES_AS--> concept --USES--> method --EVALUATES--> evaluation（完整链条）
+
+      【非法连接】
+      - concept --DEFINES_AS--> fact（方向反了）
+      - method --USES--> concept（方向反了）
+      - 同一 type 的自我连接
+
       ## 重要约束
       - 优先识别"认知层次"的递进关系，不强制要求每种类型都出现。
       - 如果文本中只有事实和方法，没有概念和评价，这是正常的。
       - 如果文本中没有明确的事实描述（纯理论），则将最核心的理论描述标记为"concept"，其余为"method"。
 
-      ## parent_hint 填写规则（用于构建概念间的层级连接）
-      - 提取 "concept" 时：如果文本明确提到它是对某个 "fact" 的抽象，则 parent_hint 填写那个 fact 的名称。
-      - 提取 "method" 时：如果文本明确提到它是为了解决某个 "concept" 所描述的问题，则 parent_hint 填写那个 concept 的名称。
-      - 提取 "evaluation" 时：如果文本明确提到它是对某个 "method" 或 "concept" 的评价，则 parent_hint 填写那个 method/concept 的名称。
-      - 如果文本中没有明确的上层关联，parent_hint 留空。
-
 # 默认范式
 default_paradigm: "theory"
 
-# 范式元数据（用于前端展示）
+# 全局范式元数据（前端展示用）
 paradigm_metadata:
   theory:
     icon: "📚"
@@ -168,3 +479,39 @@ paradigm_metadata:
   hierarchical:
     icon: "🧠"
     color: "#9B59B6"
+
+# ============================================================================
+# 范式配置 Schema 说明（供前端表单和校验使用）
+# ============================================================================
+schema:
+  version: "2.0"
+  required_fields:
+    - name
+    - description
+    - types
+    - relations
+    - relation_map
+    - parent_rules
+    - ideal_chain
+    - prompt_addon
+  type_constraints:
+    types:
+      min_count: 2
+      max_count: 8
+      key_pattern: "^[a-z_]+$"
+      value_max_length: 50
+    relations:
+      min_count: 2
+      max_count: 8
+      key_pattern: "^[A-Z_]+$"
+      value_max_length: 20
+    ideal_chain:
+      must_include_all_types: true
+      order_matters: true
+  relation_map_constraints:
+    each_type_must_have_entry: false  # 末端 type 可以没有 entry
+    relation_must_exist_in_relations: true
+    target_must_exist_in_types: true
+  parent_rules_constraints:
+    each_type_must_have_entry: true
+    empty_list_means_root: true  # [] 表示该 type 是顶层

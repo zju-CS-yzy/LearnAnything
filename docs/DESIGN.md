@@ -1404,3 +1404,509 @@ def cleanup_old_data(days: int = 30):
 ---
 
 *本文档是 LearnAnything 项目的权威设计参考，任何数据模型或架构变更都应同步更新此文档。*
+
+---
+
+## 14. 范式与记忆系统增强设计（2026-07-20 更新）
+
+> 本章节整合三个增强设计：
+> 1. 跨学科记忆分层（对话上下文 L0/L1/L2 架构增强）
+> 2. 关系作用域映射与降级策略（tier 分级 + allow_skip_levels）
+> 3. 断裂点可视化与用户协作填充（Gap + VirtualNode）
+
+---
+
+### 14.1 跨学科记忆分层（对话上下文增强）
+
+#### 14.1.1 问题背景
+
+原始对话上下文（L0 层）完全缺失，每次 Agent 调用都是独立查询。实现阶段 1 后，虽然加入了会话持久化，但出现了新问题：**跨学科对话时，RAG 的对话历史会污染 Transformer 的上下文**。
+
+#### 14.1.2 三层记忆架构（增强版）
+
+| 层级 | 名称 | 共享范围 | 存储位置 | 数据内容 |
+|:---|:---|:---|:---|:---|
+| **L0** | 对话上下文 | 学科隔离 | `dialog_messages` | 当前会话的对话历史、当前话题 |
+| **L1** | Agent 集体记忆 | 学科隔离 | `dialog_sessions` + `user_knowledge_states` | 学科内薄弱点、能力评估、会话摘要 |
+| **L2** | 全局知识库 | 全局共享 | `user_profiles` + 向量库 | 用户画像、通用薄弱领域、学科知识图谱 |
+| **L2.5** | 跨学科共享画像 | 全局共享 | `user_profiles` | 职业、技术栈、学习风格、通用薄弱点 |
+
+#### 14.1.3 跨学科切换机制
+
+```
+用户请求: "给我讲讲 Transformer"（学科=transformer）
+         │
+         ▼
+[DialogContextManager]
+  1. 检查用户最近活跃会话（任意学科）
+  2. 发现活跃会话是 rag（不同学科！）
+  3. 暂停 rag 会话（status='suspended'）
+  4. 创建 transformer 新会话
+  5. 但保留全局画像（L2.5）
+         │
+         ▼
+[Prompt 分层输出]
+  【用户画像】(跨学科共享)
+  职业: 后端工程师, 技术栈: [C++, Python]
+  通用薄弱领域: [线性代数]
+  
+  【当前学科】(学科隔离)
+  学科: transformer, 当前话题: None
+  
+  【对话历史】(学科隔离)
+  （新会话，无历史）
+```
+
+#### 14.1.4 记忆分类矩阵
+
+| 记忆类型 | 是否跨学科共享 | 存储位置 | 说明 |
+|:---|:---|:---|:---|
+| 用户画像（职业/技术栈/经验） | ✅ 全局 | `user_profiles` | 所有学科一致 |
+| 通用薄弱领域（数学基础等） | ✅ 全局 | `user_profiles.weak_areas_global` | 影响所有技术学科 |
+| 学科薄弱点 | ❌ 隔离 | `user_knowledge_states` | 只与当前学科相关 |
+| 当前话题 | ❌ 隔离 | `dialog_sessions.current_topic` | "RAG" 不能带到 "Transformer" |
+| 对话历史 | ❌ 隔离 | `dialog_messages` | 每学科独立会话链 |
+| 会话摘要 | ❌ 隔离 | `dialog_sessions.context_summary` | 学科内的知识脉络 |
+| IRT 能力值 theta | ❌ 隔离 | `user_knowledge_states.theta` | 不同学科能力不同 |
+
+#### 14.1.5 核心类设计
+
+```python
+class DialogContextManager:
+    """对话上下文管理器（跨学科记忆分层）"""
+    
+    def get_or_create_session(self, user_id, subject_id, session_id=None):
+        # 跨学科切换检测
+        active_session = self._find_active_session(user_id)
+        if active_session and active_session.subject_id != subject_id:
+            self._suspend_session(active_session.session_id)  # 暂停旧学科
+            return self._create_session(user_id, subject_id)   # 创建新学科会话
+    
+    def build_context(self, session_id) -> DialogContext:
+        # 分层组装：全局画像 + 学科隔离记忆
+        session = self._load_session(session_id)
+        history = self.get_history(session_id)
+        profile = self.get_or_create_profile(session.user_id)  # L2.5 全局画像
+        weak_areas_subject = self._get_weak_areas(session.user_id, session.subject_id)
+        
+        return DialogContext(
+            history=history,                    # L0 学科隔离
+            current_topic=session.current_topic, # L0 学科隔离
+            weak_areas=weak_areas_subject,       # L1 学科隔离
+            user_profile=profile,                # L2.5 全局共享
+            weak_areas_global=profile.weak_areas_global,  # L2.5 全局共享
+        )
+```
+
+---
+
+### 14.2 关系作用域映射与降级策略
+
+#### 14.2.1 问题背景
+
+原始范式配置只有 types 和 relations，缺少 type 间的连接合法性约束。导致实际提取时出现：
+- `technology --HAS_SUB--> sub_technology`（关系语义错误）
+- `technology --REQUIRES--> requirement`（方向反了）
+
+根本原因是：**Prompt 中缺少 type-relation-type 的合法性校验**。
+
+#### 14.2.2 关系作用域映射（relation_map）
+
+在范式配置中显式定义合法的概念间连接：
+
+```yaml
+relation_map:
+  # parent_type:
+  #   relation: [child_types]
+  #
+  # 表示: parent 节点可以通过 relation 连接到哪些 child 节点
+  requirement:
+    IMPLEMENTS: [technology]    # 需求实现为技术
+  technology:
+    DEPEND_ON: [requirement]    # 技术分解出子需求/约束
+```
+
+**方向约定**：relation_map 定义的是 **parent → child** 方向的合法关系。
+
+**图谱结构说明**：
+- 工程分解范式的图谱是 **有向无环图（DAG）**，不是严格的树
+- `requirement` 既可以是顶层驱动（无 parent），也可以是 technology 分解出的子需求
+- `IMPLEMENTS` 和 `DEPEND_ON` 是两种语义完全不同的关系，不可互换
+
+| 关系 | 语义 | 方向 | 示例 |
+|:---|:---|:---|:---|
+| `IMPLEMENTS` | 需求驱动技术 | requirement → technology | "为了提升效率，采用多GPU并行训练" |
+| `DEPEND_ON` | 技术分解出子需求 | technology → requirement | "多GPU并行训练需要保证梯度同步正确" |
+
+#### 14.2.3 parent_rules（DAG 层级约束）
+
+```yaml
+parent_rules:
+  requirement: [technology]    # 子需求的 parent 可以是技术（通过 DEPEND_ON）
+  technology: [requirement]    # 技术的 parent 是需求（通过 IMPLEMENTS）
+```
+
+注意：DAG 结构允许 requirement 既为顶层节点（无 parent），又为 technology 的子节点（子需求）。
+
+#### 14.2.4 降级策略（fallback）
+
+当用户资料不完整时，允许跳过缺失层：
+
+```yaml
+fallback:
+  allow_skip_levels: true      # 允许跳过缺失的中间层
+  mark_as_gap: true            # 降级连接时创建 gap 记录
+  create_virtual_nodes: false  # 不自动创建虚拟节点（避免幻觉）
+```
+
+**gap 层数自然计算**（按 ideal_chain 中位置差）：
+```python
+# 对于理想链条 [requirement, technology, requirement]（技术分解出子需求）
+# 顶层需求 → 技术: gap = 0（理想连接）
+# 技术 → 子需求: gap = 0（理想连接，理想链中 technology 到下一个 requirement）
+# 顶层需求 → 子需求（跳过技术）: gap = 1（跳过了 technology 层）
+```
+
+**示例**：
+```
+资料: "采用多GPU并行训练"
+
+理想提取（资料完整）:
+  requirement(顶层): "提升训练效率"
+  technology: "多GPU并行训练", parent_hint="提升训练效率"
+  requirement(子需求): "保证梯度同步正确", parent_hint="多GPU并行训练"
+
+实际提取（资料缺少子需求）:
+  requirement: "提升训练效率"
+  technology: "多GPU并行训练", parent_hint="提升训练效率"
+  （不提取子需求，因为资料未提及）
+
+实际提取（资料缺少顶层需求）:
+  technology: "多GPU并行训练", parent_hint=""（降级：无需求）
+  → 标记为 gap: missing_type="requirement"
+```
+
+#### 14.2.5 Prompt 注入策略
+
+在 `prompt_addon` 中增加"关系合法性约束"和"降级策略"段落。以工程分解范式为例：
+
+```markdown
+## 关系类型判断标准
+- "IMPLEMENTS": 需求驱动技术
+  → 语义: "为了解决[需求]，采用[技术]"
+  → 方向: requirement --IMPLEMENTS--> technology
+  → 使用场景: 文本先提需求/问题，再给出技术方案
+- "DEPEND_ON": 技术分解出子需求
+  → 语义: "[技术]需要满足[子需求]"、"[技术]的前提是[约束条件]"
+  → 方向: technology --DEPEND_ON--> requirement
+  → 使用场景: 文本描述某个技术时，提到该技术必须满足的约束或子目标
+  → ⚠️ 注意: DEPEND_ON 的 child 是"从该技术分解出的子需求"，不是顶层驱动需求
+
+## parent_hint 填写规则
+
+【IMPLEMENTS 边】（requirement → technology）
+- technology 的 parent_hint → 驱动它的顶层 requirement
+- 示例: "多GPU并行训练" 的 parent_hint = "提升训练效率"
+
+【DEPEND_ON 边】（technology → requirement）
+- 子 requirement 的 parent_hint → 分解出它的 technology
+- 示例: "保证梯度同步正确" 的 parent_hint = "多GPU并行训练"
+
+【降级】（资料不完整时）
+- 如果资料中只有技术没有需求: technology 的 parent_hint 留空
+- 如果技术描述中未明确提及子需求: 不提取子需求，不编造
+
+## 关系合法性约束
+【合法连接】
+- requirement --IMPLEMENTS--> technology（需求驱动技术）
+- technology --DEPEND_ON--> requirement（技术分解出子需求）
+
+【非法连接】
+- technology --IMPLEMENTS--> requirement（语义颠倒: 技术不能"实现"需求）
+- requirement --DEPEND_ON--> technology（语义错误: 需求不能"依赖"技术）
+- 同一 type 的自我连接（如 requirement → requirement）
+- 循环连接（如 A IMPLEMENTS B, B DEPEND_ON A）
+```
+
+#### 14.2.6 复杂度控制
+
+| 策略 | 说明 |
+|:---|:---|
+| 方向性约束 | relation 是有向的，A→B 合法不代表 B→A 合法 |
+| 稀疏化设计 | 不是所有 type 之间都有 relation，大部分为 `[]` |
+| 层级限定 | `parent_rules` 限制 parent_hint 的 type，避免跨层跳跃 |
+| 自动推导 | 文本中缺少明确 parent 时，系统根据 type 自动推断最可能的合法 parent |
+
+**实际复杂度**：
+- N 种 type，每种的 relation_map 最多 N 个条目
+- 总条目数：O(N²)，但非常稀疏（大部分为 `[]`）
+- 人类可管理的上限：type ≤ 8，relation ≤ 6
+
+#### 14.2.7 环检测（增量式）
+
+**问题**：虽然 relation_map 在 type 层面定义了合法连接，但实例层面仍可能形成环。以 engineering 范式为例：
+
+```
+# 错误示例（会形成环）
+"提升训练效率" --IMPLEMENTS--> "多GPU并行训练"
+"多GPU并行训练" --DEPEND_ON--> "提升训练效率"  # 非法！同一个需求既驱动技术，又作为技术的子需求
+```
+
+**解决方案**：增量式环检测
+
+每次建立边 `source → target` 前，检查从 target 出发是否已可达 source：
+
+```python
+def would_form_cycle(graph, source, target):
+    """
+    检查添加边 source→target 是否会形成环。
+    方法：从 target 出发 DFS，看能否到达 source。
+    """
+    visited = set()
+    stack = [target]
+    
+    while stack:
+        node = stack.pop()
+        if node == source:
+            return True  # 会形成环！
+        if node in visited:
+            continue
+        visited.add(node)
+        for neighbor in graph.get(node, []):
+            stack.append(neighbor)
+    
+    return False
+```
+
+**处理策略**：
+
+| 场景 | 处理 |
+|:---|:---|
+| 不会形成环 | 允许建边 |
+| 会形成环 | 拒绝建边，记录日志：`[降级] 边 X→Y 会形成环，跳过` |
+| 自环（X→X） | 直接拒绝 |
+
+**适用范围**：
+- 所有内置范式（theory / engineering / hierarchical）
+- 所有用户自定义范式
+- 前端用户手动添加的边
+
+**实现位置**：`core/cycle_detector.py`
+
+---
+
+### 14.3 断裂点可视化与用户协作填充
+
+#### 14.3.1 核心概念
+
+| 术语 | 定义 | 视觉表现 |
+|:---|:---|:---|
+| **Gap（断裂点）** | 范式链条中缺失的 type 层 | 空心节点，颜色=缺失 type |
+| **Skip Link（降级连接）** | 跨越缺失层的连接 | 虚线，灰色 |
+| **Virtual Node（虚拟节点）** | 占位符，非真实概念 | 半透明，可点击 |
+| **Supplemented Node（补充节点）** | 用户填充的真实概念 | 实色，替换 virtual node |
+
+#### 14.3.2 Gap 识别流程
+
+```python
+def detect_gaps(extracted_concepts, paradigm_config):
+    """
+    检测范式链条中的断裂点。
+    
+    输入: 提取到的概念列表 + 范式配置（ideal_chain, parent_rules）
+    输出: Gap 记录列表
+    """
+    gaps = []
+    ideal_chain = paradigm_config["ideal_chain"]
+    
+    for concept in extracted_concepts:
+        expected_parents = paradigm_config["parent_rules"][concept.type]
+        actual_parent = concept.parent_hint
+        
+        if not actual_parent and expected_parents:
+            # 情况1: 应该有 parent 但缺失（顶层断裂）
+            gaps.append(Gap(
+                target_id=concept.canonical_id,
+                missing_type=expected_parents[0],
+                tier=1,
+            ))
+        elif actual_parent and actual_parent.type not in expected_parents:
+            # 情况2: parent 存在但 type 不匹配（降级连接）
+            skipped_types = find_skipped_types(
+                source_type=actual_parent.type,
+                target_type=concept.type,
+                ideal_chain=ideal_chain
+            )
+            if skipped_types:
+                gaps.append(Gap(
+                    source_id=actual_parent.canonical_id,
+                    target_id=concept.canonical_id,
+                    missing_type=skipped_types[0],
+                    tier=2,
+                ))
+    
+    return gaps
+```
+
+#### 14.3.3 Gap 数据模型
+
+```python
+class GapRecord:
+    """知识链条断裂点记录"""
+    gap_id: str              # UUID
+    subject_id: str          # 所属学科
+    source_id: str           # 源概念 canonical_id
+    target_id: str           # 目标概念 canonical_id
+    missing_type: str        # 缺失的 type（如 "sub_requirement"）
+    relation: str            # 降级使用的 relation
+    tier: int                # 1=理想缺失, 2=降级连接
+    status: str              # "open" / "supplemented" / "ignored"
+    created_at: str          # ISO 8601
+    supplemented_by: Optional[str]  # 用户补充后的新节点 canonical_id
+```
+
+#### 14.3.4 前端交互设计
+
+**图谱渲染**：
+
+```javascript
+// Gap 节点样式
+{
+  data: { type: 'virtual_gap', gap_type: 'sub_requirement', status: 'open' },
+  style: {
+    'shape': 'ellipse',
+    'width': 24, 'height': 24,
+    'background-color': 'transparent',
+    'border-width': 2,
+    'border-style': 'dashed',
+    'border-color': getTypeColor('sub_requirement'),  // 与缺失 type 同色
+    'label': '+ 子需求',
+  }
+}
+
+// Skip Link 样式
+{
+  style: {
+    'line-style': 'dashed',
+    'line-color': '#bdc3c7',
+    'width': 1,
+  }
+}
+```
+
+**用户交互流程**：
+
+```
+用户看到图谱：
+  ┌─────────────┐
+  │ 多GPU并行训练 │───dashed───○───dashed───▶│ Ring AllReduce │
+  │  (technology)│              +            │  (sub_technology)│
+  └─────────────┘         子需求              └─────────────────┘
+                               
+用户悬停 ○：
+  提示框: "缺少「子需求」层
+          按工程分解范式，此处应有子需求节点
+          [点击补充] [忽略]"
+          
+用户点击 ○ → 弹窗输入 → 保存
+  后端：创建新 Concept 节点 "保证梯度同步正确"
+  删除 VirtualGap → 重建边
+  图谱更新：实色节点替代空心节点
+```
+
+#### 14.3.5 断裂点统计面板
+
+```
+┌─────────────────────────────┐
+│  🔍 知识完整性检查              │
+├─────────────────────────────┤
+│  本学科共 3 处断裂：            │
+│                             │
+│  ⚠ 缺少「需求」 (1)           │
+│    - 多GPU并行训练 ← 缺 requirement │
+│    [补充] [忽略]              │
+│                             │
+│  ⚠ 缺少「子需求」 (2)         │
+│    - Ring AllReduce ← 缺 sub_requirement │
+│    - 分布式存储 ← 缺 sub_requirement │
+│    [补充] [忽略]              │
+│                             │
+│  已完成补充: 0                │
+└─────────────────────────────┘
+```
+
+#### 14.3.6 范式配置中的 gap_visualization
+
+```yaml
+gap_visualization:
+  enabled: true
+  virtual_node:
+    shape: "circle"
+    radius: 12
+    fill: "transparent"
+    stroke_width: 2
+    stroke_dasharray: "4,2"
+    label_template: "+ {{type_label}}"
+    hover_hint: "缺少{{type_label}}，点击补充"
+  skip_link:
+    stroke_dasharray: "4,4"
+    color: "#bdc3c7"
+    opacity: 0.6
+  supplemented_node:
+    badge: "✓"
+    badge_color: "#27ae60"
+```
+
+---
+
+### 14.4 实施路线图
+
+| 阶段 | 内容 | 工作量 | 状态 |
+|:---|:---|:---|:---|
+| **阶段 1** | 更新 `paradigms.yaml`（补全 relation_map + parent_rules + ideal_chain + gap_visualization） | 1 小时 | ✅ 已完成 |
+| **阶段 2** | 更新 `semantic_extractor.py`（从 YAML 加载，替代硬编码） | 30 分钟 | ✅ 已完成 |
+| **阶段 3** | 后端 Gap 检测（提取后识别 skip_level） | 1 小时 | 🟡 待实现 |
+| **阶段 4** | 后端 API（list_gaps / supplement_gap / ignore_gap） | 1 小时 | 🟡 待实现 |
+| **阶段 5** | 前端图谱渲染（VirtualGap 节点 + SkipLink 虚线边） | 1.5 小时 | 🟡 待实现 |
+| **阶段 6** | 前端补充交互（点击弹窗 → 提交 → 图谱更新） | 1.5 小时 | 🟡 待实现 |
+| **阶段 7** | 断裂点统计面板 | 1 小时 | 🟡 待实现 |
+| **阶段 8** | YAML 范式配置面板（前端 UI + CRUD API） | 3-4 小时 | 🟡 待实现 |
+
+---
+
+### 14.5 配置校验 Schema
+
+```yaml
+schema:
+  version: "2.0"
+  required_fields:
+    - name
+    - description
+    - types
+    - relations
+    - relation_map
+    - parent_rules
+    - ideal_chain
+    - prompt_addon
+  type_constraints:
+    types:
+      min_count: 2
+      max_count: 8
+      key_pattern: "^[a-z_]+$"
+      value_max_length: 50
+    relations:
+      min_count: 2
+      max_count: 8
+      key_pattern: "^[A-Z_]+$"
+      value_max_length: 20
+  relation_map_constraints:
+    relation_must_exist_in_relations: true
+    target_must_exist_in_types: true
+  parent_rules_constraints:
+    each_type_must_have_entry: true
+    empty_list_means_root: true
+```
+
+---
+
+*本章节的实现状态请参阅 docs/leftover-problem.md 中的 LA-027 和 LA-044 条目。*
