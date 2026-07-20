@@ -1,0 +1,613 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+DialogContextManager — 对话上下文管理器（阶段 1 增强版）
+
+新增:
+1. 跨学科记忆分层（全局画像 + 学科隔离）
+2. 详细日志打印（便于控制台观察）
+3. user_profiles 表（跨学科共享的用户画像）
+"""
+
+import sqlite3
+import json
+import uuid
+import re
+from datetime import datetime
+from typing import Dict, List, Optional, Any, Tuple
+from pathlib import Path
+from dataclasses import dataclass, field
+
+
+@dataclass
+class UserProfile:
+    """用户全局画像 — 跨学科共享"""
+    user_id: str
+    created_at: str = ""          # ISO 8601
+    updated_at: str = ""
+    profession: str = ""          # 职业
+    tech_stack: str = ""          # JSON 数组字符串 ["C++", "Python"]
+    experience_level: str = ""    # 初级/中级/高级
+    learning_style: str = ""      # 学习风格
+    weak_areas_global: str = ""   # JSON 数组字符串 ["线性代数"]
+    prefer_code_examples: int = 1 # 0/1
+    prefer_diagrams: int = 1
+    prefer_concise: int = 0
+    
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "user_id": self.user_id,
+            "profession": self.profession,
+            "tech_stack": self._safe_json_loads(self.tech_stack, []),
+            "experience_level": self.experience_level,
+            "weak_areas_global": self._safe_json_loads(self.weak_areas_global, []),
+        }
+    
+    @staticmethod
+    def _safe_json_loads(s: str, default):
+        try:
+            return json.loads(s or "null") or default
+        except:
+            return default
+
+
+@dataclass
+class DialogContext:
+    """传递给 Agent 的对话上下文对象（增强版：跨学科记忆分层）"""
+    session_id: str
+    user_id: str
+    turn_number: int
+    history: List[Dict[str, Any]] = field(default_factory=list)
+    current_topic: Optional[str] = None
+    user_theta: float = 0.0
+    weak_areas: List[str] = field(default_factory=list)        # 学科内薄弱点（隔离）
+    subject_id: Optional[str] = None
+    
+    # 跨学科共享
+    user_profile: Optional[UserProfile] = None
+    weak_areas_global: List[str] = field(default_factory=list)
+    
+    def to_prompt_context(self, max_turns: int = 5) -> str:
+        """转换为 LLM prompt 中的分层上下文文本（含日志描述）"""
+        lines = []
+        
+        # 1. 全局用户画像（跨学科共享）
+        if self.user_profile and self.user_profile.profession:
+            lines.append("【用户画像】(跨学科共享)")
+            if self.user_profile.profession:
+                lines.append(f"职业: {self.user_profile.profession}")
+            tech_stack = self.user_profile._safe_json_loads(self.user_profile.tech_stack, [])
+            if tech_stack:
+                lines.append(f"技术栈: {', '.join(tech_stack)}")
+            if self.user_profile.experience_level:
+                lines.append(f"经验水平: {self.user_profile.experience_level}")
+            if self.weak_areas_global:
+                lines.append(f"通用薄弱领域: {', '.join(self.weak_areas_global)}")
+            lines.append("")
+        
+        # 2. 学科上下文（学科隔离）
+        if self.subject_id or self.current_topic:
+            lines.append(f"【当前学科】(学科隔离)")
+            if self.subject_id:
+                lines.append(f"学科: {self.subject_id}")
+            if self.current_topic:
+                lines.append(f"当前话题: {self.current_topic}")
+            if self.weak_areas:
+                lines.append(f"本学科薄弱点: {', '.join(self.weak_areas)}")
+            lines.append("")
+        
+        # 3. 最近对话历史（学科隔离）
+        if self.history:
+            lines.append("【对话历史】(学科隔离)")
+            for msg in self.history[-max_turns:]:
+                role_label = "用户" if msg.get("role") == "user" else msg.get("agent_name", "系统")
+                content = msg.get("content", "")[:200]
+                lines.append(f"{role_label}: {content}")
+            lines.append("")
+        
+        return "\n".join(lines)
+    
+    def get_log_summary(self) -> str:
+        """返回日志摘要，便于控制台观察"""
+        profile_info = ""
+        if self.user_profile:
+            profile_info = f", 画像=有(profession={self.user_profile.profession})"
+        return (
+            f"[DialogContext] session={self.session_id[:8]}..., "
+            f"user={self.user_id}, subject={self.subject_id}, "
+            f"turn={self.turn_number}, history={len(self.history)}轮, "
+            f"topic={self.current_topic or 'None'}, "
+            f"weak_areas={len(self.weak_areas)}, weak_global={len(self.weak_areas_global)}"
+            f"{profile_info}"
+        )
+
+
+class DialogContextManager:
+    """对话上下文管理器（阶段 1 增强版）"""
+    
+    DB_PATH = Path(r"D:\MyCS\AI\Project\LearnAnything\knowledge_base\user_states.db")
+    SESSION_TIMEOUT_MINUTES = 30
+    MAX_HISTORY_TURNS = 20
+    
+    def __init__(self, db_path: Optional[str] = None):
+        self.db_path = Path(db_path) if db_path else self.DB_PATH
+        self._init_tables()
+        print(f"[DialogContextManager] 初始化完成, db={self.db_path}")
+    
+    # ---------- 表初始化 ----------
+    
+    def _init_tables(self):
+        """初始化对话相关表（含新增 user_profiles）"""
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        conn = sqlite3.connect(str(self.db_path))
+        try:
+            cursor = conn.cursor()
+            # 会话表
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS dialog_sessions (
+                    session_id TEXT PRIMARY KEY,
+                    user_id TEXT NOT NULL,
+                    subject_id TEXT,
+                    status TEXT DEFAULT 'active',
+                    current_topic TEXT,
+                    user_theta REAL DEFAULT 0.0,
+                    weak_areas TEXT,
+                    turn_count INTEGER DEFAULT 0,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    context_summary TEXT
+                )
+            """)
+            # 消息表
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS dialog_messages (
+                    message_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    session_id TEXT NOT NULL,
+                    turn_number INTEGER NOT NULL,
+                    role TEXT NOT NULL,
+                    agent_name TEXT,
+                    content TEXT NOT NULL,
+                    intent TEXT,
+                    metadata TEXT,
+                    created_at TEXT NOT NULL
+                )
+            """)
+            # 新增：用户画像表（跨学科共享）
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS user_profiles (
+                    user_id TEXT PRIMARY KEY,
+                    profession TEXT,
+                    tech_stack TEXT,
+                    experience_level TEXT,
+                    learning_style TEXT,
+                    weak_areas_global TEXT,
+                    prefer_code_examples INTEGER DEFAULT 1,
+                    prefer_diagrams INTEGER DEFAULT 1,
+                    prefer_concise INTEGER DEFAULT 0,
+                    created_at TEXT,
+                    updated_at TEXT
+                )
+            """)
+            # 索引
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_sessions_user ON dialog_sessions(user_id, updated_at DESC)
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_sessions_status ON dialog_sessions(status, updated_at)
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_messages_session ON dialog_messages(session_id, turn_number)
+            """)
+            conn.commit()
+            print("[DialogContextManager] 表初始化完成: dialog_sessions, dialog_messages, user_profiles")
+        finally:
+            conn.close()
+    
+    # ---------- 用户画像（跨学科共享）----------
+    
+    def get_or_create_profile(self, user_id: str) -> UserProfile:
+        """获取或创建用户全局画像"""
+        profile = self._load_profile(user_id)
+        if profile:
+            print(f"[DialogContextManager] 加载用户画像: user={user_id}, profession={profile.profession}")
+            return profile
+        # 创建默认画像
+        now = datetime.now().isoformat()
+        profile = UserProfile(user_id=user_id, created_at=now, updated_at=now)
+        self._save_profile(profile)
+        print(f"[DialogContextManager] 创建新用户画像: user={user_id}")
+        return profile
+    
+    def _load_profile(self, user_id: str) -> Optional[UserProfile]:
+        conn = sqlite3.connect(str(self.db_path))
+        try:
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM user_profiles WHERE user_id = ?", (user_id,))
+            row = cursor.fetchone()
+            if not row:
+                return None
+            columns = [desc[0] for desc in cursor.description]
+            data = dict(zip(columns, row))
+            return UserProfile(**data)
+        finally:
+            conn.close()
+    
+    def _save_profile(self, profile: UserProfile):
+        conn = sqlite3.connect(str(self.db_path))
+        try:
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT OR REPLACE INTO user_profiles
+                (user_id, profession, tech_stack, experience_level, learning_style,
+                 weak_areas_global, prefer_code_examples, prefer_diagrams, prefer_concise,
+                 created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                profile.user_id, profile.profession, profile.tech_stack,
+                profile.experience_level, profile.learning_style,
+                profile.weak_areas_global, profile.prefer_code_examples,
+                profile.prefer_diagrams, profile.prefer_concise,
+                profile.created_at, datetime.now().isoformat()
+            ))
+            conn.commit()
+        finally:
+            conn.close()
+    
+    def update_profile(self, user_id: str, **updates) -> bool:
+        """更新用户画像字段（如果不存在则创建）"""
+        # 先检查是否存在
+        existing = self._load_profile(user_id)
+        if not existing:
+            # 创建默认画像
+            now = datetime.now().isoformat()
+            default = UserProfile(user_id=user_id, created_at=now, updated_at=now)
+            self._save_profile(default)
+            print(f"[DialogContextManager] 用户画像不存在，已创建默认: user={user_id}")
+        
+        allowed = {"profession", "tech_stack", "experience_level", "learning_style",
+                   "weak_areas_global", "prefer_code_examples", "prefer_diagrams", "prefer_concise"}
+        fields = {k: v for k, v in updates.items() if k in allowed}
+        if not fields:
+            return False
+        
+        # 序列化列表字段
+        for key in ["tech_stack", "weak_areas_global"]:
+            if key in fields and isinstance(fields[key], list):
+                fields[key] = json.dumps(fields[key], ensure_ascii=False)
+        
+        fields["updated_at"] = datetime.now().isoformat()
+        
+        conn = sqlite3.connect(str(self.db_path))
+        try:
+            cursor = conn.cursor()
+            set_clause = ", ".join([f"{k} = ?" for k in fields.keys()])
+            values = list(fields.values()) + [user_id]
+            cursor.execute(f"UPDATE user_profiles SET {set_clause} WHERE user_id = ?", values)
+            conn.commit()
+            print(f"[DialogContextManager] 更新用户画像: user={user_id}, fields={list(updates.keys())}")
+            return cursor.rowcount > 0
+        finally:
+            conn.close()
+    
+    # ---------- 会话生命周期（含跨学科切换检测）----------
+    
+    def get_or_create_session(self, user_id: str, subject_id: str = None,
+                              session_id: str = None) -> Tuple[str, Dict]:
+        """
+        获取或创建会话（增强版：跨学科隔离）。
+        
+        关键行为:
+        - 同学科 → 恢复活跃会话
+        - 跨学科 → 暂停旧会话，创建新会话
+        - 显式 session_id → 恢复该会话（忽略学科）
+        """
+        print(f"[DialogContextManager] get_or_create_session: user={user_id}, subject={subject_id}, session_id={session_id}")
+        
+        # 1. 如果提供了 session_id，尝试恢复
+        if session_id:
+            session = self._load_session(session_id)
+            if session and not self._is_expired(session):
+                print(f"[DialogContextManager] 显式恢复会话: session_id={session_id[:8]}..., subject={session.get('subject_id')}")
+                return session_id, session
+            print(f"[DialogContextManager] 显式 session_id 已过期或不存在，将创建新会话")
+        
+        # 2. 关闭该用户的过期会话
+        closed_count = self._close_expired_sessions(user_id)
+        if closed_count > 0:
+            print(f"[DialogContextManager] 关闭了 {closed_count} 个过期会话")
+        
+        # 3. 查找用户最近的活跃会话
+        active_session = self._find_active_session(user_id)
+        
+        if active_session:
+            active_subject = active_session.get("subject_id", "")
+            # 跨学科切换检测
+            if active_subject and subject_id and active_subject != subject_id:
+                print(f"[DialogContextManager] >>> 跨学科切换检测 <<<: {active_subject} -> {subject_id}")
+                print(f"[DialogContextManager] 暂停旧会话: session={active_session['session_id'][:8]}..., subject={active_subject}")
+                self._suspend_session(active_session["session_id"])
+                # 创建新会话（新学科）
+                new_session = self._create_session(user_id, subject_id)
+                print(f"[DialogContextManager] 创建新学科会话: session={new_session['session_id'][:8]}..., subject={subject_id}")
+                return new_session["session_id"], new_session
+            else:
+                # 同学科或无前学科 → 恢复
+                print(f"[DialogContextManager] 恢复同学科会话: session={active_session['session_id'][:8]}..., subject={active_subject}")
+                return active_session["session_id"], active_session
+        
+        # 4. 无活跃会话 → 创建新会话
+        new_session = self._create_session(user_id, subject_id)
+        print(f"[DialogContextManager] 创建新会话: session={new_session['session_id'][:8]}..., subject={subject_id}")
+        return new_session["session_id"], new_session
+    
+    def _create_session(self, user_id: str, subject_id: str = None) -> Dict:
+        now = datetime.now().isoformat()
+        session_id = str(uuid.uuid4())
+        session = {
+            "session_id": session_id,
+            "user_id": user_id,
+            "subject_id": subject_id or "",
+            "status": "active",
+            "current_topic": None,
+            "user_theta": 0.0,
+            "weak_areas": "[]",
+            "turn_count": 0,
+            "created_at": now,
+            "updated_at": now,
+            "context_summary": None,
+        }
+        conn = sqlite3.connect(str(self.db_path))
+        try:
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT INTO dialog_sessions
+                (session_id, user_id, subject_id, status, current_topic, user_theta,
+                 weak_areas, turn_count, created_at, updated_at, context_summary)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, tuple(session.values()))
+            conn.commit()
+        finally:
+            conn.close()
+        return session
+    
+    def _load_session(self, session_id: str) -> Optional[Dict]:
+        conn = sqlite3.connect(str(self.db_path))
+        try:
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM dialog_sessions WHERE session_id = ?", (session_id,))
+            row = cursor.fetchone()
+            if not row:
+                return None
+            columns = [desc[0] for desc in cursor.description]
+            return dict(zip(columns, row))
+        finally:
+            conn.close()
+    
+    def _find_active_session(self, user_id: str, subject_id: str = None) -> Optional[Dict]:
+        conn = sqlite3.connect(str(self.db_path))
+        try:
+            cursor = conn.cursor()
+            if subject_id:
+                cursor.execute("""
+                    SELECT * FROM dialog_sessions
+                    WHERE user_id = ? AND subject_id = ? AND status = 'active'
+                    ORDER BY updated_at DESC LIMIT 1
+                """, (user_id, subject_id))
+            else:
+                cursor.execute("""
+                    SELECT * FROM dialog_sessions
+                    WHERE user_id = ? AND status = 'active'
+                    ORDER BY updated_at DESC LIMIT 1
+                """, (user_id,))
+            row = cursor.fetchone()
+            if row:
+                columns = [desc[0] for desc in cursor.description]
+                return dict(zip(columns, row))
+            return None
+        finally:
+            conn.close()
+    
+    def _suspend_session(self, session_id: str):
+        """暂停会话（跨学科切换时使用，非过期）"""
+        conn = sqlite3.connect(str(self.db_path))
+        try:
+            cursor = conn.cursor()
+            cursor.execute("""
+                UPDATE dialog_sessions SET status = 'suspended', updated_at = ? WHERE session_id = ?
+            """, (datetime.now().isoformat(), session_id))
+            conn.commit()
+            print(f"[DialogContextManager] 会话已暂停: session_id={session_id[:8]}...")
+        finally:
+            conn.close()
+    
+    def _is_expired(self, session: Dict) -> bool:
+        try:
+            updated_at = datetime.fromisoformat(session.get("updated_at", ""))
+            elapsed = (datetime.now() - updated_at).total_seconds()
+            return elapsed > self.SESSION_TIMEOUT_MINUTES * 60
+        except (ValueError, TypeError):
+            return True
+    
+    def _close_expired_sessions(self, user_id: str) -> int:
+        conn = sqlite3.connect(str(self.db_path))
+        try:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT session_id, updated_at FROM dialog_sessions
+                WHERE user_id = ? AND status = 'active'
+            """, (user_id,))
+            rows = cursor.fetchall()
+            closed = 0
+            for row in rows:
+                session_id, updated_at = row
+                try:
+                    dt = datetime.fromisoformat(updated_at)
+                    elapsed = (datetime.now() - dt).total_seconds()
+                    if elapsed > self.SESSION_TIMEOUT_MINUTES * 60:
+                        cursor.execute("""
+                            UPDATE dialog_sessions SET status = 'expired' WHERE session_id = ?
+                        """, (session_id,))
+                        closed += 1
+                except (ValueError, TypeError):
+                    pass
+            conn.commit()
+            return closed
+        finally:
+            conn.close()
+    
+    # ---------- 消息持久化（增强日志）----------
+    
+    def save_message(self, session_id: str, turn_number: int, role: str,
+                     content: str, agent_name: str = None, intent: str = None,
+                     metadata: Dict = None) -> bool:
+        print(f"[DialogContextManager] 保存消息: session={session_id[:8]}..., turn={turn_number}, role={role}, intent={intent}, content_len={len(content)}")
+        conn = sqlite3.connect(str(self.db_path))
+        try:
+            cursor = conn.cursor()
+            now = datetime.now().isoformat()
+            cursor.execute("""
+                INSERT INTO dialog_messages
+                (session_id, turn_number, role, agent_name, content, intent, metadata, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """, (session_id, turn_number, role, agent_name, content, intent,
+                  json.dumps(metadata or {}, ensure_ascii=False), now))
+            conn.commit()
+            print(f"[DialogContextManager] 消息已保存: message_id={cursor.lastrowid}")
+            return True
+        except Exception as e:
+            print(f"[DialogContextManager] 保存消息失败: {e}")
+            return False
+        finally:
+            conn.close()
+    
+    def get_history(self, session_id: str, limit: int = 20) -> List[Dict]:
+        conn = sqlite3.connect(str(self.db_path))
+        try:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT * FROM dialog_messages
+                WHERE session_id = ?
+                ORDER BY turn_number DESC, message_id DESC
+                LIMIT ?
+            """, (session_id, limit))
+            rows = cursor.fetchall()
+            columns = [desc[0] for desc in cursor.description]
+            messages = []
+            for row in rows:
+                msg = dict(zip(columns, row))
+                if msg.get("metadata"):
+                    try:
+                        msg["metadata"] = json.loads(msg["metadata"])
+                    except json.JSONDecodeError:
+                        msg["metadata"] = {}
+                messages.append(msg)
+            messages.reverse()
+            print(f"[DialogContextManager] 查询历史: session={session_id[:8]}..., 返回 {len(messages)} 条消息")
+            return messages
+        finally:
+            conn.close()
+    
+    # ---------- 上下文构建（增强版：跨学科记忆分层）----------
+    
+    def build_context(self, session_id: str) -> Optional[DialogContext]:
+        """
+        构建完整的对话上下文，包含：
+        - 学科隔离部分（当前会话历史、当前话题、学科薄弱点）
+        - 全局共享部分（用户画像、通用薄弱点）
+        """
+        print(f"[DialogContextManager] 构建上下文: session={session_id[:8]}...")
+        
+        session = self._load_session(session_id)
+        if not session:
+            print(f"[DialogContextManager] 会话不存在: {session_id}")
+            return None
+        
+        user_id = session.get("user_id", "")
+        subject_id = session.get("subject_id", "")
+        
+        # 1. 学科隔离记忆：当前会话历史
+        history = self.get_history(session_id, limit=self.MAX_HISTORY_TURNS)
+        turn_count = session.get("turn_count", 0)
+        
+        # 2. 学科隔离记忆：学科薄弱点
+        weak_areas = []
+        try:
+            weak_areas = json.loads(session.get("weak_areas", "[]") or "[]")
+        except json.JSONDecodeError:
+            weak_areas = []
+        
+        # 3. 全局共享记忆：用户画像
+        profile = self.get_or_create_profile(user_id)
+        
+        # 4. 全局共享记忆：通用薄弱点
+        weak_areas_global = profile._safe_json_loads(profile.weak_areas_global, [])
+        
+        context = DialogContext(
+            session_id=session_id,
+            user_id=user_id,
+            turn_number=turn_count,
+            history=history,
+            current_topic=session.get("current_topic"),
+            user_theta=session.get("user_theta", 0.0),
+            weak_areas=weak_areas,
+            subject_id=subject_id,
+            user_profile=profile,
+            weak_areas_global=weak_areas_global,
+        )
+        
+        print(f"[DialogContextManager] {context.get_log_summary()}")
+        return context
+    
+    def update_session(self, session_id: str, **updates) -> bool:
+        if not updates:
+            return True
+        
+        allowed_fields = {"current_topic", "user_theta", "weak_areas", "turn_count", "status", "context_summary"}
+        fields = {k: v for k, v in updates.items() if k in allowed_fields}
+        if not fields:
+            return False
+        
+        if "weak_areas" in fields and isinstance(fields["weak_areas"], list):
+            fields["weak_areas"] = json.dumps(fields["weak_areas"], ensure_ascii=False)
+        
+        fields["updated_at"] = datetime.now().isoformat()
+        
+        conn = sqlite3.connect(str(self.db_path))
+        try:
+            cursor = conn.cursor()
+            set_clause = ", ".join([f"{k} = ?" for k in fields.keys()])
+            values = list(fields.values()) + [session_id]
+            cursor.execute(f"UPDATE dialog_sessions SET {set_clause} WHERE session_id = ?", values)
+            conn.commit()
+            print(f"[DialogContextManager] 更新会话: session={session_id[:8]}..., fields={list(updates.keys())}")
+            return cursor.rowcount > 0
+        except Exception as e:
+            print(f"[DialogContextManager] 更新会话失败: {e}")
+            return False
+        finally:
+            conn.close()
+    
+    # ---------- 指代解析（增强日志）----------
+    
+    def resolve_references(self, query: str, context: DialogContext) -> str:
+        resolved = query
+        
+        if context.current_topic:
+            pronouns = ["它", "他", "她", "这个方法", "这个概念", "这个技术"]
+            replaced = []
+            for p in pronouns:
+                if p in resolved:
+                    resolved = resolved.replace(p, context.current_topic)
+                    replaced.append(p)
+            if replaced:
+                print(f"[DialogContextManager] 指代替换: {replaced} -> '{context.current_topic}'")
+            
+            ellipsis_patterns = re.compile(r'^(和|与|跟|同|以及|还有|另外|那么|然后)\s+')
+            if ellipsis_patterns.match(resolved.strip()):
+                resolved = f"{context.current_topic} {resolved}"
+                print(f"[DialogContextManager] 省略主语补全: '{query}' -> '{resolved}'")
+        
+        if resolved == query:
+            print(f"[DialogContextManager] 无需指代解析: '{query[:50]}...'")
+        
+        return resolved

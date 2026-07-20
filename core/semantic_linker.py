@@ -41,7 +41,71 @@ from core.llm_client import LLMClient
 from config.settings import KNOWLEDGE_BASE_DIR
 
 
-# ========== 范式层级配置 ==========
+def _load_paradigms_from_yaml() -> Dict[str, Any]:
+    """加载 paradigms.yaml 中的 relation_map 等配置。"""
+    import yaml
+    yaml_path = KNOWLEDGE_BASE_DIR.parent / "config" / "paradigms.yaml"
+    if not yaml_path.exists():
+        return {}
+    try:
+        with open(yaml_path, "r", encoding="utf-8") as f:
+            data = yaml.safe_load(f)
+        return data.get("paradigms", {})
+    except Exception as e:
+        print(f"[SemanticLinker] 加载 paradigms.yaml 失败: {e}")
+        return {}
+
+
+# 从 paradigms.yaml 加载的范式配置
+_PARADIGMS_YAML = _load_paradigms_from_yaml()
+
+
+def _build_relation_validator(paradigm_id: str) -> Optional[Dict[str, Dict[str, List[str]]]]:
+    """
+    从 paradigms.yaml 构建关系合法性校验器。
+    
+    Returns:
+        {source_type: {relation_type: [target_types]}} 或 None
+    """
+    p = _PARADIGMS_YAML.get(paradigm_id)
+    if not p:
+        return None
+    return p.get("relation_map")
+
+
+def _is_valid_relation(
+    relation_map: Optional[Dict],
+    source_type: str,
+    relation_type: str,
+    target_type: str,
+) -> bool:
+    """
+    校验关系是否合法。
+    
+    Args:
+        relation_map: paradigms.yaml 中的 relation_map
+        source_type: 源节点类型
+        relation_type: 关系类型
+        target_type: 目标节点类型
+        
+    Returns:
+        True if 合法（或未配置校验器），False if 非法
+    """
+    if not relation_map:
+        return True  # 没有配置则放行
+    
+    source_map = relation_map.get(source_type)
+    if not source_map:
+        return False  # source_type 不在 relation_map 中 → 非法
+    
+    allowed_targets = source_map.get(relation_type)
+    if allowed_targets is None:
+        return False  # relation_type 不合法
+    
+    return target_type in allowed_targets
+
+
+# ========== 范式层级配置（向后兼容） ==========
 
 PARADIGM_LEVELS = {
     "engineering": {
@@ -171,8 +235,42 @@ class SemanticLinker:
             level_groups, config, existing_pairs
         )
 
-        # 5. 合并并写入数据库
+        # 5. 合并并校验 relation_map
         all_edges = edges_stage1 + edges_stage23
+        
+        # LA-027 FIX: 使用 paradigms.yaml 的 relation_map 校验连接合法性
+        relation_map = _build_relation_validator(paradigm)
+        if relation_map:
+            valid_edges = []
+            rejected = []
+            for edge in all_edges:
+                # 查询 parent 和 child 的实际类型
+                parent_type = self._get_concept_type(edge["parent_id"])
+                child_type = self._get_concept_type(edge["child_id"])
+                relation_type = edge["relation_type"]
+                
+                if _is_valid_relation(relation_map, parent_type, relation_type, child_type):
+                    valid_edges.append(edge)
+                else:
+                    rejected.append({
+                        "parent": edge.get("parent_name", edge["parent_id"]),
+                        "parent_type": parent_type,
+                        "relation": relation_type,
+                        "child": edge.get("child_name", edge["child_id"]),
+                        "child_type": child_type,
+                        "reason": f"relation_map 禁止 {parent_type} --{relation_type}--> {child_type}",
+                    })
+            
+            if rejected:
+                print(f"[SemanticLinker] relation_map 校验拒绝 {len(rejected)} 条非法连接:")
+                for r in rejected[:5]:  # 最多打印5条
+                    print(f"  ❌ {r['parent']}({r['parent_type']}) --{r['relation']}--> {r['child']}({r['child_type']})")
+                if len(rejected) > 5:
+                    print(f"  ... 还有 {len(rejected) - 5} 条")
+            
+            all_edges = valid_edges
+        
+        # 6. 写入数据库
         self._write_edges(all_edges)
 
         return {
@@ -514,6 +612,9 @@ class SemanticLinker:
         - parent_hint: parent_hint
         - source_chunks: 来源 chunk ID 列表
         """
+        # LA-027 FIX: 初始化类型缓存
+        self._concept_type_cache = {}
+        
         # 1. 优先从 KùzuDB 读取
         db_concepts = self._load_from_kuzudb()
         if db_concepts:
@@ -534,6 +635,8 @@ class SemanticLinker:
                 "parent_hint": csv_info.get("parent_hint", ""),
                 "source_chunks": csv_info.get("source_chunks", []),
             })
+            # 填充类型缓存
+            self._concept_type_cache[concept_id] = csv_info.get("concept_type", "")
 
         return merged
 
@@ -591,6 +694,8 @@ class SemanticLinker:
                     "parent_hint": node.get("parent_hint", ""),
                     "source_chunks": source_chunks,
                 })
+                # LA-027 FIX: 填充类型缓存
+                self._concept_type_cache[node.get("id", "")] = node.get("type", "")
 
             return result
         except Exception as e:
@@ -650,6 +755,29 @@ class SemanticLinker:
             print(f"[SemanticLinker] 读取 CSV 失败: {e}")
 
         return result
+
+    def _get_concept_type(self, canonical_id: str) -> str:
+        """
+        根据 canonical_id 查询概念类型。
+        
+        LA-027 FIX: relation_map 校验需要知道边的两端实际类型。
+        优先从已加载的概念缓存查询，否则查数据库。
+        """
+        # 尝试从缓存查询（如果 _load_canonical_concepts 已被调用）
+        if hasattr(self, '_concept_type_cache') and canonical_id in self._concept_type_cache:
+            return self._concept_type_cache[canonical_id]
+        
+        # 查数据库
+        try:
+            result = self.graph_store._execute(
+                self.graph_store._ensure_db(),
+                f"MATCH (c:CanonicalConcept {{canonical_id: '{self.graph_store._escape_cypher_string(canonical_id)}'}}) RETURN c.concept_type"
+            )
+            if result.has_next():
+                return result.get_next()[0] or ""
+        except Exception:
+            pass
+        return ""
 
     def _group_by_level(
         self,

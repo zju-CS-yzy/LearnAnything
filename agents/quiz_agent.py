@@ -239,9 +239,21 @@ class QuizAgent(BaseAgent):
             self._vector_store = VectorStore(self.collection_name)
         return self._vector_store
 
-    def handle(self, query: str, n_questions: int = 5, filters: Optional[Dict[str, Any]] = None, graph_context: Optional[GraphContext] = None, **kwargs) -> Dict[str, Any]:
+    def handle(self, query: str, context: Optional[Any] = None, n_questions: int = 5, filters: Optional[Dict[str, Any]] = None, graph_context: Optional[GraphContext] = None, **kwargs) -> Dict[str, Any]:
+        """
+        出题主入口。
+        阶段 1: 支持对话上下文（context 参数）。
+        """
         # P1-FIX: 从 kwargs 读取 question_types（前端传入或默认配置）
         question_types = kwargs.get("question_types")
+
+        # 阶段 1: 对话上下文注入（用于自适应出题）
+        if context is not None and hasattr(context, 'to_prompt_context'):
+            print(f"[QuizAgent] 阶段1: 对话上下文注入，当前轮次={context.turn_number}")
+            # 如果对话中有当前话题，优先使用
+            if context.current_topic and not kwargs.get("topic"):
+                kwargs = dict(kwargs)
+                kwargs["topic"] = context.current_topic
 
         # P0-INT-2: 如果提供了 graph_context，使用 P0 图谱上下文出题
         if graph_context is not None and graph_context.text:

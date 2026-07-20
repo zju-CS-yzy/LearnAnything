@@ -114,9 +114,52 @@ class MarkdownChunker:
         
         匹配 #~###### 标题，返回列表:
         [{"level": int, "text": str, "raw": str, "line_idx": int}, ...]
+        
+        ⚠️ 重要：跳过代码块中的行（围栏代码块 ``` 和缩进代码块）
         """
         headings = []
+        in_code_block = False      # 是否在 ``` 围栏代码块内
+        code_block_fence = ""      # 当前代码块的围栏标记
+        in_indent_block = False    # 是否在缩进代码块内
+        indent_block_start = -1    # 缩进代码块起始行
+        
         for idx, line in enumerate(lines):
+            # --- 检测围栏代码块 ---
+            fence_match = re.match(r'^(```+|~~~+)\s*', line)
+            if fence_match:
+                if not in_code_block:
+                    # 进入代码块
+                    in_code_block = True
+                    code_block_fence = fence_match.group(1)
+                elif line.strip().startswith(code_block_fence):
+                    # 退出代码块（匹配相同围栏标记）
+                    in_code_block = False
+                    code_block_fence = ""
+                # 代码块的围栏行本身也不是标题
+                continue
+            
+            if in_code_block:
+                # 在围栏代码块内，跳过
+                continue
+            
+            # --- 检测缩进代码块（4空格或1tab缩进）---
+            # 缩进代码块规则：连续4个空格或1个tab缩进的行
+            is_indented = line.startswith("    ") or line.startswith("\t")
+            if is_indented and not in_indent_block:
+                # 进入缩进代码块
+                in_indent_block = True
+                indent_block_start = idx
+                continue
+            elif not is_indented and in_indent_block:
+                # 退出缩进代码块（空行不算，但非缩进的文本行算退出）
+                if line.strip() != "":
+                    in_indent_block = False
+            
+            if in_indent_block:
+                # 在缩进代码块内，跳过
+                continue
+            
+            # --- 匹配标题 ---
             match = re.match(r'^(#{1,6})\s+(.+)$', line)
             if match:
                 level = len(match.group(1))
@@ -127,6 +170,7 @@ class MarkdownChunker:
                     "raw": line,
                     "line_idx": idx,
                 })
+        
         return headings
     
     # ========== Stage 2: 标题树构建 ==========
@@ -266,7 +310,8 @@ class MarkdownChunker:
         按自然段分割文本，并执行后处理优化。
         
         规则:
-        - 分隔符: 一个或多个空行（\n\n+）
+        - 普通文本分隔符: 一个或多个空行（\n\n+）
+        - 代码块（围栏/缩进）作为整体保留，不被空行拆分
         - 每个自然段 strip() 处理
         - 过滤空字符串
         - 过滤纯图片引用行（LA-035: MinerU 会将图片提取为独立行）
@@ -279,24 +324,102 @@ class MarkdownChunker:
         if not content.strip():
             return []
         
-        # 按一个或多个空行分割
-        raw_paras = [p.strip() for p in re.split(r'\n\s*\n', content) if p.strip()]
+        # Step 0: 识别代码块并作为整体保留
+        # 先将 content 拆分为"代码块"和"普通文本"的混合列表
+        lines = content.split('\n')
+        segments = []  # [(type, text), ...], type: "code" | "text"
+        i = 0
         
-        # LA-035: Step 1 — 过滤纯图片引用行
+        while i < len(lines):
+            line = lines[i]
+            stripped = line.strip()
+            
+            # 检测围栏代码块
+            fence_match = re.match(r'^(```+|~~~+)', stripped)
+            if fence_match:
+                fence = fence_match.group(1)
+                code_lines = [line]
+                i += 1
+                while i < len(lines):
+                    code_lines.append(lines[i])
+                    if lines[i].strip().startswith(fence):
+                        break
+                    i += 1
+                segments.append(("code", '\n'.join(code_lines)))
+                i += 1
+                continue
+            
+            # 检测缩进代码块（4空格或tab开头）
+            if line.startswith('    ') or line.startswith('\t'):
+                code_lines = [line]
+                i += 1
+                while i < len(lines):
+                    if lines[i].startswith('    ') or lines[i].startswith('\t') or lines[i].strip() == '':
+                        code_lines.append(lines[i])
+                        i += 1
+                    else:
+                        break
+                segments.append(("code", '\n'.join(code_lines)))
+                continue
+            
+            # 普通文本行
+            if stripped == '':
+                i += 1
+                continue
+            
+            text_lines = [line]
+            i += 1
+            while i < len(lines):
+                current = lines[i]
+                current_stripped = current.strip()
+                if current_stripped == '':
+                    break
+                # 检测是否进入代码块
+                if re.match(r'^(```+|~~~+)', current_stripped):
+                    break
+                if current.startswith('    ') or current.startswith('\t'):
+                    break
+                text_lines.append(current)
+                i += 1
+            
+            segments.append(("text", '\n'.join(text_lines)))
+        
+        # Step 1: 合并相邻的 text 段落（按空行逻辑），保留 code 段落
+        raw_paras = []
+        current_text = []
+        
+        for seg_type, seg_text in segments:
+            if seg_type == "code":
+                # 先刷新累积的普通文本
+                if current_text:
+                    raw_paras.append('\n'.join(current_text).strip())
+                    current_text = []
+                raw_paras.append(seg_text.strip())
+            else:
+                current_text.append(seg_text)
+        
+        if current_text:
+            raw_paras.append('\n'.join(current_text).strip())
+        
+        # Step 2: 过滤空字符串和图片引用行
         filtered_paras = []
         for para in raw_paras:
-            # 如果段落只包含图片引用（无其他文本内容），跳过
+            if not para:
+                continue
             if self._is_image_only_paragraph(para):
                 continue
             filtered_paras.append(para)
         
-        # LA-035: Step 2 — 合并极短段落
+        # Step 3 — 合并极短段落
         merged_paras = self._merge_short_paragraphs(filtered_paras)
         
-        # Step 3 — 处理超长段落
+        # Step 4 — 处理超长段落（代码块不拆分）
         paragraphs = []
         for para in merged_paras:
-            if len(para) > self.max_para_chars:
+            if self._is_code_block(para):
+                # 代码块不拆分，直接保留
+                paragraphs.append(para)
+            elif len(para) > self.max_para_chars:
                 sentences = self._split_to_sentences(para)
                 current = ""
                 for sent in sentences:
@@ -312,6 +435,21 @@ class MarkdownChunker:
                 paragraphs.append(para)
         
         return paragraphs
+    
+    def _is_code_block(self, para: str) -> bool:
+        """判断段落是否是代码块（围栏或缩进）。"""
+        lines = para.split('\n')
+        if not lines:
+            return False
+        first = lines[0].strip()
+        # 围栏代码块
+        if first.startswith('```') or first.startswith('~~~'):
+            return True
+        # 缩进代码块：所有非空行都以 4 空格或 tab 开头
+        non_empty = [l for l in lines if l.strip()]
+        if non_empty and all(l.startswith('    ') or l.startswith('\t') for l in non_empty):
+            return True
+        return False
     
     def _is_image_only_paragraph(self, para: str) -> bool:
         """
@@ -354,6 +492,17 @@ class MarkdownChunker:
             
             # 如果段落长度 >= 阈值，直接保留
             if len(para) >= self.min_para_chars:
+                result.append(para)
+                i += 1
+                continue
+            
+            # 如果当前段落是代码块，或者相邻段落是代码块，不合并（保持代码块完整性）
+            prev_para = result[-1] if result else None
+            next_para = paragraphs[i + 1] if i + 1 < len(paragraphs) else None
+            prev_is_code = prev_para and self._is_code_block(prev_para)
+            next_is_code = next_para and self._is_code_block(next_para)
+            current_is_code = self._is_code_block(para)
+            if current_is_code or prev_is_code or next_is_code:
                 result.append(para)
                 i += 1
                 continue
@@ -571,6 +720,9 @@ class MarkdownChunker:
                 para_formulas = self._extract_formulas(para)
                 para_media_refs = self._build_media_refs(para_image_refs, para_formulas)
                 
+                # 检测是否是代码块
+                is_code = self._is_code_block(para)
+                
                 para_chunk = {
                     "id": para_id,
                     "text": para,
@@ -586,6 +738,7 @@ class MarkdownChunker:
                         "media_refs": para_media_refs,
                         "formula_count": self._count_formulas(para),
                         "table_lines": self._count_table_lines(para),
+                        "is_code_block": is_code,  # 标记代码块
                     },
                     "source": source_name,
                 }

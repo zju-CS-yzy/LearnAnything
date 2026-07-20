@@ -32,13 +32,37 @@ Phase 2 核心模块：对知识片段进行意义向量分解。
 
 import json
 from typing import List, Dict, Any, Optional
+from pathlib import Path
 
 from core.llm_client import LLMClient
 
 
 # ========== 多分解范式配置 ==========
+# 优先从 paradigms.yaml 加载，YAML 不存在或解析失败时回退到硬编码
 
-PARADIGMS = {
+def _load_paradigms_from_yaml() -> Optional[Dict[str, Any]]:
+    """尝试从 config/paradigms.yaml 加载范式配置（v2.0 支持）"""
+    try:
+        import yaml
+        # 查找 paradigms.yaml（兼容开发环境和打包环境）
+        possible_paths = [
+            Path(__file__).parent.parent / "config" / "paradigms.yaml",
+            Path.cwd() / "config" / "paradigms.yaml",
+        ]
+        for p in possible_paths:
+            if p.exists():
+                with open(p, "r", encoding="utf-8") as f:
+                    config = yaml.safe_load(f)
+                if config and "paradigms" in config:
+                    print(f"[SemanticExtractor] 从 YAML 加载范式配置: {p}")
+                    return config["paradigms"]
+    except Exception as e:
+        print(f"[SemanticExtractor] YAML 加载失败，使用硬编码: {e}")
+    return None
+
+
+# 硬编码回退（与 paradigms.yaml v2.0 保持字段兼容）
+_PARADIGMS_FALLBACK = {
     "theory": {
         "name": "理论归纳",
         "description": "适合理论学科（物理、数学等）：定义→规律→应用→扩展",
@@ -209,6 +233,9 @@ PARADIGMS = {
 """,
     },
 }
+
+# 加载范式配置：优先 YAML，回退硬编码
+PARADIGMS = _load_paradigms_from_yaml() or _PARADIGMS_FALLBACK
 
 _DEFAULT_PARADIGM = "theory"
 
