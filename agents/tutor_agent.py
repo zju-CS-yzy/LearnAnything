@@ -317,10 +317,11 @@ class TutorAgent(BaseAgent):
                 safe_ids.append(f"'{safe_cid}'")
 
             id_str = ", ".join(safe_ids)
+            # FIX-LA049: KùzuDB Cypher 列表字面量必须用方括号 []
             cypher = f"""
                 MATCH (c:Chunk)
                 WHERE c.chunk_id IN [{id_str}]
-                  AND c.chunk_type IN ('image', 'image_pseudo', 'formula_pseudo')
+                  AND c.chunk_type IN ['image', 'image_pseudo', 'formula_pseudo']
                 RETURN c.chunk_id, c.chunk_type, c.thumbnail_path, c.image_path, c.heading_path, c.media_refs
             """
             result = conn.execute(cypher)
@@ -446,6 +447,10 @@ class TutorAgent(BaseAgent):
                 if key in seen:
                     continue
                 seen.add(key)
+
+                # 跳过完全空的来源
+                if not heading_path and not page_number and not source_file:
+                    continue
 
                 sources.append({
                     "chunk_id": chunk_id,

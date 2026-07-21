@@ -53,8 +53,14 @@
                 <div class="source-item" v-for="(src, i) in msg.sources" :key="i">
                   <span class="source-index">{{ i + 1 }}</span>
                   <span class="source-text">
-                    {{ src.source }}
+                    <!-- 来源文件名（优先） -->
+                    <span v-if="src.source" class="source-file">{{ src.source }}</span>
+                    <span v-else-if="src.chunk_id" class="source-file">{{ src.chunk_id.slice(0, 40) }}...</span>
+                    <span v-else class="source-file">未知来源</span>
+                    <!-- 章节路径 -->
                     <span v-if="src.heading_path" class="source-detail"> | {{ src.heading_path }}</span>
+                    <span v-else-if="src.chunk_id" class="source-detail"> | {{ src.chunk_id.slice(0, 30) }}</span>
+                    <!-- 页码 -->
                     <span v-if="src.page_number" class="source-detail"> | 第{{ src.page_number }}页</span>
                   </span>
                 </div>
