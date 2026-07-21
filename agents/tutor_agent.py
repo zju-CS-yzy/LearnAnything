@@ -323,17 +323,17 @@ class TutorAgent(BaseAgent):
             debug_cypher = f"""
                 MATCH (c:Chunk)
                 WHERE c.chunk_id IN [{id_str}]
-                RETURN c.chunk_id, c.chunk_type, c.thumbnail_path
+                RETURN c.chunk_id, c.chunk_type, c.thumbnail_path, c.image_path, c.media_refs
             """
             debug_result = conn.execute(debug_cypher)
             debug_rows = []
             while debug_result.has_next():
                 dr = debug_result.get_next()
-                debug_rows.append(f"  {dr[0][:30]}... type={dr[1]} has_thumb={'是' if dr[2] else '否'}")
+                debug_rows.append(f"  {dr[0][:40]}... type={dr[1]} thumb={'有' if dr[2] else '无'} img={'有' if dr[3] else '无'} media={'有' if dr[4] else '无'}")
             if debug_rows:
-                print(f"[TutorAgent] LA-IMG: 调试 - source_chunks 类型分布:\n" + "\n".join(debug_rows))
+                print(f"[TutorAgent] LA-IMG: 调试 - source_chunks 详情:\n" + "\n".join(debug_rows))
             else:
-                print(f"[TutorAgent] LA-IMG: 调试 - 未找到任何 chunk（chunk_id 可能不存在）")
+                print(f"[TutorAgent] LA-IMG: 调试 - 未找到任何 chunk")
             
             # FIX-LA049: KùzuDB Cypher 列表字面量必须用方括号 []
             cypher = f"""
@@ -345,8 +345,18 @@ class TutorAgent(BaseAgent):
             result = conn.execute(cypher)
             while result.has_next():
                 row = result.get_next()
-                thumbnail = row[2] or row[3]  # 优先使用缩略图
+                # FIX: 优先 thumbnail_path，其次 image_path，再次 media_refs
+                thumbnail = row[2] or row[3]  # thumbnail_path or image_path
+                if not thumbnail and row[5]:  # media_refs
+                    try:
+                        import json
+                        media_refs = json.loads(row[5])
+                        if media_refs and len(media_refs) > 0:
+                            thumbnail = media_refs[0].get('thumbnail_path') or media_refs[0].get('path')
+                    except:
+                        pass
                 if not thumbnail:
+                    print(f"[TutorAgent] LA-IMG: 跳过 - chunk {row[0][:30]}... 无图片路径")
                     continue
 
                 # FIX-LA049: 将绝对路径转换为相对路径
