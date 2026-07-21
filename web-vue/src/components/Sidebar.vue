@@ -42,7 +42,7 @@
     </div>
 
     <!-- 新建会话按钮 -->
-    <button class="new-chat-btn" v-show="!collapsed" @click="$emit('switch-view', 'chat')">
+    <button class="new-chat-btn" v-show="!collapsed" @click="newChatSession">
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
         <line x1="12" y1="5" x2="12" y2="19"></line>
         <line x1="5" y1="12" x2="19" y2="12"></line>
@@ -225,15 +225,28 @@ const statusText = computed(() => {
   return map[healthStatus.value] || '未知'
 })
 
-// 历史会话（从 localStorage 读取，后续迁移到后端）
+// 历史会话（LA-044: 从后端 API 获取）
 const chatSessions = ref([])
 const currentSessionId = ref('')
 
-function loadSessions() {
+async function loadSessions() {
   try {
-    const saved = localStorage.getItem('la_chat_sessions')
-    chatSessions.value = saved ? JSON.parse(saved) : []
-  } catch {
+    const resp = await fetch(`${window.location.origin}/api/dialog/sessions?user_id=anonymous`)
+    if (resp.ok) {
+      const data = await resp.json()
+      // 映射后端字段到前端格式
+      chatSessions.value = (data.sessions || []).map(s => ({
+        id: s.id,
+        title: s.current_topic || `${s.subject_id || '通用'} 会话`,
+        subject: s.subject_id,
+        turnCount: s.turn_count,
+        updatedAt: s.updated_at,
+      }))
+    } else {
+      chatSessions.value = []
+    }
+  } catch (e) {
+    console.error('[Sidebar] 加载会话列表失败:', e)
     chatSessions.value = []
   }
 }
@@ -244,14 +257,19 @@ function selectSession(id) {
   window.dispatchEvent(new CustomEvent('load-chat-session', { detail: { sessionId: id } }))
 }
 
+// LA-044: 新建会话 — 调用 ChatView 的 createNewSession
+function newChatSession() {
+  // 触发全局事件，ChatView 监听并创建新会话
+  window.dispatchEvent(new CustomEvent('create-new-chat-session'))
+  // 刷新会话列表
+  setTimeout(loadSessions, 500)
+}
+
 loadSessions()
 
-// 监听新会话创建
+// 监听新会话创建（本地触发）
 window.addEventListener('chat-session-created', (e) => {
-  const session = e.detail
-  chatSessions.value.unshift(session)
-  currentSessionId.value = session.id
-  localStorage.setItem('la_chat_sessions', JSON.stringify(chatSessions.value))
+  loadSessions()  // LA-044: 改为从后端刷新
 })
 </script>
 
