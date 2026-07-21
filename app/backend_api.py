@@ -1738,6 +1738,67 @@ def api_get_subject_meta(subject_id: str):
     return meta
 
 
+# ========== LA-044: 对话上下文 API (必须在 /api/media/{path:path} 通配路由之前定义) ==========
+
+class DialogSessionCreate(BaseModel):
+    user_id: str
+    subject_id: Optional[str] = None
+
+@app.get("/api/dialog/sessions")
+def list_dialog_sessions(user_id: str):
+    """
+    获取用户的活跃对话会话列表。
+    """
+    try:
+        conn = sqlite3.connect(str(_dialog_manager.db_path))
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT session_id, subject_id, current_topic, turn_count, status, created_at, updated_at
+            FROM dialog_sessions
+            WHERE user_id = ? AND status = 'active'
+            ORDER BY updated_at DESC
+        """, (user_id,))
+        rows = cursor.fetchall()
+        conn.close()
+
+        sessions = []
+        for row in rows:
+            sessions.append({
+                "id": row[0],
+                "subject_id": row[1],
+                "current_topic": row[2] or "",
+                "turn_count": row[3] or 0,
+                "status": row[4],
+                "created_at": row[5],
+                "updated_at": row[6],
+            })
+        return {"user_id": user_id, "sessions": sessions}
+    except Exception as e:
+        print(f"[API] 获取会话列表失败: {e}")
+        return {"user_id": user_id, "sessions": []}
+
+
+@app.post("/api/dialog/sessions")
+def create_dialog_session(request: DialogSessionCreate):
+    """
+    创建新对话会话。
+    """
+    try:
+        session_id, session = _dialog_manager.get_or_create_session(
+            user_id=request.user_id,
+            subject_id=request.subject_id,
+        )
+        return {
+            "session_id": session_id,
+            "subject_id": session.get("subject_id", ""),
+            "status": session.get("status", "active"),
+            "current_topic": session.get("current_topic", ""),
+        }
+    except Exception as e:
+        print(f"[API] 创建会话失败: {e}")
+        raise HTTPException(status_code=500, detail=f"创建会话失败: {e}")
+
+
 # ========== LA-035: 媒体文件静态服务 ==========
 
 @app.get("/api/media/{path:path}")
@@ -1813,67 +1874,6 @@ else:
                 "GET  /api/health",
             ],
         }
-
-
-# ========== LA-044: 对话上下文 API ==========
-
-class DialogSessionCreate(BaseModel):
-    user_id: str
-    subject_id: Optional[str] = None
-
-@app.get("/api/dialog/sessions")
-def list_dialog_sessions(user_id: str):
-    """
-    获取用户的活跃对话会话列表。
-    """
-    try:
-        conn = sqlite3.connect(str(_dialog_manager.db_path))
-        cursor = conn.cursor()
-        cursor.execute("""
-            SELECT session_id, subject_id, current_topic, turn_count, status, created_at, updated_at
-            FROM dialog_sessions
-            WHERE user_id = ? AND status = 'active'
-            ORDER BY updated_at DESC
-        """, (user_id,))
-        rows = cursor.fetchall()
-        conn.close()
-
-        sessions = []
-        for row in rows:
-            sessions.append({
-                "id": row[0],
-                "subject_id": row[1],
-                "current_topic": row[2] or "",
-                "turn_count": row[3] or 0,
-                "status": row[4],
-                "created_at": row[5],
-                "updated_at": row[6],
-            })
-        return {"user_id": user_id, "sessions": sessions}
-    except Exception as e:
-        print(f"[API] 获取会话列表失败: {e}")
-        return {"user_id": user_id, "sessions": []}
-
-
-@app.post("/api/dialog/sessions")
-def create_dialog_session(request: DialogSessionCreate):
-    """
-    创建新对话会话。
-    """
-    try:
-        session_id, session = _dialog_manager.get_or_create_session(
-            user_id=request.user_id,
-            subject_id=request.subject_id,
-        )
-        return {
-            "session_id": session_id,
-            "subject_id": session.get("subject_id", ""),
-            "status": session.get("status", "active"),
-            "current_topic": session.get("current_topic", ""),
-        }
-    except Exception as e:
-        print(f"[API] 创建会话失败: {e}")
-        raise HTTPException(status_code=500, detail=f"创建会话失败: {e}")
 
 
 # LA-044: 辅助函数 — 获取会话当前话题
