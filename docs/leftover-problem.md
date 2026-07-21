@@ -1283,7 +1283,7 @@ unTreeLayout 中的逐树 dagre 逻辑
 ## 2026-07-21 00:00 更新
 
 ### LA-046: Gap 检测逻辑缺失
-- **状态**: 🟡 **已实现，待测试**（2026-07-21 11:56 确认方案，12:00 实现）
+- **状态**: 🟡 **已实现，待测试**（2026-07-21 23:53 完成 18 个 commit）
 - **实现内容**:
   - engineering 范式 `ideal_chain` 修正为循环结构：`cycle_pattern: [requirement, technology]`
   - `gap_rules.detect_by_same_type: true`：循环范式中同类型连接 = gap
@@ -1302,34 +1302,37 @@ unTreeLayout 中的逐树 dagre 逻辑
 - **待验证**: 重建图谱后检查 technology→technology 连接是否被替换为 tech→[缺失需求层]→tech
 
 ### LA-047: 智能问答缺少引用能力
-- **状态**: 🟡 **已实现，待测试**（2026-07-21 09:19）
+- **状态**: ✅ **已测试通过**（2026-07-21 22:00）
 - **实现内容**:
   - TutorAgent `_collect_sources()`: 从 subgraph 节点的 source_chunks 查询 Chunk 元数据（heading_path + page_number + source 文件名）
+  - 当 heading_path 为空时，从 chunk_id 推断章节信息（如 `md_xxx_h2_15_xxx` → "第15节 (H2)"）
   - 后端 API `AskResponse` 新增 `sources` 字段
   - SSE stream 传递 `sources` 到前端
   - 前端 ChatView.vue 底部渲染"📎 引用来源"：`[1] 文件名 | 章节路径 | 第X页`
 - **修改文件**: `agents/tutor_agent.py`, `app/backend_api.py`, `web-vue/ChatView.vue`
-- **待验证**: 智能问答后检查消息底部引用列表
+- **验证结果**: 引用来源正确显示，含文件名、章节路径、页码
 
 ### LA-048: TutorAgent Markdown 渲染失效
-- **状态**: 🟡 **已实现，待测试**（2026-07-21 08:52）
+- **状态**: ✅ **已测试通过**（2026-07-21 22:00）
 - **实现内容**:
   - marked v12 API 适配：`mediaRenderer.image = ({href, title, text}) => {...}`（对象解构）
   - `marked.parse` 增加 `headerIds: false, mangle: false`
   - `renderMarkdown()` 增加 `\#` → `#` 转义清理
   - ChatView.vue 新增 `.markdown-body :deep(h1~h4)` 完整样式
 - **修改文件**: `web-vue/src/components/ChatView.vue`
-- **待验证**: 智能问答中提问，检查 heading 是否正确渲染
+- **验证结果**: heading、表格、分割线正确渲染
 
 ### LA-049: 图片媒体引用失败
-- **状态**: 🟡 **已实现，待测试**（2026-07-21 08:52）
+- **状态**: ✅ **已测试通过**（2026-07-22 00:11）
 - **实现内容**:
   - `_collect_related_media()` source_chunks 多格式解析（JSON 列表 / 逗号分隔 / Python 列表）
-  - Cypher 查询单引号转义避免语法错误
-  - Windows 绝对路径 → 相对路径归一化（`{subject}_v1_images/{filename}`）
-  - 移除冗余的 `.message-media` 底部缩略图区域（图片直接内联在 Markdown 正文中）
+  - Cypher 查询单引号转义 + 列表字面量 `[]` 语法修复
+  - media_refs 路径选择优先级：`relative_path` > `path` > `thumbnail_path`
+  - marked image renderer 兼容 v11/v12（支持 `(href, title, text)` 和 `({href, title, text})` 两种调用）
+  - LLM Prompt 增强引导内嵌图片 Markdown 语法
+  - 移除冗余的 `.message-media` 底部缩略图区域
 - **修改文件**: `agents/tutor_agent.py`, `web-vue/ChatView.vue`
-- **待验证**: 提问涉及图片的问题，检查内联显示和 `/api/media/` 请求
+- **验证结果**: LLM 回答中正确内嵌 `![描述](/api/media/路径)`，图片正确显示
 
 ---
 

@@ -79,3 +79,69 @@
 ---
 
 *记录时间: 2026-07-01 01:30*
+
+---
+
+## 决策 6: Trae 式多 Agent 群聊架构（2026-07-21 16:44）
+
+**状态**: 📋 设计方案完成，待实现
+
+**决策内容**: 将 LearnAnything 从"功能视图切换"模式升级为"Trae 式分栏群聊"模式：
+- 右侧 ChatView：多 Agent 群聊入口（Tutor/Quiz/Coach），支持 @命令
+- 左侧功能视图：知识图谱、出题、评测等专业功能区
+- 双向互动：左侧元素可分享到右侧群聊，右侧 Agent 可驱动左侧视图变化
+
+**参考来源**: Trae AI 编程助手的分栏设计模式
+
+**设计文档**: `docs/design-trae-multiagent-chat.md`
+
+**实现阶段**: 
+1. 布局重构（AppLayout.vue 三栏 + EventBus）
+2. 多 Agent 接入（统一 `/api/chat/send` + Agent 标准化输出）
+3. 双向互动（左侧分享 + Card 渲染 + 上下文传递）
+4. 对话增强（多 Agent 子会话 + 跨 Agent 话题同步）
+
+**决策原因**: 当前功能视图切换割裂用户体验，统一群聊入口更符合 AI 助手直觉。
+
+**前置条件**: 需先完成基础设施（Agent 个性化、UserStateStore 同步）
+
+---
+
+## 决策 7: 对话上下文摘要机制（2026-07-21 12:12）
+
+**状态**: ✅ 已实施
+
+**决策内容**: 当对话历史超过 800 字符时，自动使用 LLM 生成摘要替代完整历史注入 Prompt。
+
+**技术实现**: `DialogContext.to_summary()` — 使用 LLM 生成 200 字以内摘要，按 `session_id + turn_number` 缓存
+
+**配置参数**:
+- `prompt_max_turns`: 5（Prompt 中注入的最近轮次）
+- `prompt_max_chars`: 800（历史文本字符阈值，超则触发摘要）
+- `summary_max_tokens`: 300（LLM 摘要的最大 token 数）
+
+**验证**: 连续对话 8+ 轮后自动切换为摘要模式
+
+---
+
+## 决策 8: 用户可配置参数系统（2026-07-21 20:27）
+
+**状态**: 📋 设计方案完成，待实现
+
+**决策内容**: 系统 45 个硬编码参数开放为三层配置体系（系统默认 L3 → 用户全局 L2 → 会话级 L1）。
+
+**关键参数**（普通用户可见）:
+- `prompt_max_turns`: Prompt 中记住几轮对话
+- `temperature`: LLM 回答的创造性
+- `retriever_top_k`: 检索返回几个概念
+- `explanation_depth`: 讲解深度（自适应/初级/中级/高级）
+- `include_media`: 是否显示图片/公式
+- `include_sources`: 是否显示引用来源
+
+**设计文档**: `docs/design-user-configurable-settings.md`
+
+**实现路径**: `core/settings_store.py` + `/api/settings` API + 前端 Settings 页面
+
+---
+
+*记录时间: 2026-07-22 00:30*
