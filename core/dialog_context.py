@@ -198,8 +198,26 @@ class DialogContextManager:
             cursor.execute("""
                 CREATE INDEX IF NOT EXISTS idx_messages_session ON dialog_messages(session_id, turn_number)
             """)
+            # LA-044-B: 话题追踪表
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS dialog_topics (
+                    topic_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    session_id TEXT NOT NULL,
+                    topic_name TEXT NOT NULL,
+                    first_turn INTEGER DEFAULT 1,
+                    last_turn INTEGER DEFAULT 1,
+                    mention_count INTEGER DEFAULT 1,
+                    canonical_concept_ids TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    UNIQUE(session_id, topic_name)
+                )
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_topics_session ON dialog_topics(session_id, mention_count DESC)
+            """)
             conn.commit()
-            print("[DialogContextManager] 表初始化完成: dialog_sessions, dialog_messages, user_profiles")
+            print("[DialogContextManager] 表初始化完成: dialog_sessions, dialog_messages, user_profiles, dialog_topics")
         finally:
             conn.close()
     
@@ -611,3 +629,171 @@ class DialogContextManager:
             print(f"[DialogContextManager] 无需指代解析: '{query[:50]}...'")
         
         return resolved
+
+    # ---------- LA-044-B: 话题提取与追踪 ----------
+
+    def extract_topic(self, answer_text: str, concept_names: List[str] = None, query: str = None) -> Optional[str]:
+        """
+        从回答文本中提取话题关键词。
+        
+        策略（按优先级）：
+        1. 从回答中提取第一个 Markdown heading（如 ### RAG架构）
+        2. 从 concept_names 中取出现频率最高的概念
+        3. 从 query 中提取核心名词（去掉疑问词）
+        4. 回退：取回答前 20 个字符
+        
+        Args:
+            answer_text: Agent 回答文本
+            concept_names: 图谱中的概念名称列表
+            query: 用户查询
+            
+        Returns:
+            话题关键词 或 None
+        """
+        print(f"\n[DialogContextManager] ====== extract_topic ======")
+        print(f"[DialogContextManager] 输入: answer_len={len(answer_text)}, concepts={concept_names[:3] if concept_names else None}, query='{query[:30] if query else ''}...'")
+        
+        # 策略1: Markdown heading
+        if answer_text:
+            heading_match = re.search(r'^#{2,4}\s+(.+)$', answer_text, re.MULTILINE)
+            if heading_match:
+                topic = heading_match.group(1).strip()
+                print(f"[DialogContextManager] 话题提取(heading): '{topic}'")
+                return topic
+        
+        # 策略2: concept_names 中取第一个（最相关的）
+        if concept_names and len(concept_names) > 0:
+            topic = concept_names[0]
+            print(f"[DialogContextManager] 话题提取(concept): '{topic}'")
+            return topic
+        
+        # 策略3: query 去掉疑问词
+        if query:
+            cleaned = re.sub(r'^(什么是|什么叫|什么是|怎么|如何|为什么|请解释|介绍一下)\s*', '', query)
+            cleaned = re.sub(r'[？?\s]+$', '', cleaned)
+            if cleaned and len(cleaned) > 1:
+                print(f"[DialogContextManager] 话题提取(query): '{cleaned}'")
+                return cleaned
+        
+        # 策略4: 回退
+        if answer_text:
+            fallback = answer_text[:20].strip()
+            print(f"[DialogContextManager] 话题提取(fallback): '{fallback}'")
+            return fallback
+        
+        print(f"[DialogContextManager] 话题提取: 失败，无可用文本")
+        return None
+
+    def detect_topic_switch(self, query: str) -> Tuple[bool, Optional[str]]:
+        """
+        检测用户是否意图切换话题。
+        
+        Returns:
+            (is_switch, new_topic) — is_switch=True 表示检测到切换意图
+        """
+        print(f"\n[DialogContextManager] ====== detect_topic_switch ======")
+        print(f"[DialogContextManager] 输入查询: '{query}'")
+        
+        switch_keywords = {
+            "换个话题": True, "换个": True, "另外": True, "再讲一下": True, 
+            "再说说": True, "还有": True, "转到": True, "切换到": True,
+            "讲讲": True, "说下": True, "聊一下": True,
+        }
+        
+        for kw in switch_keywords:
+            if kw in query:
+                # 提取新话题：假设关键词后面的内容是话题
+                idx = query.find(kw) + len(kw)
+                new_topic = query[idx:].strip("，,、\s")
+                # 去掉常见前缀词
+                new_topic = re.sub(r'^[讲讲说下聊一下关于]*', '', new_topic)
+                print(f"[DialogContextManager] 检测到话题切换: kw='{kw}', new_topic='{new_topic}'")
+                return True, new_topic or None
+        
+        print(f"[DialogContextManager] 无话题切换意图")
+        return False, None
+
+    def track_topic(self, session_id: str, topic_name: str, turn_number: int):
+        """
+        追踪话题：更新或创建 dialog_topics 记录。
+        
+        Args:
+            session_id: 会话 ID
+            topic_name: 话题名称
+            turn_number: 当前轮次
+        """
+        print(f"\n[DialogContextManager] ====== track_topic ======")
+        print(f"[DialogContextManager] 输入: session={session_id[:8]}..., topic='{topic_name}', turn={turn_number}")
+        
+        if not topic_name or not topic_name.strip():
+            print(f"[DialogContextManager] 话题为空，跳过追踪")
+            return
+        
+        topic_name = topic_name.strip()[:100]  # 截断过长话题
+        now = datetime.now().isoformat()
+        
+        conn = sqlite3.connect(str(self.db_path))
+        try:
+            cursor = conn.cursor()
+            # 尝试更新已有话题
+            cursor.execute("""
+                UPDATE dialog_topics 
+                SET last_turn = ?, mention_count = mention_count + 1, updated_at = ?
+                WHERE session_id = ? AND topic_name = ?
+            """, (turn_number, now, session_id, topic_name))
+            
+            if cursor.rowcount == 0:
+                # 创建新话题
+                cursor.execute("""
+                    INSERT INTO dialog_topics (session_id, topic_name, first_turn, last_turn, mention_count, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                """, (session_id, topic_name, turn_number, turn_number, 1, now, now))
+                print(f"[DialogContextManager] 新建话题追踪: '{topic_name}'")
+            else:
+                print(f"[DialogContextManager] 更新话题追踪: '{topic_name}', mention_count+1")
+            
+            conn.commit()
+        finally:
+            conn.close()
+
+    def get_topic_chain(self, session_id: str) -> List[str]:
+        """
+        获取会话的话题链（按 mention_count 降序）。
+        
+        Returns:
+            话题名称列表
+        """
+        conn = sqlite3.connect(str(self.db_path))
+        try:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT topic_name FROM dialog_topics
+                WHERE session_id = ?
+                ORDER BY mention_count DESC, last_turn DESC
+            """, (session_id,))
+            rows = cursor.fetchall()
+            return [r[0] for r in rows]
+        finally:
+            conn.close()
+
+    def update_session_topic(self, session_id: str, new_topic: str, turn_number: int):
+        """
+        更新会话的 current_topic 并追踪话题。
+        
+        Args:
+            session_id: 会话 ID
+            new_topic: 新话题
+            turn_number: 当前轮次
+        """
+        print(f"\n[DialogContextManager] ====== update_session_topic ======")
+        print(f"[DialogContextManager] 输入: session={session_id[:8]}..., new_topic='{new_topic}', turn={turn_number}")
+        
+        # 更新 session 的 current_topic
+        self.update_session(session_id, current_topic=new_topic)
+        
+        # 追踪话题
+        self.track_topic(session_id, new_topic, turn_number)
+        
+        # 打印话题链
+        topic_chain = self.get_topic_chain(session_id)
+        print(f"[DialogContextManager] 当前话题链: {topic_chain[:5]}")

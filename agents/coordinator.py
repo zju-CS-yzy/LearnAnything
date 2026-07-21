@@ -71,6 +71,7 @@ class Coordinator:
         """
         处理用户查询的统一入口。
         阶段 1: 新增对话上下文管理（会话持久化、指代解析、历史注入）。
+        LA-044-B: 话题提取、切换检测、追踪。
 
         Returns:
             {
@@ -91,9 +92,17 @@ class Coordinator:
         if self._dialog_manager is None:
             self._dialog_manager = DialogContextManager()
         actual_user_id = user_id or "anonymous"
-        print(f"\n[Coordinator] ====== 新请求 ======")
-        print(f"[Coordinator] 用户: {actual_user_id}, 查询: {query[:60]}...")
-        print(f"[Coordinator] 当前学科: {self.collection_name}")
+        
+        # LA-044-B: 详细的函数链打印
+        print(f"\n{'='*60}")
+        print(f"[Coordinator] 🔗 函数链: Coordinator.handle() ENTER")
+        print(f"[Coordinator] 📥 输入数据链:")
+        print(f"[Coordinator]    - user_id: {actual_user_id}")
+        print(f"[Coordinator]    - query: '{query[:80]}...'")
+        print(f"[Coordinator]    - session_id: {session_id}")
+        print(f"[Coordinator]    - collection_name: {self.collection_name}")
+        print(f"[Coordinator]    - filters: {filters}")
+        print(f"{'='*60}")
         
         sid, session_info = self._dialog_manager.get_or_create_session(
             user_id=actual_user_id,
@@ -104,7 +113,14 @@ class Coordinator:
         # 使用增强版 build_context（含全局画像 + 学科隔离）
         dialog_context = self._dialog_manager.build_context(sid)
         turn_number = dialog_context.turn_number + 1 if dialog_context else 1
-        print(f"[Coordinator] 会话就绪: turn_number={turn_number}")
+        
+        # LA-044-B: 打印当前会话状态
+        print(f"\n[Coordinator] 📊 当前会话状态:")
+        print(f"[Coordinator]    - session_id: {sid}")
+        print(f"[Coordinator]    - turn_number: {turn_number}")
+        print(f"[Coordinator]    - current_topic: {getattr(dialog_context, 'current_topic', None)}")
+        print(f"[Coordinator]    - history_len: {len(getattr(dialog_context, 'history', []))}")
+        print(f"[Coordinator]    - subject: {getattr(dialog_context, 'subject', None)}")
 
         # 意图路由
         resolved_intent, original_intent = self._intent_router.route(query, self.enabled_intents)
@@ -117,6 +133,11 @@ class Coordinator:
             "confidence": confidence,
             "fallback": is_fallback,
         }
+        
+        print(f"\n[Coordinator] 🎯 意图路由结果:")
+        print(f"[Coordinator]    - original: {original_intent}")
+        print(f"[Coordinator]    - resolved: {resolved_intent}")
+        print(f"[Coordinator]    - is_fallback: {is_fallback}")
 
         monitor.log_stage(
             query_id=query_id,
@@ -152,6 +173,16 @@ class Coordinator:
             content=query,
             intent=resolved_intent
         )
+
+        # LA-044-B: 话题切换检测
+        is_topic_switch, switch_target = self._dialog_manager.detect_topic_switch(query)
+        if is_topic_switch:
+            print(f"[Coordinator] LA-044-B: 用户意图切换话题 -> '{switch_target}'")
+            # 强制更新 current_topic 为切换目标（如果有）
+            if switch_target:
+                self._dialog_manager.update_session_topic(sid, switch_target, turn_number)
+                # 重新加载 dialog_context 以使用新话题
+                dialog_context = self._dialog_manager.build_context(sid)
 
         # P0-INT-1: 对 quiz / concept 意图使用图谱教育模块组装上下文
         if resolved_intent in ("quiz", "concept"):
@@ -203,12 +234,34 @@ class Coordinator:
             metadata={"query_id": query_id}
         )
 
-        # 阶段 1: 更新会话状态（turn_count, updated_at, current_topic）
-        current_topic = topic if 'topic' in locals() and topic else None
+        # LA-044-B: 从 Agent 回答中提取话题并更新会话
+        answer_text = agent_result.get("text", "")
+        concept_names = []
+        if hasattr(agent_result, 'get') and agent_result.get("metadata"):
+            concept_names = agent_result.get("metadata", {}).get("concepts", [])
+        
+        # 如果检测到话题切换，使用切换目标作为话题
+        if is_topic_switch and switch_target:
+            extracted_topic = switch_target
+            print(f"[Coordinator] LA-044-B: 使用话题切换目标: '{extracted_topic}'")
+        else:
+            # 从回答中提取话题
+            extracted_topic = self._dialog_manager.extract_topic(
+                answer_text=answer_text,
+                concept_names=concept_names,
+                query=query
+            )
+        
+        if extracted_topic:
+            self._dialog_manager.update_session_topic(sid, extracted_topic, turn_number)
+        else:
+            # 如果没有提取到话题，保持原有 topic（如果有的话）
+            pass
+
+        # 阶段 1: 更新会话状态（turn_count, updated_at）
         self._dialog_manager.update_session(
             sid,
             turn_count=turn_number,
-            current_topic=current_topic
         )
 
         # 结束监控
@@ -251,6 +304,20 @@ class Coordinator:
                         agent_result["irt_theta"] = round(theta, 2)
             except Exception as e:
                 print(f"[Coordinator] IRT 能力估计失败: {e}")
+
+        # LA-044-B: 详细的函数链退出打印
+        result_text = agent_result.get("text", "")[:100] if agent_result else ""
+        print(f"\n{'='*60}")
+        print(f"[Coordinator] 🔗 函数链: Coordinator.handle() EXIT")
+        print(f"[Coordinator] 📤 输出数据链:")
+        print(f"[Coordinator]    - session_id: {sid}")
+        print(f"[Coordinator]    - agent: {agent.agent_name}")
+        print(f"[Coordinator]    - intent: {resolved_intent}")
+        print(f"[Coordinator]    - answer_len: {len(agent_result.get('text', '')) if agent_result else 0}")
+        print(f"[Coordinator]    - answer_preview: '{result_text}...'")
+        print(f"[Coordinator]    - duration_ms: {round(total_duration_ms, 2)}")
+        print(f"[Coordinator]    - topic_chain: {self._dialog_manager.get_topic_chain(sid)[:5]}")
+        print(f"{'='*60}\n")
 
         return {
             "question": query,
