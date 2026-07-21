@@ -168,7 +168,17 @@ class TutorAgent(BaseAgent):
 
     def _handle_with_graph_context(self, query: str, graph_context, context=None) -> Dict[str, Any]:
         """使用 P0 图谱上下文生成回答（支持图片/公式嵌入 + 对话上下文 + 详细日志）"""
-        print(f"\n[TutorAgent] ====== _handle_with_graph_context ======")
+        print(f"\n{'='*60}")
+        print(f"[TutorAgent] 🔗 函数链: _handle_with_graph_context() ENTER")
+        print(f"[TutorAgent] 📥 输入数据链:")
+        print(f"[TutorAgent]    - query: '{query[:80]}...'")
+        print(f"[TutorAgent]    - has_context: {context is not None}")
+        if context:
+            print(f"[TutorAgent]    - session_id: {getattr(context, 'session_id', None)}")
+            print(f"[TutorAgent]    - turn_number: {getattr(context, 'turn_number', None)}")
+            print(f"[TutorAgent]    - current_topic: {getattr(context, 'current_topic', None)}")
+            print(f"[TutorAgent]    - history_len: {len(getattr(context, 'history', []))}")
+        print(f"{'='*60}")
         
         context_text = graph_context.text if hasattr(graph_context, 'text') else str(graph_context)
         concept_names = []
@@ -216,6 +226,16 @@ class TutorAgent(BaseAgent):
         print(f"[TutorAgent] 调用 LLM 生成回答...")
         answer = self._generate_answer(query, context_chunks, context_text_override=context_text, media=media, history_text=history_text)
         print(f"[TutorAgent] 回答生成完成: {len(answer)} 字符")
+        
+        print(f"\n{'='*60}")
+        print(f"[TutorAgent] 🔗 函数链: _handle_with_graph_context() EXIT")
+        print(f"[TutorAgent] 📤 输出数据链:")
+        print(f"[TutorAgent]    - answer_len: {len(answer)}")
+        print(f"[TutorAgent]    - answer_preview: '{answer[:100]}...'")
+        print(f"[TutorAgent]    - concepts_count: {len(concept_names)}")
+        print(f"[TutorAgent]    - sources_count: {len(sources)}")
+        print(f"[TutorAgent]    - media_count: {len(media)}")
+        print(f"{'='*60}\n")
 
         return {
             "text": answer,
