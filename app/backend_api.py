@@ -1848,6 +1848,36 @@ def get_session_messages(session_id: str):
         return {"session_id": session_id, "messages": []}
 
 
+@app.delete("/api/dialog/sessions/{session_id}")
+def delete_dialog_session(session_id: str):
+    """
+    删除指定会话及其所有消息。
+    """
+    try:
+        conn = sqlite3.connect(str(_dialog_manager.db_path))
+        cursor = conn.cursor()
+        
+        # 删除会话的消息
+        cursor.execute("DELETE FROM dialog_messages WHERE session_id = ?", (session_id,))
+        msg_deleted = cursor.rowcount
+        
+        # 删除会话
+        cursor.execute("DELETE FROM dialog_sessions WHERE session_id = ?", (session_id,))
+        session_deleted = cursor.rowcount
+        
+        # 删除话题追踪
+        cursor.execute("DELETE FROM dialog_topics WHERE session_id = ?", (session_id,))
+        
+        conn.commit()
+        conn.close()
+        
+        print(f"[API] 删除会话 {session_id[:8]}: {session_deleted} 个会话, {msg_deleted} 条消息")
+        return {"success": True, "session_id": session_id, "messages_deleted": msg_deleted}
+    except Exception as e:
+        print(f"[API] 删除会话失败: {e}")
+        raise HTTPException(status_code=500, detail=f"删除会话失败: {e}")
+
+
 # ========== LA-035: 媒体文件静态服务 ==========
 
 @app.get("/api/media/{path:path}")
