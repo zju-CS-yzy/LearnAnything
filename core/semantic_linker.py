@@ -270,7 +270,22 @@ class SemanticLinker:
             
             all_edges = valid_edges
         
-        # 6. 写入数据库
+        # 6. LA-046: Gap 检测 + 虚拟节点创建
+        paradigm_config = _PARADIGMS_YAML.get(paradigm, {})
+        fallback_config = paradigm_config.get("fallback", {})
+        
+        virtual_nodes_created = 0
+        gap_edges_detected = 0
+        if fallback_config.get("create_virtual_nodes", False):
+            all_edges, gap_info = self._process_gaps_and_virtual_nodes(
+                all_edges, paradigm_config
+            )
+            virtual_nodes_created = gap_info.get("virtual_nodes", 0)
+            gap_edges_detected = gap_info.get("gap_edges", 0)
+            if gap_edges_detected > 0:
+                print(f"[SemanticLinker] LA-046: 检测到 {gap_edges_detected} 条 gap 边，创建 {virtual_nodes_created} 个虚拟节点")
+        
+        # 7. 写入数据库
         self._write_edges(all_edges)
 
         return {
@@ -281,6 +296,10 @@ class SemanticLinker:
             },
             "paradigm": paradigm,
             "concept_count": len(concepts),
+            "gap_detection": {
+                "gap_edges": gap_edges_detected,
+                "virtual_nodes": virtual_nodes_created,
+            },
         }
 
     # ========== 辅助: 获取已有 HAS_DETAIL 关系对 ==========
@@ -425,6 +444,218 @@ class SemanticLinker:
         if parent_type in ["technology", "sub_technology"]:
             return "DEPENDS_ON"
         return "SOLUTION"
+
+    # ========== LA-046: Gap 检测与虚拟节点 ==========
+
+    def _calculate_gap(self, parent_type: str, child_type: str, paradigm_config: dict) -> int:
+        """
+        计算层级跳跃的 gap 数。
+
+        非循环范式（theory/hierarchical）: ideal_chain 位置差
+        循环范式（engineering）: 同类型连接 = gap=1，反类型连接 = gap=0
+        """
+        gap_rules = paradigm_config.get("gap_rules", {})
+
+        # 循环范式检测
+        if paradigm_config.get("cyclic") and gap_rules.get("detect_by_same_type", False):
+            if parent_type == child_type:
+                return 1  # 同类型连接 = 缺少中间交替层
+            return 0      # 反类型连接 = 正常
+
+        # 非循环范式检测
+        ideal_chain = paradigm_config.get("ideal_chain", [])
+        if not ideal_chain:
+            return 0
+
+        try:
+            p_idx = ideal_chain.index(parent_type)
+            c_idx = ideal_chain.index(child_type)
+            idx_diff = abs(c_idx - p_idx)
+            return max(0, idx_diff - 1)
+        except ValueError:
+            return 0
+
+    def _process_gaps_and_virtual_nodes(
+        self,
+        edges: List[Dict[str, Any]],
+        paradigm_config: dict,
+    ) -> Tuple[List[Dict[str, Any]], Dict[str, int]]:
+        """
+        LA-046: 遍历所有边，检测 gap，创建虚拟节点替换 gap 边。
+
+        Returns:
+            (new_edges, {"gap_edges": int, "virtual_nodes": int})
+        """
+        import uuid
+
+        new_edges = []
+        virtual_nodes = []
+        gap_edges = 0
+        seen_virtual = {}  # (parent_id, child_id) -> virtual_node_id
+
+        for edge in edges:
+            parent_id = edge["parent_id"]
+            child_id = edge["child_id"]
+            relation_type = edge["relation_type"]
+
+            # 查询类型
+            parent_type = self._get_concept_type(parent_id)
+            child_type = self._get_concept_type(child_id)
+
+            gap = self._calculate_gap(parent_type, child_type, paradigm_config)
+
+            if gap > 0:
+                gap_edges += 1
+
+                # 推断缺失的中间层类型
+                missing_type = self._infer_missing_type(parent_type, child_type, paradigm_config)
+                if not missing_type:
+                    # 无法推断缺失类型，保留原始边
+                    new_edges.append(edge)
+                    continue
+
+                # 创建或复用虚拟节点
+                vkey = (parent_id, child_id)
+                if vkey in seen_virtual:
+                    virtual_id = seen_virtual[vkey]
+                else:
+                    virtual_id = self._create_virtual_node_id(parent_id, child_id, missing_type)
+                    virtual_name = self._build_virtual_node_name(missing_type, paradigm_config)
+                    virtual_nodes.append({
+                        "canonical_id": virtual_id,
+                        "name": virtual_name,
+                        "concept_type": missing_type,
+                        "description": f"[VIRTUAL] 从 '{edge.get('parent_name', parent_id)}' 到 '{edge.get('child_name', child_id)}' 推断出的缺失 {missing_type} 层",
+                        "is_virtual": True,
+                        "source_chunks": '["__virtual__"]',
+                    })
+                    seen_virtual[vkey] = virtual_id
+
+                # 推断两条正常边
+                # edge1: parent -> virtual（使用正常关系）
+                rel1 = self._determine_cross_level_relation(parent_type, missing_type)
+                new_edges.append({
+                    "parent_id": parent_id,
+                    "parent_name": edge.get("parent_name", ""),
+                    "child_id": virtual_id,
+                    "child_name": virtual_nodes[-1]["name"],
+                    "relation_type": rel1,
+                    "confidence": edge.get("confidence", 0.5) * 0.9,  # gap 边置信度折扣
+                    "reason": f"[GAP] {edge.get('reason', '')} (中间缺失 {missing_type})",
+                })
+
+                # edge2: virtual -> child（使用正常关系）
+                rel2 = self._determine_cross_level_relation(missing_type, child_type)
+                new_edges.append({
+                    "parent_id": virtual_id,
+                    "parent_name": virtual_nodes[-1]["name"],
+                    "child_id": child_id,
+                    "child_name": edge.get("child_name", ""),
+                    "relation_type": rel2,
+                    "confidence": edge.get("confidence", 0.5) * 0.9,
+                    "reason": f"[GAP] {edge.get('reason', '')} (中间缺失 {missing_type})",
+                })
+            else:
+                new_edges.append(edge)
+
+        # 先写入虚拟节点
+        if virtual_nodes:
+            self._write_virtual_nodes(virtual_nodes)
+
+        return new_edges, {"gap_edges": gap_edges, "virtual_nodes": len(virtual_nodes)}
+
+    def _infer_missing_type(self, parent_type: str, child_type: str, paradigm_config: dict) -> Optional[str]:
+        """推断 gap 中间缺失的类型。"""
+        if paradigm_config.get("cyclic"):
+            # 循环范式：同类型 gap = 中间是另一种类型
+            cycle_pattern = paradigm_config.get("cycle_pattern", [])
+            if not cycle_pattern:
+                return None
+            if parent_type == child_type:
+                # 找到 parent_type 在 cycle_pattern 中的下一个类型
+                try:
+                    idx = cycle_pattern.index(parent_type)
+                    next_idx = (idx + 1) % len(cycle_pattern)
+                    return cycle_pattern[next_idx]
+                except ValueError:
+                    return None
+            return None
+
+        # 非循环范式：ideal_chain 中缺失的中间类型
+        ideal_chain = paradigm_config.get("ideal_chain", [])
+        try:
+            p_idx = ideal_chain.index(parent_type)
+            c_idx = ideal_chain.index(child_type)
+            if abs(c_idx - p_idx) == 2:
+                # 跳过一层
+                mid_idx = (p_idx + c_idx) // 2
+                return ideal_chain[mid_idx]
+        except ValueError:
+            pass
+        return None
+
+    def _create_virtual_node_id(self, parent_id: str, child_id: str, missing_type: str) -> str:
+        """生成唯一的虚拟节点 canonical_id。"""
+        import uuid
+        short_parent = parent_id.replace("concept_canonical_", "")[:8]
+        short_child = child_id.replace("concept_canonical_", "")[:8]
+        return f"__virtual_{uuid.uuid4().hex[:8]}_{missing_type}_{short_parent}_{short_child}"
+
+    def _build_virtual_node_name(self, missing_type: str, paradigm_config: dict) -> str:
+        """构建虚拟节点的显示名称：[缺失]类型名。"""
+        types = paradigm_config.get("types", {})
+        type_label = types.get(missing_type, missing_type)
+        return f"[缺失]{type_label}"
+
+    def _write_virtual_nodes(self, virtual_nodes: List[Dict[str, Any]]) -> int:
+        """将虚拟节点写入 KùzuDB。"""
+        conn = self.graph_store._ensure_db()
+        esc = self.graph_store._escape_cypher_string
+        written = 0
+
+        for node in virtual_nodes:
+            safe_id = esc(node["canonical_id"])
+            safe_name = esc(node["name"])
+            safe_type = esc(node["concept_type"])
+            safe_desc = esc(node["description"])
+            safe_chunks = esc(node.get("source_chunks", '["__virtual__"]'))
+
+            # KùzuDB 的 BOOL 类型可能不支持，使用 STRING 回退
+            is_virtual_val = "true"  # Cypher 中 bool 小写
+
+            cypher = f"""
+                MERGE (c:CanonicalConcept {{
+                    canonical_id: '{safe_id}'
+                }})
+                ON CREATE SET c.name = '{safe_name}',
+                              c.concept_type = '{safe_type}',
+                              c.description = '{safe_desc}',
+                              c.source_chunks = '{safe_chunks}',
+                              c.is_virtual = {is_virtual_val}
+            """
+            try:
+                conn.execute(cypher)
+                written += 1
+            except Exception as e:
+                # 如果 is_virtual BOOL 失败，尝试不设置该字段
+                print(f"[SemanticLinker] 虚拟节点写入带 is_virtual 失败: {e}")
+                fallback_cypher = f"""
+                    MERGE (c:CanonicalConcept {{
+                        canonical_id: '{safe_id}'
+                    }})
+                    ON CREATE SET c.name = '{safe_name}',
+                                  c.concept_type = '{safe_type}',
+                                  c.description = '{safe_desc}',
+                                  c.source_chunks = '{safe_chunks}'
+                """
+                try:
+                    conn.execute(fallback_cypher)
+                    written += 1
+                except Exception as e2:
+                    print(f"[SemanticLinker] 虚拟节点写入完全失败: {e2}")
+
+        print(f"[SemanticLinker] 写入 {written} 个虚拟节点")
+        return written
 
     def _load_name_mapping(self) -> Dict[str, str]:
         """
@@ -815,12 +1046,25 @@ class SemanticLinker:
                     MERGE (c:CanonicalConcept {{
                         canonical_id: '{safe_id}'
                     }})
-                    ON CREATE SET c.name = '{safe_name}'
+                    ON CREATE SET c.name = '{safe_name}', c.is_virtual = false
                 """
                 try:
                     conn.execute(merge_node_cypher)
                 except Exception as e:
-                    print(f"[SemanticLinker] 创建节点失败 {node_id}: {e}")
+                    # 如果 is_virtual BOOL 失败，尝试不带该字段
+                    if "is_virtual" in str(e) or "BOOL" in str(e):
+                        merge_node_cypher_fallback = f"""
+                            MERGE (c:CanonicalConcept {{
+                                canonical_id: '{safe_id}'
+                            }})
+                            ON CREATE SET c.name = '{safe_name}'
+                        """
+                        try:
+                            conn.execute(merge_node_cypher_fallback)
+                        except Exception as e2:
+                            print(f"[SemanticLinker] 创建节点失败 {node_id}: {e2}")
+                    else:
+                        print(f"[SemanticLinker] 创建节点失败 {node_id}: {e}")
 
             # 创建关系
             safe_parent_id = esc(edge['parent_id'])

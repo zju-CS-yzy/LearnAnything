@@ -187,6 +187,11 @@ class TutorAgent(BaseAgent):
         if media:
             print(f"[TutorAgent] LA-IMG: 找到 {len(media)} 个关联媒体资源")
 
+        # LA-047: 收集引用来源（heading_path + page_number + source）
+        sources = self._collect_sources(graph_context)
+        if sources:
+            print(f"[TutorAgent] LA-047: 找到 {len(sources)} 个引用来源")
+
         # 构建 chunks
         context_chunks = []
         if hasattr(graph_context, 'subgraph') and graph_context.subgraph:
@@ -220,6 +225,7 @@ class TutorAgent(BaseAgent):
                 "token_count": getattr(graph_context, 'token_count', 0),
                 "media": media,
                 "has_context": bool(history_text),
+                "sources": sources,  # LA-047: 引用来源
             },
             "chunks": context_chunks,
         }
@@ -227,55 +233,211 @@ class TutorAgent(BaseAgent):
     def _collect_related_media(self, graph_context) -> List[Dict[str, Any]]:
         """LA-IMG: 从图谱上下文中收集关联的图片/公式资源
 
-        遍历 subgraph 中所有节点的 source_chunks，查询 GraphStore 获取 chunk 详情，
-        筛选出图片类型（image/image_pseudo/formula_pseudo）的 chunk，提取图片路径。
+        FIX-LA049:
+        1. 正确解析 source_chunks（支持 JSON 列表字符串、逗号分隔字符串、Python 列表）
+        2. 使用安全转义避免 Cypher 语法错误
+        3. 返回相对路径（学科名 + 文件名），避免 Windows 绝对路径问题
         """
+        import json
+        import ast
+        from pathlib import Path
+
         media = []
         if not hasattr(graph_context, 'subgraph') or not graph_context.subgraph:
             return media
 
-        # 收集所有 source_chunks 中的 chunk_id
+        # FIX-LA049: 正确解析 source_chunks（支持多种格式）
         chunk_ids = set()
         for node in graph_context.subgraph.nodes:
-            if node.source_chunks:
-                for chunk_id in str(node.source_chunks).split(","):
-                    chunk_id = chunk_id.strip()
-                    if chunk_id:
-                        chunk_ids.add(chunk_id)
+            raw = getattr(node, 'source_chunks', None)
+            if not raw:
+                continue
+
+            # 尝试多种解析方式
+            ids = []
+            if isinstance(raw, list):
+                ids = raw
+            elif isinstance(raw, str):
+                raw = raw.strip()
+                # 尝试 JSON 解析
+                if raw.startswith('[') and raw.endswith(']'):
+                    try:
+                        ids = json.loads(raw)
+                    except json.JSONDecodeError:
+                        try:
+                            ids = ast.literal_eval(raw)
+                        except (ValueError, SyntaxError):
+                            ids = [s.strip().strip("'\"") for s in raw[1:-1].split(',')]
+                else:
+                    # 逗号分隔字符串
+                    ids = [s.strip() for s in raw.split(',') if s.strip()]
+            elif hasattr(raw, '__iter__'):
+                ids = list(raw)
+
+            for cid in ids:
+                if isinstance(cid, str) and cid:
+                    chunk_ids.add(cid.strip())
 
         if not chunk_ids:
             return media
 
-        # 通过 GraphStore 查询 chunk 详情（复用 ContextAssembler 的 graph_store 逻辑）
-        # 由于 TutorAgent 没有直接持有 graph_store，我们尝试通过 collection_name 构建
+        # 通过 GraphStore 查询 chunk 详情
         try:
             from core.graph_store import GraphStore
             store = GraphStore(self.collection_name)
             store.init_schema()
             conn = store._ensure_db()
 
-            id_str = ", ".join([f"'{cid}'" for cid in chunk_ids])
+            # FIX-LA049: 使用参数化方式构建 Cypher（避免引号注入）
+            # KùzuDB 不支持参数化查询，使用安全转义
+            safe_ids = []
+            for cid in chunk_ids:
+                # 转义单引号（Cypher 字符串中 ' 需要变成 ''）
+                safe_cid = str(cid).replace("'", "\\'")
+                safe_ids.append(f"'{safe_cid}'")
+
+            id_str = ", ".join(safe_ids)
             cypher = f"""
                 MATCH (c:Chunk)
                 WHERE c.chunk_id IN [{id_str}]
                   AND c.chunk_type IN ('image', 'image_pseudo', 'formula_pseudo')
-                RETURN c.chunk_id, c.chunk_type, c.thumbnail_path, c.image_path, c.heading_path
+                RETURN c.chunk_id, c.chunk_type, c.thumbnail_path, c.image_path, c.heading_path, c.media_refs
             """
             result = conn.execute(cypher)
             while result.has_next():
                 row = result.get_next()
                 thumbnail = row[2] or row[3]  # 优先使用缩略图
-                if thumbnail:
-                    media.append({
-                        "chunk_id": row[0],
-                        "type": row[1],  # image / image_pseudo / formula_pseudo
-                        "path": thumbnail,
-                        "caption": row[4] or "相关图片",  # heading_path 作为标题
-                    })
+                if not thumbnail:
+                    continue
+
+                # FIX-LA049: 将绝对路径转换为相对路径
+                # 期望格式: {subject}_v1_images/{filename} 或 {subject}_v1_thumbnails/{filename}
+                path_str = str(thumbnail).replace('\\\\', '/').replace('\\', '/')
+
+                # 如果是绝对路径，提取最后两部分（学科文件夹 + 文件名）
+                if ':' in path_str or path_str.startswith('/'):
+                    # Windows 绝对路径如 D:/.../rag_v1_images/xxx.png
+                    parts = path_str.split('/')
+                    # 找到包含 _v1_images 或 _v1_thumbnails 的目录名
+                    for i, part in enumerate(parts):
+                        if '_v1_images' in part or '_v1_thumbnails' in part:
+                            # 取目录名 + 文件名
+                            if i + 1 < len(parts):
+                                path_str = f"{part}/{parts[i + 1]}"
+                                break
+                    else:
+                        # 如果没找到，只保留文件名
+                        path_str = parts[-1]
+                elif not any(marker in path_str for marker in ['_v1_images/', '_v1_thumbnails/']):
+                    # 只有文件名，尝试从 collection_name 推断学科
+                    subject = self.collection_name.replace('_v1', '')
+                    path_str = f"{subject}_v1_images/{path_str}"
+
+                media.append({
+                    "chunk_id": row[0],
+                    "type": row[1],
+                    "path": path_str,
+                    "caption": row[4] or "相关图片",
+                })
         except Exception as e:
             print(f"[TutorAgent] LA-IMG: 收集媒体资源失败: {e}")
+            import traceback
+            traceback.print_exc()
 
         return media
+
+    # ==================== LA-047: 引用来源收集 ====================
+
+    def _collect_sources(self, graph_context) -> List[Dict[str, Any]]:
+        """LA-047: 从图谱上下文中收集引用来源（heading_path + page_number + source 文件名）
+
+        遍历 subgraph 中所有节点的 source_chunks，查询 GraphStore 获取 chunk 元数据，
+        去重后格式化为前端可渲染的结构。
+        """
+        import json
+        import ast
+
+        if not hasattr(graph_context, 'subgraph') or not graph_context.subgraph:
+            return []
+
+        # 收集所有 source_chunks 中的 chunk_id
+        chunk_ids = set()
+        for node in graph_context.subgraph.nodes:
+            raw = getattr(node, 'source_chunks', None)
+            if not raw:
+                continue
+
+            ids = []
+            if isinstance(raw, list):
+                ids = raw
+            elif isinstance(raw, str):
+                raw = raw.strip()
+                if raw.startswith('[') and raw.endswith(']'):
+                    try:
+                        ids = json.loads(raw)
+                    except json.JSONDecodeError:
+                        try:
+                            ids = ast.literal_eval(raw)
+                        except (ValueError, SyntaxError):
+                            ids = [s.strip().strip("'\"") for s in raw[1:-1].split(',')]
+                else:
+                    ids = [s.strip() for s in raw.split(',') if s.strip()]
+            elif hasattr(raw, '__iter__'):
+                ids = list(raw)
+
+            for cid in ids:
+                if isinstance(cid, str) and cid:
+                    chunk_ids.add(cid.strip())
+
+        if not chunk_ids:
+            return []
+
+        # 查询 GraphStore 获取 chunk 元数据
+        try:
+            from core.graph_store import GraphStore
+            store = GraphStore(self.collection_name)
+            store.init_schema()
+            conn = store._ensure_db()
+
+            safe_ids = []
+            for cid in chunk_ids:
+                safe_cid = str(cid).replace("'", "\\'")
+                safe_ids.append(f"'{safe_cid}'")
+
+            id_str = ", ".join(safe_ids)
+            cypher = f"""
+                MATCH (c:Chunk)
+                WHERE c.chunk_id IN [{id_str}]
+                RETURN c.chunk_id, c.heading_path, c.page_number, c.source
+            """
+            result = conn.execute(cypher)
+
+            sources = []
+            seen = set()
+            while result.has_next():
+                row = result.get_next()
+                chunk_id = row[0] or ""
+                heading_path = row[1] or ""
+                page_number = row[2] if row[2] is not None else ""
+                source_file = row[3] or ""
+
+                # 去重：基于 (heading_path, page_number, source_file)
+                key = (heading_path, str(page_number), source_file)
+                if key in seen:
+                    continue
+                seen.add(key)
+
+                sources.append({
+                    "chunk_id": chunk_id,
+                    "heading_path": heading_path,
+                    "page_number": str(page_number) if page_number not in (None, "", 0) else "",
+                    "source": source_file,
+                })
+
+            return sources
+        except Exception as e:
+            print(f"[TutorAgent] LA-047: 收集引用来源失败: {e}")
+            return []
 
     def _handle_with_retrieval(self, query: str, filters: Optional[Dict[str, Any]] = None, context=None) -> Dict[str, Any]:
         """使用传统 HybridRetriever 检索生成回答（阶段 1：支持对话上下文）"""

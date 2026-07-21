@@ -629,6 +629,8 @@ async function loadConceptNodes() {
           hasImage: hasImage,
           hasTable: hasTable,
           hasFormula: hasFormula,
+          // LA-046: 虚拟节点标记
+          isVirtual: c.is_virtual || false,
         }
       }
     })

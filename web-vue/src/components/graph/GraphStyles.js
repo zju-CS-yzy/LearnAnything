@@ -271,6 +271,29 @@ export function buildCyStyles() {
         'arrow-scale': 0.8,
       }
     },
+    // ========== 虚拟节点样式（LA-046）==========
+    {
+      selector: 'node[isVirtual]',
+      style: {
+        'label': 'data(label)',
+        'text-wrap': 'wrap',
+        'text-max-width': '80px',
+        'text-valign': 'center',
+        'text-halign': 'center',
+        'font-size': '10px',
+        'color': '#E67E22',
+        'text-outline-color': '#fff',
+        'text-outline-width': 1,
+        'width': 'data(nodeWidth)',
+        'height': 'data(cardHeight)',
+        'border-width': 2,
+        'border-style': 'dashed',
+        'border-color': '#E67E22',
+        'background-color': 'rgba(230, 126, 34, 0.1)',
+        'shape': 'round-rectangle',
+        'corner-radius': 10,
+      }
+    },
     // ========== 副本样式 ==========
     {
       selector: 'node[isCopy = 1]',

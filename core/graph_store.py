@@ -99,6 +99,7 @@ class GraphStore:
             source_chunks STRING,
             type_votes STRING,
             media_refs STRING,
+            is_virtual BOOL,
             PRIMARY KEY(canonical_id)
         )""",
 
@@ -350,16 +351,29 @@ class GraphStore:
                 except Exception as alt_e:
                     print(f"[GraphStore] 升级 ExtractedConcept 失败: {alt_e}")
 
-        # 也检查 Chunk 是否有 media 相关字段（旧版本可能缺少）
-
+        # 检查 CanonicalConcept 是否有 is_virtual（LA-046）
         try:
-
-            self._execute(conn, "MATCH (c:Chunk) RETURN c.image_path LIMIT 1")
-
+            self._execute(conn, "MATCH (c:CanonicalConcept) RETURN c.is_virtual LIMIT 1")
         except Exception as e:
+            if "is_virtual" in str(e):
+                print(f"[GraphStore] 升级 CanonicalConcept (LA-046): {self.collection_name}")
+                try:
+                    # KùzuDB 的 ALTER TABLE 对 BOOL 支持可能有限，先尝试 STRING
+                    self._execute(conn, "ALTER TABLE CanonicalConcept ADD is_virtual BOOL")
+                except Exception as alt_e:
+                    print(f"[GraphStore] 升级 is_virtual(BOOL) 失败: {alt_e}")
+                    # 回退：使用 STRING "false"
+                    try:
+                        self._execute(conn, "ALTER TABLE CanonicalConcept ADD is_virtual STRING DEFAULT 'false'")
+                        print(f"[GraphStore] 回退为 STRING 类型")
+                    except Exception as alt_e2:
+                        print(f"[GraphStore] 升级 is_virtual 完全失败: {alt_e2}")
 
+        # 也检查 Chunk 是否有 media 相关字段（旧版本可能缺少）
+        try:
+            self._execute(conn, "MATCH (c:Chunk) RETURN c.image_path LIMIT 1")
+        except Exception as e:
             if "image_path" in str(e):
-
                 print(f"[GraphStore] 旧版本 Chunk schema 检测到：{self.collection_name}")
 
 
@@ -1657,6 +1671,7 @@ class GraphStore:
                         "parent_hint": row[4],
                         "source_chunks": row[5],
                         "media_refs": media_refs,
+                        "is_virtual": False,
                     })
             except Exception as schema_e:
                 if "media_refs" in str(schema_e):
@@ -1677,6 +1692,7 @@ class GraphStore:
                             "parent_hint": row[4],
                             "source_chunks": row[5],
                             "media_refs": [],
+                            "is_virtual": False,
                         })
                 else:
                     raise
