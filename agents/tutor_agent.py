@@ -350,10 +350,17 @@ class TutorAgent(BaseAgent):
                 if not thumbnail and row[5]:  # media_refs
                     try:
                         import json
-                        media_refs = json.loads(row[5])
+                        media_refs_str = row[5]
+                        print(f"[TutorAgent] LA-IMG: 尝试解析 media_refs: {media_refs_str[:100]}...")
+                        media_refs = json.loads(media_refs_str)
+                        print(f"[TutorAgent] LA-IMG: 解析成功: {len(media_refs)} 个 media_ref")
                         if media_refs and len(media_refs) > 0:
-                            thumbnail = media_refs[0].get('thumbnail_path') or media_refs[0].get('path')
-                    except:
+                            first_ref = media_refs[0]
+                            print(f"[TutorAgent] LA-IMG: 第一个 media_ref: {first_ref}")
+                            thumbnail = first_ref.get('thumbnail_path') or first_ref.get('path')
+                            print(f"[TutorAgent] LA-IMG: 提取路径: {thumbnail}")
+                    except Exception as e:
+                        print(f"[TutorAgent] LA-IMG: media_refs 解析失败: {e}")
                         pass
                 if not thumbnail:
                     print(f"[TutorAgent] LA-IMG: 跳过 - chunk {row[0][:30]}... 无图片路径")
