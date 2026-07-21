@@ -77,7 +77,11 @@
           @click="selectSession(session.id)"
         >
           <span class="history-icon">💬</span>
-          <span class="history-text">{{ session.title }}</span>
+          <div class="history-content">
+            <span class="history-text">{{ session.title }}</span>
+            <span v-if="session.subject" class="history-subject">{{ session.subject }}</span>
+          </div>
+          <span v-if="session.turnCount" class="history-turns">{{ session.turnCount }}轮</span>
         </div>
       </div>
       <div v-else class="history-empty">暂无历史会话</div>
@@ -478,6 +482,28 @@ window.addEventListener('chat-session-created', (e) => {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.history-content {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.history-subject {
+  font-size: var(--font-size-xs);
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.history-turns {
+  font-size: var(--font-size-xs);
+  color: var(--text-muted);
+  flex-shrink: 0;
 }
 
 .history-empty {
