@@ -149,6 +149,7 @@ class AskResponse(BaseModel):
     duration_ms: float
     query_id: str
     media: Optional[List[Dict[str, Any]]] = None  # LA-IMG: 关联的媒体资源
+    sources: Optional[List[Dict[str, Any]]] = None  # LA-047: 引用来源
 
 
 class QuizRequest(BaseModel):
@@ -362,8 +363,12 @@ def ask_question(request: AskRequest):
     print(f"[API] /api/ask returning answer length={len(result.get('text', ''))}")
 
     # LA-IMG: 提取 metadata 中的媒体资源
-    metadata = result.get("metadata", {})
+    # FIX-LA049: agent_result 在 result["result"] 中，而非 result["metadata"]
+    agent_result = result.get("result", {})
+    metadata = agent_result.get("metadata", {}) if isinstance(agent_result, dict) else {}
     media = metadata.get("media") if isinstance(metadata, dict) else None
+    # LA-047: 提取引用来源
+    sources = metadata.get("sources") if isinstance(metadata, dict) else None
 
     return AskResponse(
         question=request.query,
@@ -373,6 +378,7 @@ def ask_question(request: AskRequest):
         duration_ms=result.get("monitoring", {}).get("total_duration_ms", 0),
         query_id=result.get("monitoring", {}).get("query_id", ""),
         media=media,
+        sources=sources,
     )
 
 
@@ -412,14 +418,19 @@ def ask_stream(request: AskRequest):
 
         # 发送元数据事件
         # LA-IMG: 传递媒体资源到前端
-        metadata = result.get("metadata", {})
+        # FIX-LA049: 从 result["result"] 的 metadata 中提取 media
+        agent_result = result.get("result", {})
+        metadata = agent_result.get("metadata", {}) if isinstance(agent_result, dict) else {}
         media = metadata.get("media") if isinstance(metadata, dict) else None
+        # LA-047: 传递引用来源
+        sources = metadata.get("sources") if isinstance(metadata, dict) else None
         meta = json.dumps({
             "intent": intent,
             "agent": agent_name,
             "query_id": query_id,
             "question": request.query,
             "media": media,
+            "sources": sources,
         }, ensure_ascii=False)
         yield f"event: meta\ndata: {meta}\n\n"
 
@@ -1552,6 +1563,7 @@ def list_graph_concepts(subject: str, limit: int = 2000):
                 "source_chunks": source_chunk_ids,
                 "source_refs": source_refs,
                 "media_refs": node.get("media_refs", []),
+                "is_virtual": node.get("is_virtual", False),  # LA-046
             })
 
         # 4. 补充 CSV 中有但 KùzuDB 中没有的概念（孤立概念）
@@ -1566,6 +1578,8 @@ def list_graph_concepts(subject: str, limit: int = 2000):
                     "parent_hint": csv_info.get("parent_hint", ""),
                     "source_chunks": [],
                     "source_refs": [],
+                    "media_refs": [],
+                    "is_virtual": False,
                 })
 
         return {

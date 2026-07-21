@@ -43,28 +43,18 @@
                 <span class="agent-tag">{{ msg.agent }}</span>
                 <span class="time-tag">{{ msg.time }}</span>
               </div>
-              <!-- LA-IMG: 渲染 markdown，支持图片嵌入 -->
+              <!-- 消息正文：Markdown 渲染（含内联图片/公式） -->
               <div class="message-body markdown-body" v-html="renderMarkdown(msg.text)"></div>
-              <!-- LA-IMG: 关联媒体资源展示区（如果 LLM 未在正文中引用，则在此展示） -->
-              <div class="message-media" v-if="msg.media && msg.media.length">
-                <div class="media-title">📷 相关图片/公式</div>
-                <div class="media-grid">
-                  <div class="media-item" v-for="(m, i) in msg.media" :key="i">
-                    <img
-                      :src="`/api/media/${encodeMediaPath(m.path)}`"
-                      :alt="m.caption"
-                      class="media-thumb"
-                      @click="openMediaModal(m)"
-                    />
-                    <div class="media-caption">{{ m.caption }}</div>
-                  </div>
-                </div>
-              </div>
+              <!-- 引用来源（LA-047 扩展） -->
               <div class="message-sources" v-if="msg.sources && msg.sources.length">
                 <div class="sources-title">📎 引用来源</div>
                 <div class="source-item" v-for="(src, i) in msg.sources" :key="i">
                   <span class="source-index">{{ i + 1 }}</span>
-                  <span class="source-text">{{ src.text }}</span>
+                  <span class="source-text">
+                    {{ src.source }}
+                    <span v-if="src.heading_path" class="source-detail"> | {{ src.heading_path }}</span>
+                    <span v-if="src.page_number" class="source-detail"> | 第{{ src.page_number }}页</span>
+                  </span>
                 </div>
               </div>
             </div>
@@ -149,8 +139,9 @@ const quickHints = [
 ]
 
 // LA-IMG: 自定义 marked renderer，处理图片路径和大小
+// FIX-LA048: marked v12+ 中 renderer 方法接收对象参数 {href, title, text}
 const mediaRenderer = new marked.Renderer()
-mediaRenderer.image = (href, title, text) => {
+mediaRenderer.image = ({ href, title, text }) => {
   // 确保路径使用 /api/media/ 前缀
   let src = href
   if (src && !src.startsWith('http') && !src.startsWith('/api/media/')) {
@@ -162,7 +153,16 @@ mediaRenderer.image = (href, title, text) => {
 function renderMarkdown(text) {
   if (!text) return ''
   try {
-    return marked.parse(text, { breaks: true, renderer: mediaRenderer })
+    // FIX-LA048: 清理 LLM 可能产生的转义字符（如 \#  -> #）
+    text = text.replace(/\\#/g, '#')
+    // FIX-LA048: 清理 HTML 实体编码的 heading（如 &amp;#35; -> #）
+    text = text.replace(/&#35;/g, '#')
+    return marked.parse(text, { 
+      breaks: true, 
+      renderer: mediaRenderer,
+      headerIds: false,  // 禁用 heading ID 生成，避免冲突
+      mangle: false,
+    })
   } catch {
     return text
   }
@@ -173,13 +173,6 @@ function encodeMediaPath(path) {
   if (!path) return ''
   // 将 Windows 反斜杠替换为正斜杠
   return path.replace(/\\/g, '/')
-}
-
-// LA-IMG: 打开媒体大图预览（可扩展为 Lightbox）
-function openMediaModal(media) {
-  // 简单实现：在新标签页打开
-  const src = `/api/media/${encodeMediaPath(media.path)}`
-  window.open(src, '_blank')
 }
 
 function autoResize() {
@@ -231,7 +224,6 @@ async function sendMessage(presetText = null) {
     agent: '',
     time: new Date().toLocaleTimeString(),
     sources: [],
-    media: [],  // LA-IMG: 关联媒体资源
   }
   messages.value.push(aiMsg)
 
@@ -240,9 +232,9 @@ async function sendMessage(presetText = null) {
     for await (const { event, data } of stream) {
       if (event === 'meta') {
         aiMsg.agent = data.agent || 'TutorAgent'
-        // LA-IMG: 保存媒体资源
-        if (data.media && data.media.length) {
-          aiMsg.media = data.media
+        // LA-047: 保存引用来源
+        if (data.sources && data.sources.length) {
+          aiMsg.sources = data.sources
         }
       } else if (event === 'chunk') {
         aiMsg.text += data.text || ''
@@ -429,6 +421,57 @@ onMounted(() => {
   word-break: break-word;
 }
 
+/* FIX-LA048: Markdown heading 样式 */
+.markdown-body :deep(h1),
+.markdown-body :deep(h2),
+.markdown-body :deep(h3),
+.markdown-body :deep(h4),
+.markdown-body :deep(h5) {
+  margin: 12px 0 8px 0;
+  font-weight: 600;
+  color: var(--text-primary);
+  line-height: 1.4;
+}
+.markdown-body :deep(h1) { font-size: var(--font-size-xl); }
+.markdown-body :deep(h2) { font-size: var(--font-size-lg); }
+.markdown-body :deep(h3) { font-size: var(--font-size-md); border-bottom: 1px solid var(--border-color); padding-bottom: 4px; }
+.markdown-body :deep(h4) { font-size: var(--font-size-md); color: var(--accent-primary); }
+.markdown-body :deep(ul),
+.markdown-body :deep(ol) {
+  margin: 8px 0;
+  padding-left: 20px;
+}
+.markdown-body :deep(li) {
+  margin: 4px 0;
+  line-height: 1.6;
+}
+.markdown-body :deep(code) {
+  background: var(--bg-active);
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-family: monospace;
+  font-size: var(--font-size-sm);
+}
+.markdown-body :deep(pre) {
+  background: var(--bg-active);
+  padding: 12px;
+  border-radius: var(--radius-md);
+  overflow-x: auto;
+  margin: 8px 0;
+}
+.markdown-body :deep(pre code) {
+  background: none;
+  padding: 0;
+}
+.markdown-body :deep(strong) {
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.markdown-body :deep(p) {
+  margin: 6px 0;
+  line-height: 1.7;
+}
+
 .user-row .message-bubble {
   background: var(--bg-active);
   border-color: var(--border-light);
@@ -484,6 +527,10 @@ onMounted(() => {
   -webkit-box-orient: vertical;
 }
 
+.source-detail {
+  color: var(--text-muted);
+}
+
 /* LA-IMG: 内联图片样式（markdown 中引用的图片） */
 .chat-inline-image {
   max-width: 100%;
@@ -492,56 +539,6 @@ onMounted(() => {
   border: 1px solid var(--border-color);
   margin: 8px 0;
   display: block;
-}
-
-/* LA-IMG: 媒体资源展示区 */
-.message-media {
-  margin-top: 12px;
-  padding-top: 12px;
-  border-top: 1px dashed var(--border-color);
-}
-
-.media-title {
-  font-size: var(--font-size-xs);
-  color: var(--text-muted);
-  margin-bottom: 8px;
-}
-
-.media-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
-  gap: 8px;
-}
-
-.media-item {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  cursor: pointer;
-  transition: transform var(--transition-fast);
-}
-
-.media-item:hover {
-  transform: scale(1.03);
-}
-
-.media-thumb {
-  width: 100%;
-  aspect-ratio: 1;
-  object-fit: cover;
-  border-radius: var(--radius-md);
-  border: 1px solid var(--border-color);
-}
-
-.media-caption {
-  font-size: var(--font-size-xs);
-  color: var(--text-secondary);
-  margin-top: 4px;
-  text-align: center;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  max-width: 100%;
 }
 
 .input-area {

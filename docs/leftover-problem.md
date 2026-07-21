@@ -1283,62 +1283,53 @@ unTreeLayout 中的逐树 dagre 逻辑
 ## 2026-07-21 00:00 更新
 
 ### LA-046: Gap 检测逻辑缺失
-- **状态**: 🔴 **新增（明日优先）**
-- **问题描述**: paradigms.yaml v2.0 中定义了 `gap_visualization` 和 `fallback` 配置（`allow_skip_levels`, `mark_as_gap`, `ideal_chain`），但后端代码完全未实现 gap 检测逻辑。当前当 SemanticLinker 遇到 `technology→technology` 这类非法连接时，只能直接拒绝，导致下层 technology 变成孤立节点，无法体现"缺少中间层 requirement"的语义。
-- **期望效果**: 
-  - 当实际连接跨越 `ideal_chain` 中的多个层级时，标记为 gap 连接
-  - 前端用虚线/特殊样式显示 gap 连接
-  - 可选：创建虚拟节点填充 gap（`create_virtual_nodes: false` 时跳过）
-- **依赖**: paradigms.yaml v2.0 的 `ideal_chain`, `relation_map`, `fallback` 配置
-- **修改范围**: `core/semantic_linker.py`（gap 检测）+ 前端（gap 可视化）
-- **优先级**: P0
+- **状态**: 🟡 **已实现，待测试**（2026-07-21 11:56 确认方案，12:00 实现）
+- **实现内容**:
+  - engineering 范式 `ideal_chain` 修正为循环结构：`cycle_pattern: [requirement, technology]`
+  - `gap_rules.detect_by_same_type: true`：循环范式中同类型连接 = gap
+  - `_calculate_gap()`: 支持循环/非循环范式的 gap 计算
+  - `_process_gaps_and_virtual_nodes()`: 检测 gap → 推断缺失类型 → 创建虚拟节点
+  - `_create_virtual_node()`: 虚拟节点 `[缺失]需求层` / `[缺失]技术方案`
+  - 虚拟节点写入 KùzuDB（`is_virtual` 字段），前端虚线边框+橙色渲染
+  - PageRank：虚拟节点权重 = 0（不参与）
+- **修改文件**: 
+  - `config/paradigms.yaml`（engineering cyclic/gap_rules）
+  - `core/graph_store.py`（CanonicalConcept `is_virtual` schema + 兼容升级）
+  - `core/semantic_linker.py`（`_calculate_gap`, `_process_gaps_and_virtual_nodes`, `_write_virtual_nodes`）
+  - `web-vue/GraphStyles.js`（虚拟节点样式）
+  - `web-vue/GraphView.vue`（`isVirtual` data 字段传递）
+  - `app/backend_api.py`（`is_virtual` 返回前端）
+- **待验证**: 重建图谱后检查 technology→technology 连接是否被替换为 tech→[缺失需求层]→tech
 
 ### LA-047: 智能问答缺少引用能力
-- **状态**: 🔴 **新增（明日优先）**
-- **问题描述**: TutorAgent 回答用户问题时，没有说明回答中的知识来自用户提供的材料中的哪部分。用户希望像 ConceptTree 详情面板那样，精确到章节和页码。
-- **期望效果**:
-  - LLM 回答中引用来源 chunk（heading_path + page_number）
-  - 引用可点击跳转到对应文档位置
-  - 引用格式：`[来源: 第3章 RAG架构 > 3.2 检索策略 (P15)]`
-- **技术方案**:
-  1. RAG 检索时记录来源 chunk 的 `heading_path` 和 `page_number`
-  2. Prompt 中要求 LLM 在回答末尾添加引用列表
-  3. 前端解析引用标记，渲染为可点击链接
-  4. 或：在 chunk text 中插入 `<ref id="xxx">` 标记，前端高亮
-- **修改范围**: `agents/tutor_agent.py`（Prompt + 引用解析）+ `web-vue/src/components/`（引用渲染）
-- **优先级**: P0
+- **状态**: 🟡 **已实现，待测试**（2026-07-21 09:19）
+- **实现内容**:
+  - TutorAgent `_collect_sources()`: 从 subgraph 节点的 source_chunks 查询 Chunk 元数据（heading_path + page_number + source 文件名）
+  - 后端 API `AskResponse` 新增 `sources` 字段
+  - SSE stream 传递 `sources` 到前端
+  - 前端 ChatView.vue 底部渲染"📎 引用来源"：`[1] 文件名 | 章节路径 | 第X页`
+- **修改文件**: `agents/tutor_agent.py`, `app/backend_api.py`, `web-vue/ChatView.vue`
+- **待验证**: 智能问答后检查消息底部引用列表
 
 ### LA-048: TutorAgent Markdown 渲染失效
-- **状态**: 🔴 **新增（明日优先）**
-- **问题描述**: LLM 回答中的 Markdown 标题（如 `#### 3. 应用与编排层`、`### 总结`）没有被正确识别和渲染，而是作为纯文本显示。
-- **期望效果**: Markdown 标题、列表、代码块、加粗等格式正确渲染
-- **可能原因**:
-  1. 前端 Markdown 解析器配置问题（如未启用 heading 渲染）
-  2. Markdown 文本被转义（`#` 变成 `\#`）
-  3. CSS 样式覆盖了 heading 样式（如颜色与背景相同）
-- **排查步骤**:
-  1. 检查前端接收到的原始文本是否包含 `#`
-  2. 检查 Markdown 渲染组件配置（如 `marked.js` 或 `markdown-it` 的 heading 插件）
-  3. 检查 CSS 是否有 `.h3, .h4 { color: inherit }` 之类覆盖
-- **修改范围**: `web-vue/src/components/`（Markdown 渲染组件）
-- **优先级**: P0
+- **状态**: 🟡 **已实现，待测试**（2026-07-21 08:52）
+- **实现内容**:
+  - marked v12 API 适配：`mediaRenderer.image = ({href, title, text}) => {...}`（对象解构）
+  - `marked.parse` 增加 `headerIds: false, mangle: false`
+  - `renderMarkdown()` 增加 `\#` → `#` 转义清理
+  - ChatView.vue 新增 `.markdown-body :deep(h1~h4)` 完整样式
+- **修改文件**: `web-vue/src/components/ChatView.vue`
+- **待验证**: 智能问答中提问，检查 heading 是否正确渲染
 
 ### LA-049: 图片媒体引用失败
-- **状态**: 🔴 **新增（明日优先）**
-- **问题描述**: TutorAgent 回答时尝试引用材料中的图片，但前端显示为破碎图片图标。后端报错有两种：
-  1. **Cypher 语法错误**: `MATCH (c:Chunk) WHERE c.chunk_id IN [...]` 中 chunk_id 格式错误（包含 `"` 引号和 JSON 数组嵌套）
-  2. **404 媒体文件不存在**: `/api/media/pseudo_md_xxx` 返回 404，说明图片文件未正确生成或路径映射错误
-- **期望效果**: LLM 引用图片时，前端正确显示图片缩略图，点击可放大查看
-- **可能原因**:
-  1. `collect_media_resources()` 构造 Cypher 查询时未正确转义 chunk_id（混合了 JSON 字符串和数组）
-  2. `image_pseudo` chunk 的媒体文件未生成到 `/static/media/` 目录
-  3. `/api/media/` 路由未正确处理 `image_pseudo` 类型的 chunk
-- **排查步骤**:
-  1. 检查 `collect_media_resources()` 中 chunk_id 列表的构造逻辑
-  2. 检查 MinerU 输出后图片是否被正确保存到 static 目录
-  3. 检查 `/api/media/` 路由对 `image_pseudo` chunk 的处理
-- **修改范围**: `agents/tutor_agent.py`（媒体收集 Cypher）+ 后端媒体路由 + 前端图片渲染
-- **优先级**: P0
+- **状态**: 🟡 **已实现，待测试**（2026-07-21 08:52）
+- **实现内容**:
+  - `_collect_related_media()` source_chunks 多格式解析（JSON 列表 / 逗号分隔 / Python 列表）
+  - Cypher 查询单引号转义避免语法错误
+  - Windows 绝对路径 → 相对路径归一化（`{subject}_v1_images/{filename}`）
+  - 移除冗余的 `.message-media` 底部缩略图区域（图片直接内联在 Markdown 正文中）
+- **修改文件**: `agents/tutor_agent.py`, `web-vue/ChatView.vue`
+- **待验证**: 提问涉及图片的问题，检查内联显示和 `/api/media/` 请求
 
 ---
 

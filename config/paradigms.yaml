@@ -200,7 +200,18 @@ paradigms:
     fallback:
       allow_skip_levels: true
       mark_as_gap: true
-      create_virtual_nodes: false
+      create_virtual_nodes: true  # LA-046: 启用虚拟节点
+
+    # 循环范式标记（engineering 为交替递归结构）
+    cyclic: true
+    cycle_pattern:
+      - requirement
+      - technology
+
+    # Gap 检测规则（循环范式专用）
+    gap_rules:
+      detect_by_type_mismatch: false  # 非循环范式用 ideal_chain 位置差
+      detect_by_same_type: true       # 循环范式：同类型连接 = gap
 
     # 断裂点可视化配置
     gap_visualization:
@@ -209,10 +220,11 @@ paradigms:
         shape: "circle"
         radius: 12
         fill: "transparent"
+        stroke: "#E67E22"
         stroke_width: 2
         stroke_dasharray: "4,2"
-        label_template: "+ {{type_label}}"
-        hover_hint: "缺少{{type_label}}，点击补充"
+        label_template: "[缺失]{{type_label}}"  # LA-046: [缺失]需求层 / [缺失]技术方案
+        hover_hint: "缺少{{type_label}}层，点击补充概念"
       skip_link:
         stroke_dasharray: "4,4"
         color: "#bdc3c7"
