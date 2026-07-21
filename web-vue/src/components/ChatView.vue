@@ -47,6 +47,21 @@
               </div>
               <!-- 消息正文：Markdown 渲染（含内联图片/公式） -->
               <div class="message-body markdown-body" v-html="renderMarkdown(msg.text)"></div>
+              <!-- LA-049: 关联媒体资源（LLM 未在正文中嵌入时，在此展示） -->
+              <div class="message-media" v-if="msg.media && msg.media.length">
+                <div class="media-title">📷 相关图片</div>
+                <div class="media-grid">
+                  <div class="media-item" v-for="(m, i) in msg.media" :key="i">
+                    <img
+                      :src="`/api/media/${m.path}`"
+                      :alt="m.caption"
+                      class="media-thumb"
+                      @click="openMediaModal(m)"
+                    />
+                    <div class="media-caption">{{ m.caption }}</div>
+                  </div>
+                </div>
+              </div>
               <!-- 引用来源（LA-047 扩展） -->
               <div class="message-sources" v-if="msg.sources && msg.sources.length">
                 <div class="sources-title">📎 引用来源</div>
@@ -158,13 +173,14 @@ mediaRenderer.image = ({ href, title, text }) => {
   if (src && !src.startsWith('http') && !src.startsWith('/api/media/')) {
     src = `/api/media/${src}`
   }
-  // 对路径进行 URL 编码（处理中文、空格等特殊字符）
+  // FIX-LA049: 对路径进行 URL 编码（处理中文、空格等特殊字符）
+  // 使用 encodeURI 而非 encodeURIComponent，保留路径中的 /
   if (src && !src.startsWith('http')) {
-    // 提取路径部分（去掉 /api/media/ 前缀）
     const prefix = '/api/media/'
     if (src.startsWith(prefix)) {
       const pathPart = src.slice(prefix.length)
-      src = prefix + encodeURIComponent(pathPart)
+      // 只编码路径中的特殊字符，保留 /
+      src = prefix + pathPart.split('/').map(encodeURIComponent).join('/')
     }
   }
   return `<img src="${src}" alt="${text || ''}" title="${title || ''}" class="chat-inline-image" loading="lazy" onerror="this.style.display='none';this.parentNode.classList.add('img-error')" />`
@@ -193,6 +209,12 @@ function encodeMediaPath(path) {
   if (!path) return ''
   // 将 Windows 反斜杠替换为正斜杠
   return path.replace(/\\/g, '/')
+}
+
+// LA-049: 打开媒体大图预览
+function openMediaModal(media) {
+  const src = `/api/media/${media.path}`
+  window.open(src, '_blank')
 }
 
 function autoResize() {
@@ -648,6 +670,56 @@ onMounted(() => {
   border: 1px solid var(--border-color);
   margin: 8px 0;
   display: block;
+}
+
+/* LA-049: 媒体资源展示区（LLM 未在正文中引用时，在此展示） */
+.message-media {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px dashed var(--border-color);
+}
+
+.media-title {
+  font-size: var(--font-size-xs);
+  color: var(--text-muted);
+  margin-bottom: 8px;
+}
+
+.media-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+  gap: 8px;
+}
+
+.media-item {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  cursor: pointer;
+  transition: transform var(--transition-fast);
+}
+
+.media-item:hover {
+  transform: scale(1.03);
+}
+
+.media-thumb {
+  width: 100%;
+  aspect-ratio: 1;
+  object-fit: cover;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border-color);
+}
+
+.media-caption {
+  font-size: var(--font-size-xs);
+  color: var(--text-secondary);
+  margin-top: 4px;
+  text-align: center;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
 }
 
 .input-area {
