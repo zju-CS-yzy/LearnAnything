@@ -47,21 +47,6 @@
               </div>
               <!-- 消息正文：Markdown 渲染（含内联图片/公式） -->
               <div class="message-body markdown-body" v-html="renderMarkdown(msg.text)"></div>
-              <!-- LA-049: 关联媒体资源（LLM 未在正文中嵌入时，在此展示） -->
-              <div class="message-media" v-if="msg.media && msg.media.length">
-                <div class="media-title">📷 相关图片</div>
-                <div class="media-grid">
-                  <div class="media-item" v-for="(m, i) in msg.media" :key="i">
-                    <img
-                      :src="`/api/media/${m.path}`"
-                      :alt="m.caption"
-                      class="media-thumb"
-                      @click="openMediaModal(m)"
-                    />
-                    <div class="media-caption">{{ m.caption }}</div>
-                  </div>
-                </div>
-              </div>
               <!-- 引用来源（LA-047 扩展） -->
               <div class="message-sources" v-if="msg.sources && msg.sources.length">
                 <div class="sources-title">📎 引用来源</div>

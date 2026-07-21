@@ -81,7 +81,16 @@
             <span class="history-text">{{ session.title }}</span>
             <span v-if="session.subject" class="history-subject">{{ session.subject }}</span>
           </div>
-          <span v-if="session.turnCount" class="history-turns">{{ session.turnCount }}轮</span>
+          <div class="history-actions">
+            <span v-if="session.turnCount" class="history-turns">{{ session.turnCount }}轮</span>
+            <button
+              class="delete-btn"
+              title="删除会话"
+              @click.stop="deleteSession(session.id)"
+            >
+              🗑️
+            </button>
+          </div>
         </div>
       </div>
       <div v-else class="history-empty">暂无历史会话</div>
@@ -267,6 +276,31 @@ function newChatSession() {
   window.dispatchEvent(new CustomEvent('create-new-chat-session'))
   // 刷新会话列表
   setTimeout(loadSessions, 500)
+}
+
+// LA-044: 删除会话
+async function deleteSession(id) {
+  if (!confirm('确定要删除该会话吗？此操作不可恢复。')) {
+    return
+  }
+  try {
+    const resp = await fetch(`${window.location.origin}/api/dialog/sessions/${id}`, {
+      method: 'DELETE',
+    })
+    if (resp.ok) {
+      console.log('[Sidebar] 会话已删除:', id)
+      // 从列表中移除
+      chatSessions.value = chatSessions.value.filter(s => s.id !== id)
+      // 如果删除的是当前会话，清空当前会话ID
+      if (currentSessionId.value === id) {
+        currentSessionId.value = ''
+      }
+    } else {
+      console.error('[Sidebar] 删除会话失败:', resp.status)
+    }
+  } catch (e) {
+    console.error('[Sidebar] 删除会话失败:', e)
+  }
 }
 
 loadSessions()
@@ -504,6 +538,32 @@ window.addEventListener('chat-session-created', (e) => {
   font-size: var(--font-size-xs);
   color: var(--text-muted);
   flex-shrink: 0;
+}
+
+.history-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.delete-btn {
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-size: var(--font-size-sm);
+  padding: 2px 4px;
+  border-radius: 4px;
+  opacity: 0;
+  transition: opacity var(--transition-fast), background var(--transition-fast);
+}
+
+.history-item:hover .delete-btn {
+  opacity: 1;
+}
+
+.delete-btn:hover {
+  background: var(--bg-active);
 }
 
 .history-empty {
