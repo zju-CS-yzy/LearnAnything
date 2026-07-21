@@ -266,6 +266,7 @@ async function sendMessage(presetText = null) {
     agent: '',
     time: new Date().toLocaleTimeString(),
     sources: [],
+    media: [],  // LA-049: 关联媒体资源
   }
   messages.value.push(aiMsg)
 
@@ -277,6 +278,10 @@ async function sendMessage(presetText = null) {
         // LA-047: 保存引用来源
         if (data.sources && data.sources.length) {
           aiMsg.sources = data.sources
+        }
+        // LA-049: 保存媒体资源
+        if (data.media && data.media.length) {
+          aiMsg.media = data.media
         }
         // LA-044: 保存当前话题
         if (data.current_topic) {
