@@ -83,12 +83,17 @@ class TutorAgent(BaseAgent):
         # LA-IMG: 构建媒体引用提示
         media_hint = ""
         if media:
-            media_hint = "\n\n## 相关图片/公式资源\n"
-            media_hint += "以下是与该问题相关的图片或公式，请在回答中适当位置引用它们。"
-            media_hint += "引用格式：使用 markdown 图片语法，如 ![描述](/api/media/路径)。\n\n"
+            media_hint = "\n\n## 相关图片/公式资源（重要：请在回答中引用）\n"
+            media_hint += "以下是与该问题相关的图片，请在回答中讲到对应内容时，"
+            media_hint += "直接插入 markdown 图片语法 ![描述](路径) 来展示图片。"
+            media_hint += "不要只在末尾列出图片，要在正文中适当位置嵌入。\n\n"
             for i, m in enumerate(media[:5], 1):  # 最多引用 5 张
-                media_hint += f"[{i}] {m['caption']}:\n"
-                media_hint += f"![{m['caption']}](/api/media/{m['path']})\n\n"
+                media_hint += f"图片{i}: {m['caption']}\n"
+                media_hint += f"路径: /api/media/{m['path']}\n"
+                media_hint += f"引用示例: ![{m['caption']}](/api/media/{m['path']})\n\n"
+            print(f"[TutorAgent] LA-IMG: 媒体提示已生成 ({len(media_hint)} 字符)")
+        else:
+            print(f"[TutorAgent] LA-IMG: 无媒体资源")
 
         # 阶段 1: 对话历史提示
         history_hint = ""
@@ -115,10 +120,11 @@ class TutorAgent(BaseAgent):
             "2. 引用资料中的关键信息来支撑回答\n"
             "3. 使用适当的段落、列表和标题来组织内容\n"
             "4. 遇到专业术语时简要解释\n"
-            "5. 如果提供了图片/公式资源，请在讲解到相关内容时，用 markdown 图片语法引用"
-            "（格式：![描述](/api/media/路径)），让用户可以直观看到图示\n"
+            "5. 【重要】如果提供了图片资源，必须在回答正文中用 markdown 图片语法引用，"
+            "格式为 ![描述](/api/media/路径)。图片不能只在末尾列出，"
+            "要在讲解到对应内容时直接嵌入到段落中\n"
             "6. 如果资料不足以完全回答问题，诚实说明\n"
-            "7. 如果提供了对话历史，请注意保持与上下文的连贯性，回答应与之前的对话相关联"
+            "7. 如果提供了对话历史，请注意保持与上下文的连贯性"
         )
 
         user_prompt = f"{history_hint}用户问题：{query}{source_note}\n\n参考资料：\n{context}{media_hint}\n\n请生成回答："
