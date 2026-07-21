@@ -70,4 +70,61 @@
 
 ---
 
-*记录时间: 2026-07-01 01:30*
+## 2026-07-21 — P0 问题集中修复 + 对话上下文增强 + 架构设计
+
+### 参与者
+- 树状图（AI 项目经理）
+- 开发者（用户）
+
+### 关键决策
+
+#### 决策 1: Trae 式多 Agent 群聊架构
+**内容**: 将 LearnAnything 升级为 Trae 式分栏群聊模式：右侧 ChatView（多 Agent 群聊），左侧功能视图，双向互动
+**设计文档**: `docs/design-trae-multiagent-chat.md`
+**前置条件**: 需先完成 Agent 个性化和 UserStateStore 同步
+
+#### 决策 2: 用户可配置参数系统
+**内容**: 45 个硬编码参数开放为三层配置（系统默认 → 用户全局 → 会话级）
+**设计文档**: `docs/design-user-configurable-settings.md`
+
+#### 决策 3: 对话上下文摘要机制
+**内容**: 历史超 800 字符时自动使用 LLM 生成摘要替代完整历史
+**实现**: `DialogContext.to_summary()` + `estimate_tokens()`
+
+### 完成事项
+
+#### P0 问题修复（4个）
+| 问题 | 状态 |
+|:---|:---|
+| LA-048 Markdown 渲染 | ✅ marked v12 适配 + heading CSS |
+| LA-049 图片引用 | ✅ source_chunks 解析 + media_refs 路径优先级 + renderer 兼容 v11/v12 + LLM Prompt 引导 |
+| LA-047 引用来源 | ✅ TutorAgent 收集 + API 传递 + 前端列表 + chunk_id 推断 |
+| LA-046 Gap 检测 | 🟡 待测试（engineering cyclic + 虚拟节点）|
+
+#### 对话上下文增强（LA-044）
+| 功能 | 状态 |
+|:---|:---|
+| 前后端会话同步 | ✅ |
+| 话题提取/切换/追踪 | ✅ |
+| 摘要机制 | ✅ |
+| 会话隔离 | ✅ |
+| 历史消息加载 | ✅ |
+| 删除会话 | ✅ |
+
+### 提交统计
+共 **18 个 commit**，约 1700+ 行变更。
+
+### 遗留问题
+1. LA-046 待测试（重建 rag_v1 图谱验证虚拟节点）
+2. LA-044-#1 摘要机制待测试（连续 8+ 轮对话）
+3. Agent 个性化 Prompt 未实现
+4. UserStateStore 同步未实现
+
+### 下一步行动
+1. Agent 个性化 Prompt（#2）
+2. UserStateStore 同步（#3）
+3. 测试 LA-046 Gap 检测
+
+---
+
+*记录时间: 2026-07-22 00:30*
