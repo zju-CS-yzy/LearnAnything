@@ -6,8 +6,10 @@
         <span class="header-icon">💬</span>
         <span>智能问答</span>
       </div>
-      <div class="header-subject">
+      <div class="header-tags">
         <span class="tag">{{ currentSubjectName }}</span>
+        <!-- LA-044: 当前话题标签 -->
+        <span v-if="currentTopic" class="tag tag-topic">📌 {{ currentTopic }}</span>
       </div>
     </header>
 
@@ -129,6 +131,8 @@ const inputRef = ref(null)
 // 会话 ID（用于历史记录）
 const sessionId = ref(`session_${Date.now()}`)
 const sessionTitle = ref('新会话')
+// LA-044: 当前话题
+const currentTopic = ref('')
 
 // 快速提示
 const quickHints = [
@@ -236,6 +240,10 @@ async function sendMessage(presetText = null) {
         if (data.sources && data.sources.length) {
           aiMsg.sources = data.sources
         }
+        // LA-044: 保存当前话题
+        if (data.current_topic) {
+          currentTopic.value = data.current_topic
+        }
       } else if (event === 'chunk') {
         aiMsg.text += data.text || ''
         scrollToBottom()
@@ -297,10 +305,46 @@ function loadSession(id) {
   }
 }
 
+// LA-044: 新建会话 — 调用后端创建新 session
+async function createNewSession() {
+  try {
+    const resp = await fetch(`${window.location.origin}/api/dialog/sessions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        user_id: 'anonymous',
+        subject_id: currentSubject.value,
+      }),
+    })
+    if (resp.ok) {
+      const data = await resp.json()
+      sessionId.value = data.session_id
+      sessionTitle.value = '新会话'
+      currentTopic.value = ''
+      messages.value = []
+      console.log('[ChatView] 新建会话:', data.session_id)
+    }
+  } catch (e) {
+    console.error('新建会话失败:', e)
+    // 回退：本地生成新 sessionId
+    sessionId.value = `session_${Date.now()}`
+    sessionTitle.value = '新会话'
+    currentTopic.value = ''
+    messages.value = []
+  }
+}
+
+// 暴露给父组件/全局事件
+defineExpose({ createNewSession })
+
 onMounted(() => {
   autoResize()
   window.addEventListener('load-chat-session', (e) => {
     loadSession(e.detail.sessionId)
+  })
+  // LA-044: 监听新建会话事件（来自 Sidebar）
+  window.addEventListener('create-new-chat-session', () => {
+    createNewSession()
   })
 })
 </script>
@@ -333,6 +377,19 @@ onMounted(() => {
 }
 
 .header-icon { font-size: var(--font-size-lg); }
+
+/* LA-044: 话题标签样式 */
+.header-tags {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.tag-topic {
+  background: var(--bg-active) !important;
+  color: var(--accent-primary) !important;
+  border: 1px solid var(--accent-primary);
+}
 
 .messages-container {
   flex: 1;
