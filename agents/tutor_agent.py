@@ -346,6 +346,7 @@ class TutorAgent(BaseAgent):
             while result.has_next():
                 row = result.get_next()
                 # FIX: 优先 thumbnail_path，其次 image_path，再次 media_refs
+                print(f"[TutorAgent] LA-IMG: row[2](thumb)={row[2]}, row[3](img)={row[3]}, row[5](media)={row[5] is not None}")
                 thumbnail = row[2] or row[3]  # thumbnail_path or image_path
                 if not thumbnail and row[5]:  # media_refs
                     try:
@@ -357,9 +358,13 @@ class TutorAgent(BaseAgent):
                         if media_refs and len(media_refs) > 0:
                             first_ref = media_refs[0]
                             print(f"[TutorAgent] LA-IMG: 第一个 media_ref: {first_ref}")
+                            # 调试：打印每个字段的值
+                            rp = first_ref.get('relative_path')
+                            p = first_ref.get('path')
+                            tp = first_ref.get('thumbnail_path')
+                            print(f"[TutorAgent] LA-IMG: relative_path='{rp}', path='{p}', thumbnail_path='{tp}'")
                             # FIX: 优先使用 relative_path（相对路径），其次 path，最后 thumbnail_path
-                            # thumbnail_path 是 Windows 绝对路径，不适合传给前端
-                            thumbnail = first_ref.get('relative_path') or first_ref.get('path') or first_ref.get('thumbnail_path')
+                            thumbnail = rp or p or tp
                             print(f"[TutorAgent] LA-IMG: 提取路径: {thumbnail}")
                     except Exception as e:
                         print(f"[TutorAgent] LA-IMG: media_refs 解析失败: {e}")
