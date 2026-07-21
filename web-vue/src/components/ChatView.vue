@@ -296,8 +296,41 @@ function saveSession() {
   }
 }
 
-// 加载历史会话
-function loadSession(id) {
+// 加载历史会话（LA-044: 从后端 API 获取）
+async function loadSession(id) {
+  try {
+    console.log('[ChatView] 加载历史会话:', id)
+    
+    // 从后端 API 获取历史消息
+    const resp = await fetch(`${window.location.origin}/api/dialog/sessions/${id}/messages`)
+    if (resp.ok) {
+      const data = await resp.json()
+      const historyMessages = (data.messages || []).map(m => ({
+        id: Date.now() + Math.random(),
+        role: m.role === 'user' ? 'user' : 'ai',
+        text: m.content || '',
+        agent: m.role === 'agent' ? (m.agent || 'TutorAgent') : '',
+        time: m.time ? new Date(m.time).toLocaleTimeString() : new Date().toLocaleTimeString(),
+        sources: [],
+      }))
+      
+      sessionId.value = id
+      sessionTitle.value = '历史会话'
+      messages.value = historyMessages
+      console.log('[ChatView] 历史会话加载完成:', historyMessages.length, '条消息')
+    } else {
+      console.error('[ChatView] 加载历史会话失败:', resp.status)
+      // 回退到 localStorage
+      fallbackLoadFromLocal(id)
+    }
+  } catch (e) {
+    console.error('[ChatView] 加载历史会话失败:', e)
+    fallbackLoadFromLocal(id)
+  }
+}
+
+// 回退：从 localStorage 加载
+function fallbackLoadFromLocal(id) {
   try {
     const sessions = JSON.parse(localStorage.getItem('la_chat_sessions') || '[]')
     const session = sessions.find(s => s.id === id)
@@ -307,7 +340,7 @@ function loadSession(id) {
       messages.value = session.messages || []
     }
   } catch (e) {
-    console.error('加载会话失败:', e)
+    console.error('从 localStorage 加载会话失败:', e)
   }
 }
 

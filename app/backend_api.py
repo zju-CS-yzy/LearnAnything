@@ -1800,6 +1800,39 @@ def create_dialog_session(request: DialogSessionCreate):
         raise HTTPException(status_code=500, detail=f"创建会话失败: {e}")
 
 
+@app.get("/api/dialog/sessions/{session_id}/messages")
+def get_session_messages(session_id: str):
+    """
+    获取指定会话的历史消息列表。
+    """
+    try:
+        conn = sqlite3.connect(str(_dialog_manager.db_path))
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT turn_number, role, agent_name, content, intent, created_at
+            FROM dialog_messages
+            WHERE session_id = ?
+            ORDER BY turn_number ASC, message_id ASC
+        """, (session_id,))
+        rows = cursor.fetchall()
+        conn.close()
+
+        messages = []
+        for row in rows:
+            messages.append({
+                "turn_number": row[0],
+                "role": row[1],
+                "agent": row[2] or "",
+                "content": row[3],
+                "intent": row[4] or "",
+                "time": row[5],
+            })
+        return {"session_id": session_id, "messages": messages}
+    except Exception as e:
+        print(f"[API] 获取会话消息失败: {e}")
+        return {"session_id": session_id, "messages": []}
+
+
 # ========== LA-035: 媒体文件静态服务 ==========
 
 @app.get("/api/media/{path:path}")
