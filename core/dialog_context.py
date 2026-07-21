@@ -67,8 +67,16 @@ class DialogContext:
     user_profile: Optional[UserProfile] = None
     weak_areas_global: List[str] = field(default_factory=list)
     
-    def to_prompt_context(self, max_turns: int = 5) -> str:
-        """转换为 LLM prompt 中的分层上下文文本（含日志描述）"""
+    def to_prompt_context(self, max_turns: int = 5, max_chars: int = 800) -> str:
+        """
+        转换为 LLM prompt 中的分层上下文文本（含日志描述）。
+        
+        LA-044-#1: 当历史文本超过 max_chars 时，使用 LLM 摘要替代完整历史。
+        
+        Args:
+            max_turns: 保留的最近轮次数（未超限时）
+            max_chars: 历史文本字符数阈值，超过则触发摘要
+        """
         lines = []
         
         # 1. 全局用户画像（跨学科共享）
@@ -96,17 +104,115 @@ class DialogContext:
                 lines.append(f"本学科薄弱点: {', '.join(self.weak_areas)}")
             lines.append("")
         
-        # 3. 最近对话历史（学科隔离）
+        # 3. 对话历史（LA-044-#1: 摘要机制）
         if self.history:
-            lines.append("【对话历史】(学科隔离)")
+            # 先计算完整历史的字符数
+            history_lines = []
             for msg in self.history[-max_turns:]:
                 role_label = "用户" if msg.get("role") == "user" else msg.get("agent_name", "系统")
                 content = msg.get("content", "")[:200]
-                lines.append(f"{role_label}: {content}")
-            lines.append("")
+                history_lines.append(f"{role_label}: {content}")
+            
+            full_history = "\n".join(history_lines)
+            
+            # LA-044-#1: 检查是否超过阈值
+            if len(full_history) > max_chars:
+                # 使用 LLM 摘要
+                summary = self.to_summary()
+                if summary:
+                    lines.append("【对话摘要】(历史较长，已摘要)")
+                    lines.append(summary)
+                    lines.append("")
+                else:
+                    # 摘要失败，回退到最近 2 轮
+                    lines.append("【对话历史】(最近2轮)")
+                    for msg in self.history[-2:]:
+                        role_label = "用户" if msg.get("role") == "user" else msg.get("agent_name", "系统")
+                        content = msg.get("content", "")[:150]
+                        lines.append(f"{role_label}: {content}")
+                    lines.append("")
+            else:
+                # 未超限，使用完整历史
+                lines.append("【对话历史】(学科隔离)")
+                lines.extend(history_lines)
+                lines.append("")
         
         return "\n".join(lines)
     
+    def to_summary(self) -> Optional[str]:
+        """
+        LA-044-#1: 使用 LLM 生成对话历史摘要。
+        
+        当对话历史过长时，调用 LLM 生成精简摘要，保留关键信息：
+        - 讨论过的话题
+        - 用户的疑问和 Agent 的核心回答
+        - 用户的薄弱点暴露
+        
+        Returns:
+            摘要文本 或 None（LLM 调用失败时）
+        """
+        # 检查缓存（同一轮次不重复生成）
+        cache_key = f"{self.session_id}_{self.turn_number}"
+        if hasattr(self, '_summary_cache') and self._summary_cache.get('key') == cache_key:
+            return self._summary_cache.get('text')
+        
+        if not self.history:
+            return None
+        
+        try:
+            from core.llm_client import LLMClient
+            
+            # 构建 LLM 输入：完整历史
+            history_text = "\n".join([
+                f"{'用户' if m.get('role') == 'user' else m.get('agent_name', '系统')}: {m.get('content', '')[:300]}"
+                for m in self.history
+            ])
+            
+            prompt = f"""请对以下对话历史进行摘要，保留关键信息（讨论话题、用户疑问、核心回答、暴露的薄弱点）。
+摘要控制在 200 字以内，使用中文。
+
+对话历史：
+{history_text}
+
+摘要："""
+            
+            print(f"[DialogContext] LA-044-#1: 调用 LLM 生成对话摘要 (history_len={len(self.history)})")
+            
+            llm = LLMClient()
+            summary = llm.complete(prompt, temperature=0.3, max_tokens=300)
+            
+            if summary:
+                summary = summary.strip()
+                # 缓存结果
+                self._summary_cache = {'key': cache_key, 'text': summary}
+                print(f"[DialogContext] LA-044-#1: 摘要生成成功 ({len(summary)} 字)")
+                return summary
+            
+        except Exception as e:
+            print(f"[DialogContext] LA-044-#1: LLM 摘要生成失败: {e}")
+        
+        return None
+    
+    @staticmethod
+    def estimate_tokens(text: str) -> int:
+        """
+        LA-044-#1: 简易 token 估算（中文 ≈ 1 字/1 token，英文 ≈ 0.75 token/词）。
+        
+        这是快速估算，不精确但足够用于阈值判断。
+        """
+        if not text:
+            return 0
+        # 中文字符计数
+        chinese_chars = sum(1 for c in text if '\u4e00' <= c <= '\u9fff')
+        # 英文单词估算
+        import re
+        english_words = len(re.findall(r'[a-zA-Z]+', text))
+        # 其他字符（标点、数字等）
+        other_chars = len(text) - chinese_chars - sum(len(m.group()) for m in re.finditer(r'[a-zA-Z]+', text))
+        
+        estimated = chinese_chars + int(english_words * 0.75) + int(other_chars * 0.5)
+        return max(1, estimated)
+
     def get_log_summary(self) -> str:
         """返回日志摘要，便于控制台观察"""
         profile_info = ""
