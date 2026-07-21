@@ -298,6 +298,7 @@ class TutorAgent(BaseAgent):
                 if isinstance(cid, str) and cid:
                     chunk_ids.add(cid.strip())
 
+        print(f"[TutorAgent] LA-IMG: 收集到 {len(chunk_ids)} 个 source_chunks")
         if not chunk_ids:
             return media
 
@@ -317,6 +318,23 @@ class TutorAgent(BaseAgent):
                 safe_ids.append(f"'{safe_cid}'")
 
             id_str = ", ".join(safe_ids)
+            
+            # 调试：先查询所有 chunk 的类型分布
+            debug_cypher = f"""
+                MATCH (c:Chunk)
+                WHERE c.chunk_id IN [{id_str}]
+                RETURN c.chunk_id, c.chunk_type, c.thumbnail_path
+            """
+            debug_result = conn.execute(debug_cypher)
+            debug_rows = []
+            while debug_result.has_next():
+                dr = debug_result.get_next()
+                debug_rows.append(f"  {dr[0][:30]}... type={dr[1]} has_thumb={'是' if dr[2] else '否'}")
+            if debug_rows:
+                print(f"[TutorAgent] LA-IMG: 调试 - source_chunks 类型分布:\n" + "\n".join(debug_rows))
+            else:
+                print(f"[TutorAgent] LA-IMG: 调试 - 未找到任何 chunk（chunk_id 可能不存在）")
+            
             # FIX-LA049: KùzuDB Cypher 列表字面量必须用方括号 []
             cypher = f"""
                 MATCH (c:Chunk)

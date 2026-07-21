@@ -1816,7 +1816,7 @@ def get_session_messages(session_id: str):
         conn = sqlite3.connect(str(_dialog_manager.db_path))
         cursor = conn.cursor()
         cursor.execute("""
-            SELECT turn_number, role, agent_name, content, intent, created_at
+            SELECT turn_number, role, agent_name, content, intent, created_at, metadata
             FROM dialog_messages
             WHERE session_id = ?
             ORDER BY turn_number ASC, message_id ASC
@@ -1826,6 +1826,12 @@ def get_session_messages(session_id: str):
 
         messages = []
         for row in rows:
+            metadata = {}
+            if row[6]:
+                try:
+                    metadata = json.loads(row[6])
+                except json.JSONDecodeError:
+                    pass
             messages.append({
                 "turn_number": row[0],
                 "role": row[1],
@@ -1833,6 +1839,8 @@ def get_session_messages(session_id: str):
                 "content": row[3],
                 "intent": row[4] or "",
                 "time": row[5],
+                "sources": metadata.get("sources", []),
+                "media": metadata.get("media", []),
             })
         return {"session_id": session_id, "messages": messages}
     except Exception as e:
