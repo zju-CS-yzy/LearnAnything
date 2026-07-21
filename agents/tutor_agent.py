@@ -340,7 +340,7 @@ class TutorAgent(BaseAgent):
                 MATCH (c:Chunk)
                 WHERE c.chunk_id IN [{id_str}]
                   AND c.chunk_type IN ['image', 'image_pseudo', 'formula_pseudo']
-                RETURN c.chunk_id, c.chunk_type, c.thumbnail_path, c.image_path, c.heading_path, c.media_refs
+                RETURN c.chunk_id, c.chunk_type, c.thumbnail_path, c.image_path, c.heading_path, c.media_refs, c.source
             """
             result = conn.execute(cypher)
             while result.has_next():
@@ -479,12 +479,36 @@ class TutorAgent(BaseAgent):
                 # 跳过完全空的来源
                 if not heading_path and not page_number and not source_file:
                     continue
+                
+                # LA-047-FIX: 当 heading_path 为空时，尝试从 chunk_id 推断章节信息
+                display_heading = heading_path
+                if not display_heading and chunk_id:
+                    # 从 chunk_id 推断：md_文件名_h2_15_xxx → "第15节"
+                    import re
+                    # 尝试匹配 h{level}_{num} 模式
+                    m = re.search(r'_h(\d+)_(\d+)', chunk_id)
+                    if m:
+                        level, num = m.group(1), m.group(2)
+                        display_heading = f"第{num}节 (H{level})"
+                    else:
+                        # 尝试匹配 p_{num} 模式
+                        m = re.search(r'_p_(\d+)', chunk_id)
+                        if m:
+                            display_heading = f"第{m.group(1)}段"
+                
+                # LA-047-FIX: 当 source_file 为空时，从 chunk_id 推断文件名
+                display_source = source_file
+                if not display_source and chunk_id:
+                    import re
+                    m = re.search(r'md_([^_]+(?:_[^_]+)*)_', chunk_id)
+                    if m:
+                        display_source = m.group(1) + ".pdf"
 
                 sources.append({
                     "chunk_id": chunk_id,
-                    "heading_path": heading_path,
+                    "heading_path": display_heading,
                     "page_number": str(page_number) if page_number not in (None, "", 0) else "",
-                    "source": source_file,
+                    "source": display_source,
                 })
 
             return sources
