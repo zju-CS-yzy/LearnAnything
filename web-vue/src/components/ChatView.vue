@@ -165,17 +165,29 @@ const quickHints = [
 
 // LA-IMG: 自定义 marked renderer，处理图片路径和大小
 // FIX-LA048: marked v12+ 中 renderer 方法接收对象参数 {href, title, text}
-// FIX-LA049: 使用 encodeURIComponent 编码路径（与 GraphNodeTooltip.getMediaUrl 一致）
+// FIX-LA049: 兼容 marked v11/v12 的 image 方法签名差异
 const mediaRenderer = new marked.Renderer()
-mediaRenderer.image = ({ href, title, text }) => {
+mediaRenderer.image = (href, title, text) => {
+  // 兼容 marked v11 和 v12：v12 传入 token 对象，v11 传入三个参数
+  if (typeof href === 'object' && href !== null) {
+    const token = href
+    href = token.href
+    title = token.title
+    text = token.text
+  }
+  // 确保 href 有效
+  if (!href) {
+    console.error('[ChatView] mediaRenderer.image: href is undefined')
+    return ''
+  }
   // 确保路径使用 /api/media/ 前缀
   let src = href
-  if (src && !src.startsWith('http') && !src.startsWith('/api/media/')) {
+  if (!src.startsWith('http') && !src.startsWith('/api/media/')) {
     src = `/api/media/${src}`
   }
   // FIX-LA049: 对路径进行 URL 编码（处理中文、空格等特殊字符）
   // 使用 encodeURI 而非 encodeURIComponent，保留路径中的 /
-  if (src && !src.startsWith('http')) {
+  if (!src.startsWith('http')) {
     const prefix = '/api/media/'
     if (src.startsWith(prefix)) {
       const pathPart = src.slice(prefix.length)
