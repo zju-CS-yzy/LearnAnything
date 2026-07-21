@@ -224,6 +224,16 @@ class Coordinator:
         total_duration_ms = (time.time() - start_time) * 1000
 
         # 阶段 1: 保存 Agent 回复
+        # LA-044: 将 sources 和 media 存入 metadata
+        agent_metadata = {"query_id": query_id}
+        if agent_result and isinstance(agent_result, dict):
+            if agent_result.get("metadata"):
+                meta = agent_result["metadata"]
+                if meta.get("sources"):
+                    agent_metadata["sources"] = meta["sources"]
+                if meta.get("media"):
+                    agent_metadata["media"] = meta["media"]
+        
         self._dialog_manager.save_message(
             session_id=sid,
             turn_number=turn_number,
@@ -231,7 +241,7 @@ class Coordinator:
             content=agent_result.get("text", ""),
             agent_name=agent.agent_name,
             intent=resolved_intent,
-            metadata={"query_id": query_id}
+            metadata=agent_metadata
         )
 
         # LA-044-B: 从 Agent 回答中提取话题并更新会话

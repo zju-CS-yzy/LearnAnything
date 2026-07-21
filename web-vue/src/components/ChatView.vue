@@ -321,7 +321,8 @@ async function loadSession(id) {
         text: m.content || '',
         agent: m.role === 'agent' ? (m.agent || 'TutorAgent') : '',
         time: m.time ? new Date(m.time).toLocaleTimeString() : new Date().toLocaleTimeString(),
-        sources: [],
+        sources: m.sources || [],
+        media: m.media || [],
       }))
       
       sessionId.value = id
@@ -372,6 +373,8 @@ async function createNewSession() {
       currentTopic.value = ''
       messages.value = []
       console.log('[ChatView] 新建会话:', data.session_id)
+      // LA-044: 通知 Sidebar 刷新会话列表
+      window.dispatchEvent(new CustomEvent('chat-session-created'))
     }
   } catch (e) {
     console.error('新建会话失败:', e)
