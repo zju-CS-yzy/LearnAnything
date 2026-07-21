@@ -1783,8 +1783,15 @@ def list_dialog_sessions(user_id: str):
 def create_dialog_session(request: DialogSessionCreate):
     """
     创建新对话会话。
+    创建前会暂停用户该学科的所有其他活跃会话，确保新会话独立。
     """
     try:
+        # LA-044-FIX: 先暂停用户同学科的其他活跃会话
+        _dialog_manager._suspend_user_subject_sessions(
+            user_id=request.user_id,
+            subject_id=request.subject_id,
+        )
+        
         session_id, session = _dialog_manager.get_or_create_session(
             user_id=request.user_id,
             subject_id=request.subject_id,
