@@ -20,6 +20,7 @@ import sys
 from pathlib import Path
 
 import re  # 用于 SSE 流式接口的文本切分
+import sqlite3  # LA-044: 对话上下文会话列表查询
 
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form, BackgroundTasks
 from fastapi.staticfiles import StaticFiles
