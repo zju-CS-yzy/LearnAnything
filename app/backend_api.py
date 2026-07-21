@@ -1756,7 +1756,7 @@ def list_dialog_sessions(user_id: str):
         cursor.execute("""
             SELECT session_id, subject_id, current_topic, turn_count, status, created_at, updated_at
             FROM dialog_sessions
-            WHERE user_id = ? AND status = 'active'
+            WHERE user_id = ? AND status IN ('active', 'suspended')
             ORDER BY updated_at DESC
         """, (user_id,))
         rows = cursor.fetchall()
@@ -1856,25 +1856,31 @@ def serve_media(path: str):
     
     # 解码 URL 编码
     decoded_path = unquote(path)
+    print(f"[API] LA-IMG: 媒体请求: raw='{path}', decoded='{decoded_path}'")
     
     # 替换 URL 正斜杠为系统路径分隔符
     normalized_path = decoded_path.replace('/', os.sep)
     
     # 构建完整路径
     full_path = KNOWLEDGE_BASE_DIR / normalized_path
+    print(f"[API] LA-IMG: 解析路径: {full_path}")
     
     # 安全检查：确保路径在知识库目录内（防止目录遍历攻击）
     try:
         full_path = full_path.resolve()
         kb_root = KNOWLEDGE_BASE_DIR.resolve()
         if not str(full_path).startswith(str(kb_root)):
+            print(f"[API] LA-IMG: 403 路径越界: {full_path}")
             raise HTTPException(status_code=403, detail="Forbidden: path outside knowledge base")
     except Exception:
+        print(f"[API] LA-IMG: 403 无效路径: {full_path}")
         raise HTTPException(status_code=403, detail="Forbidden: invalid path")
     
     if full_path.exists() and full_path.is_file():
+        print(f"[API] LA-IMG: 200 返回文件: {full_path}")
         return FileResponse(full_path)
     
+    print(f"[API] LA-IMG: 404 文件不存在: {full_path}")
     raise HTTPException(status_code=404, detail=f"File not found: {path}")
 
 

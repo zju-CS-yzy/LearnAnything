@@ -150,6 +150,7 @@ const quickHints = [
 
 // LA-IMG: 自定义 marked renderer，处理图片路径和大小
 // FIX-LA048: marked v12+ 中 renderer 方法接收对象参数 {href, title, text}
+// FIX-LA049: 使用 encodeURIComponent 编码路径（与 GraphNodeTooltip.getMediaUrl 一致）
 const mediaRenderer = new marked.Renderer()
 mediaRenderer.image = ({ href, title, text }) => {
   // 确保路径使用 /api/media/ 前缀
@@ -157,7 +158,16 @@ mediaRenderer.image = ({ href, title, text }) => {
   if (src && !src.startsWith('http') && !src.startsWith('/api/media/')) {
     src = `/api/media/${src}`
   }
-  return `<img src="${src}" alt="${text || ''}" title="${title || ''}" class="chat-inline-image" loading="lazy" />`
+  // 对路径进行 URL 编码（处理中文、空格等特殊字符）
+  if (src && !src.startsWith('http')) {
+    // 提取路径部分（去掉 /api/media/ 前缀）
+    const prefix = '/api/media/'
+    if (src.startsWith(prefix)) {
+      const pathPart = src.slice(prefix.length)
+      src = prefix + encodeURIComponent(pathPart)
+    }
+  }
+  return `<img src="${src}" alt="${text || ''}" title="${title || ''}" class="chat-inline-image" loading="lazy" onerror="this.style.display='none';this.parentNode.classList.add('img-error')" />`
 }
 
 function renderMarkdown(text) {
