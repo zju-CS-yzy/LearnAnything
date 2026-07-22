@@ -6,9 +6,14 @@
 /dist/                          # PyInstaller 打包产物 (142MB+)
 /web/dist/                      # Vite 前端构建产物
 
-# ---- 数据库 & 大文件 ----
+# ---- 数据 & 大文件 ----
 /knowledge_base/graph_db/       # KùzuDB 数据库文件 (37MB+)
 /knowledge_base/*.db
+/knowledge_base/*_images/       # 运行时提取的原始图片（自动重新生成）
+/knowledge_base/*_thumbnails/   # 运行时生成的缩略图（自动重新生成）
+/knowledge_base/*.jsonl         # 运行时概念详情数据
+/knowledge_base/*.json          # 运行时名称映射
+/knowledge_base/cache/          # BM25 缓存
 
 # ---- 依赖 ----
 /node_modules/                  # npm 依赖
@@ -33,6 +38,8 @@ __pycache__/
 *.log
 /tmp/
 /temp/
+/scripts/diagnose_*.py          # 临时诊断脚本
+/scripts/test_*.py              # 临时测试脚本
 
 # ---- 操作系统文件 ----
 .DS_Store
@@ -52,4 +59,3 @@ Thumbs.db
 
 /web-vue/node_modules/
 /web-vue/package-lock.json
-
