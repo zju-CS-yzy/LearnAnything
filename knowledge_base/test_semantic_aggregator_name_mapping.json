@@ -1,6 +1,0 @@
-{
-  "长距离依赖": "concept_canonical_4d96f2f284",
-  "rnn": "concept_canonical_07e3288e16",
-  "transformer": "concept_canonical_bbca27187a",
-  "自注意力机制": "concept_canonical_83e2d2f96a"
-}
