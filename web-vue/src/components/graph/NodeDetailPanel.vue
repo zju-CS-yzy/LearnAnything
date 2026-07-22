@@ -660,7 +660,9 @@ function relationLabel(relation) {
   background: #e0e0e0;
 }
 .link-solution { background: #e8f4f8; color: #2980b9; }
+.link-implements { background: #e8f4f8; color: #2980b9; }
 .link-depends_on { background: #ffe8e8; color: #c0392b; }
+.link-depend_on { background: #ffe8e8; color: #c0392b; }
 .link-derived_from { background: #f5e8ff; color: #8e44ad; }
 .link-has_concept { background: #e8fff5; color: #16a085; }
 .link-target { color: var(--text-secondary, #555); }

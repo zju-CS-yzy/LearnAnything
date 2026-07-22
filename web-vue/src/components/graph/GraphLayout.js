@@ -6,6 +6,19 @@
 // ========== 辅助函数 ==========
 
 /**
+ * LA-027 FIX: 关系类型 → 中文标签映射（支持新旧类型）
+ */
+function getRelationLabel(type) {
+  const labels = {
+    'SOLUTION': '解决',
+    'DEPENDS_ON': '依赖',
+    'IMPLEMENTS': '实现',
+    'DEPEND_ON': '依赖',
+  }
+  return labels[type] || type
+}
+
+/**
  * 从 chunk text 生成简洁的节点标题
  */
 export function generateNodeLabel(text, headingPath, fallback) {
@@ -375,7 +388,8 @@ export function runConceptLayout(cy) {
 
   const semanticEdges = cy.edges().filter(e => {
     const t = e.data('type')
-    return t === 'SOLUTION' || t === 'DEPENDS_ON'
+    // LA-027 FIX: 同时支持新旧关系类型（向后兼容）
+    return t === 'SOLUTION' || t === 'DEPENDS_ON' || t === 'IMPLEMENTS' || t === 'DEPEND_ON'
   })
 
   // 收集边：过滤自环边，但自环节点仍作为普通节点显示
@@ -409,7 +423,8 @@ export function runConceptLayout(cy) {
   })
   cy.edges().forEach(e => {
     const t = e.data('type')
-    if (t !== 'SOLUTION' && t !== 'DEPENDS_ON') {
+    // LA-027 FIX: 同时支持新旧关系类型（向后兼容）
+    if (t !== 'SOLUTION' && t !== 'DEPENDS_ON' && t !== 'IMPLEMENTS' && t !== 'DEPEND_ON') {
       e.style('display', 'none')
     }
   })
@@ -506,7 +521,8 @@ export function runConceptLayout(cy) {
             source: incoming[j].source,
             target: copyId,
             type: incoming[j].type,
-            label: incoming[j].type === 'SOLUTION' ? '解决' : '依赖',
+            // LA-027 FIX: 支持新旧关系类型的 label 映射
+            label: getRelationLabel(incoming[j].type),
             isCopyEdge: '1',
           }
         })
@@ -518,7 +534,8 @@ export function runConceptLayout(cy) {
   // P19-FIX-3: visibleEdges 也过滤自环，确保自环节点入度=0，成为根节点
   const visibleEdges = cy.edges().filter(e => {
     const t = e.data('type')
-    const isSemantic = t === 'SOLUTION' || t === 'DEPENDS_ON'
+    // LA-027 FIX: 同时支持新旧关系类型（向后兼容）
+    const isSemantic = t === 'SOLUTION' || t === 'DEPENDS_ON' || t === 'IMPLEMENTS' || t === 'DEPEND_ON'
     const isVisible = e.style('display') !== 'none'
     const isSelfLoop = e.source().id() === e.target().id()
     return isSemantic && isVisible && !isSelfLoop
