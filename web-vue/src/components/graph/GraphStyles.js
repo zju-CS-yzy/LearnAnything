@@ -81,8 +81,9 @@ export function buildCyStyles(paradigmConfig = null) {
       }
     },
     // ========== 概念节点样式（UML 类图卡片风格）==========
+    // LA-052: 排除 isVirtual=true 的虚拟节点
     {
-      selector: 'node[type="concept"], node[type="requirement"], node[type="sub_requirement"], node[type="technology"], node[type="sub_technology"], node[type="definition"], node[type="law"], node[type="application"], node[type="extension"]',
+      selector: 'node[type="concept"]:not([isVirtual = true]), node[type="requirement"]:not([isVirtual = true]), node[type="sub_requirement"]:not([isVirtual = true]), node[type="technology"]:not([isVirtual = true]), node[type="sub_technology"]:not([isVirtual = true]), node[type="definition"]:not([isVirtual = true]), node[type="law"]:not([isVirtual = true]), node[type="application"]:not([isVirtual = true]), node[type="extension"]:not([isVirtual = true])',
       style: {
         'label': 'data(cardLabel)',
         'text-wrap': 'wrap',
@@ -101,23 +102,23 @@ export function buildCyStyles(paradigmConfig = null) {
         'corner-radius': 10,
       }
     },
-    // 需求类型 — 背景色红色
+    // 需求类型 — 背景色红色（排除虚拟节点）
     {
-      selector: 'node[type="requirement"], node[type="sub_requirement"]',
+      selector: 'node[type="requirement"]:not([isVirtual = true]), node[type="sub_requirement"]:not([isVirtual = true])',
       style: {
         'background-color': '#e74c3c',
       }
     },
-    // 技术类型 — 背景色蓝色
+    // 技术类型 — 背景色蓝色（排除虚拟节点）
     {
-      selector: 'node[type="technology"], node[type="sub_technology"]',
+      selector: 'node[type="technology"]:not([isVirtual = true]), node[type="sub_technology"]:not([isVirtual = true])',
       style: {
         'background-color': '#3498db',
       }
     },
-    // 通用概念（含 Phase 2 提取的 definition/law/application/extension）— 背景色绿色
+    // 通用概念 — 背景色绿色（排除虚拟节点）
     {
-      selector: 'node[type="concept"], node[type="definition"], node[type="law"], node[type="application"], node[type="extension"]',
+      selector: 'node[type="concept"]:not([isVirtual = true]), node[type="definition"]:not([isVirtual = true]), node[type="law"]:not([isVirtual = true]), node[type="application"]:not([isVirtual = true]), node[type="extension"]:not([isVirtual = true])',
       style: {
         'background-color': '#2ecc71',
       }
