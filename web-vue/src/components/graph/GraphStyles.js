@@ -16,9 +16,10 @@ export const COLORS = {
 
 /**
  * 构建完整的 Cytoscape 样式数组
+ * @param {Object} paradigmConfig - 可选的范式配置（LA-052: 动态生成语义边样式）
  */
-export function buildCyStyles() {
-  return [
+export function buildCyStyles(paradigmConfig = null) {
+  const styles = [
     // ========== 基础节点样式（Chunk 节点）==========
     {
       selector: 'node',
@@ -295,7 +296,7 @@ export function buildCyStyles() {
         'arrow-scale': 0.8,
       }
     },
-    // ========== 虚拟节点样式（LA-046）==========
+    // ========== 虚拟节点样式（LA-046 / LA-052）==========
     {
       selector: 'node[isVirtual]',
       style: {
@@ -304,18 +305,18 @@ export function buildCyStyles() {
         'text-max-width': '80px',
         'text-valign': 'center',
         'text-halign': 'center',
-        'font-size': '10px',
+        'font-size': '9px',
         'color': '#E67E22',
         'text-outline-color': '#fff',
         'text-outline-width': 1,
-        'width': 'data(nodeWidth)',
-        'height': 'data(cardHeight)',
+        // LA-052 FIX: 固定为小圆形，不依赖 nodeWidth/cardHeight
+        'width': 24,
+        'height': 24,
         'border-width': 2,
         'border-style': 'dashed',
         'border-color': '#E67E22',
-        'background-color': 'rgba(230, 126, 34, 0.1)',
-        'shape': 'round-rectangle',
-        'corner-radius': 10,
+        'background-color': 'rgba(230, 126, 34, 0.15)',
+        'shape': 'ellipse',
       }
     },
     // ========== 副本样式 ==========
@@ -337,4 +338,31 @@ export function buildCyStyles() {
       }
     },
   ]
+
+  // LA-052: 如果提供了范式配置，动态生成语义边样式（覆盖硬编码）
+  if (paradigmConfig && paradigmConfig.styles) {
+    for (const [relType, styleCfg] of Object.entries(paradigmConfig.styles)) {
+      // 移除已有的同类型样式（如果有）
+      const existingIdx = styles.findIndex(s => 
+        s.selector === `edge[type="${relType}"]`
+      )
+      if (existingIdx >= 0) {
+        styles.splice(existingIdx, 1)
+      }
+      // 添加动态样式
+      styles.push({
+        selector: `edge[type="${relType}"]`,
+        style: {
+          'line-color': styleCfg.color || '#95a5a6',
+          'target-arrow-color': styleCfg.color || '#95a5a6',
+          'line-style': styleCfg.lineStyle || 'solid',
+          'width': styleCfg.width || 1.5,
+          'target-arrow-shape': 'triangle',
+          'arrow-scale': 0.8,
+        }
+      })
+    }
+  }
+
+  return styles
 }
