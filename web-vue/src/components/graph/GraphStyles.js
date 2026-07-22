@@ -57,6 +57,29 @@ export function buildCyStyles(paradigmConfig = null) {
         'border-color': COLORS.selected,
       }
     },
+    // ========== 虚拟节点样式（LA-046 / LA-052）==========
+    // 必须在概念节点样式之前定义，否则会被覆盖
+    {
+      selector: 'node[isVirtual = true]',
+      style: {
+        'label': 'data(label)',
+        'text-wrap': 'wrap',
+        'text-max-width': '80px',
+        'text-valign': 'center',
+        'text-halign': 'center',
+        'font-size': '9px',
+        'color': '#E67E22',
+        'text-outline-color': '#fff',
+        'text-outline-width': 1,
+        'width': 24,
+        'height': 24,
+        'border-width': 2,
+        'border-style': 'dashed',
+        'border-color': '#E67E22',
+        'background-color': 'rgba(230, 126, 34, 0.15)',
+        'shape': 'ellipse',
+      }
+    },
     // ========== 概念节点样式（UML 类图卡片风格）==========
     {
       selector: 'node[type="concept"], node[type="requirement"], node[type="sub_requirement"], node[type="technology"], node[type="sub_technology"], node[type="definition"], node[type="law"], node[type="application"], node[type="extension"]',
@@ -294,30 +317,6 @@ export function buildCyStyles(paradigmConfig = null) {
         'width': 1.5,
         'target-arrow-shape': 'triangle',
         'arrow-scale': 0.8,
-      }
-    },
-    // ========== 虚拟节点样式（LA-046 / LA-052）==========
-    // Cytoscape [isVirtual] 只要属性存在就匹配，必须指定值
-    {
-      selector: 'node[isVirtual = true]',
-      style: {
-        'label': 'data(label)',
-        'text-wrap': 'wrap',
-        'text-max-width': '80px',
-        'text-valign': 'center',
-        'text-halign': 'center',
-        'font-size': '9px',
-        'color': '#E67E22',
-        'text-outline-color': '#fff',
-        'text-outline-width': 1,
-        // LA-052 FIX: 固定为小圆形，不依赖 nodeWidth/cardHeight
-        'width': 24,
-        'height': 24,
-        'border-width': 2,
-        'border-style': 'dashed',
-        'border-color': '#E67E22',
-        'background-color': 'rgba(230, 126, 34, 0.15)',
-        'shape': 'ellipse',
       }
     },
     // ========== 副本样式 ==========
