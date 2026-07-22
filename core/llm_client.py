@@ -131,6 +131,15 @@ class LLMClient:
                     continue
                 last_exception = e
                 break
+            except (requests.exceptions.SSLError, requests.exceptions.ConnectionError) as e:
+                # LA-027 FIX: SSL/连接错误使用指数退避重试（网络不稳定时）
+                last_exception = e
+                if attempt < self.max_retries:
+                    wait = 3 ** attempt  # 3s, 9s, 27s 退避
+                    print(f"[LLMClient] SSL/连接错误，{wait}s 后重试 ({attempt+1}/{self.max_retries}): {e}")
+                    time.sleep(wait)
+                    continue
+                break
             except Exception as e:
                 last_exception = e
                 if attempt < self.max_retries:
