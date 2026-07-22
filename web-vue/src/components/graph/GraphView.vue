@@ -368,11 +368,8 @@ async function loadAllNodes() {
       }
       await loadConceptNodes()
       await loadSemanticEdges()
-      // LA-052: 应用动态样式（基于范式配置）
-      if (cy && paradigmConfig.value) {
-        cy.style().fromJson(buildCyStyles(paradigmConfig.value)).update()
-        console.log('[GraphView] LA-052: 动态样式已应用')
-      }
+      // LA-052: 不再使用 cy.style().fromJson() 完全替换样式（会破坏选择器优先级）
+      // 动态边样式在 buildCyStyles() 初始时已包含所有可能的关系类型
       if (cy.nodes().length > 0) {
         runConceptLayout(cy)
       }
@@ -673,6 +670,17 @@ async function loadConceptNodes() {
     })
     if (conceptNodes.length > 0 && cy) {
       cy.add(conceptNodes)
+      // LA-052 DEBUG: 检查添加的节点数据
+      console.log('[GraphView] loadConceptNodes: 添加了', conceptNodes.length, '个节点')
+      const sample = conceptNodes[0]
+      console.log('[GraphView] 第一个节点数据:', {
+        id: sample.data.id,
+        label: sample.data.label,
+        type: sample.data.type,
+        nodeWidth: sample.data.nodeWidth,
+        cardHeight: sample.data.cardHeight,
+        isVirtual: sample.data.isVirtual,
+      })
     }
   } catch (e) {
     console.error('[GraphView] 加载概念节点失败:', e)
