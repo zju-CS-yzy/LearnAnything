@@ -1192,9 +1192,14 @@ class SemanticLinker:
         esc = self.graph_store._escape_cypher_string
 
         for edge in edges:
+            # DEBUG: 检查虚拟节点相关的边
+            parent_id = edge['parent_id']
+            child_id = edge['child_id']
+            is_virtual_edge = '__virtual_' in parent_id or '__virtual_' in child_id
+            
             # 先确保两端节点存在（MERGE canonical 概念节点）
-            for node_id, node_name in [(edge['parent_id'], edge.get('parent_name', '')),
-                                        (edge['child_id'], edge.get('child_name', ''))]:
+            for node_id, node_name in [(parent_id, edge.get('parent_name', '')),
+                                        (child_id, edge.get('child_name', ''))]:
                 safe_id = esc(node_id)
                 safe_name = esc(node_name)
                 merge_node_cypher = f"""
@@ -1222,8 +1227,8 @@ class SemanticLinker:
                         print(f"[SemanticLinker] 创建节点失败 {node_id}: {e}")
 
             # 创建关系
-            safe_parent_id = esc(edge['parent_id'])
-            safe_child_id = esc(edge['child_id'])
+            safe_parent_id = esc(parent_id)
+            safe_child_id = esc(child_id)
             safe_relation = esc(edge['relation_type'])
             confidence = float(edge.get('confidence', 0.0))
             cypher = f"""
@@ -1234,8 +1239,13 @@ class SemanticLinker:
             try:
                 conn.execute(cypher)
                 written += 1
+                if is_virtual_edge:
+                    print(f"[SemanticLinker] 虚拟节点边写入: {parent_id[:30]} --{safe_relation}--> {child_id[:30]}")
             except Exception as e:
-                print(f"[SemanticLinker] 写入边失败: {e}")
+                if is_virtual_edge:
+                    print(f"[SemanticLinker] 虚拟节点边写入失败: {parent_id[:30]} --{safe_relation}--> {child_id[:30]}: {e}")
+                else:
+                    print(f"[SemanticLinker] 写入边失败: {e}")
 
         print(f"[SemanticLinker] 写入 {written} 条语义连接边")
         return written
