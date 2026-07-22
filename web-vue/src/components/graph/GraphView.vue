@@ -657,15 +657,27 @@ async function loadConceptNodes() {
           source_chunks: sourceChunks,
           source_chunk_count: sourceChunks.length,
           source_refs: sourceRefs,
-          // LA-035: 多媒体引用
           media_refs: mediaRefs,
           has_media: mediaRefs.length > 0,
           hasImage: hasImage,
           hasTable: hasTable,
           hasFormula: hasFormula,
-          // LA-046/LA-052: 只有虚拟节点才设置 isVirtual 属性
-          ...(c.is_virtual ? { isVirtual: true } : {}),
-        }
+        },
+        // LA-052 FIX: 虚拟节点直接设置 style，绕过 CSS 选择器
+        ...(c.is_virtual ? {
+          style: {
+            width: 24,
+            height: 24,
+            shape: 'ellipse',
+            'border-width': 2,
+            'border-style': 'dashed',
+            'border-color': '#E67E22',
+            'background-color': 'rgba(230, 126, 34, 0.15)',
+            'font-size': '9px',
+            color: '#E67E22',
+            label: c.name,
+          }
+        } : {})
       }
     })
     if (conceptNodes.length > 0 && cy) {
