@@ -666,8 +666,8 @@ async function loadConceptNodes() {
           hasImage: hasImage,
           hasTable: hasTable,
           hasFormula: hasFormula,
-          // LA-046/LA-052 FIX: 正确判断虚拟节点（处理字符串/数字/布尔值）
-          isVirtual: (c.is_virtual === true) || (c.is_virtual === 'true') || (c.is_virtual === 1),
+          // LA-046/LA-052: 只有虚拟节点才设置 isVirtual 属性
+          ...(c.is_virtual ? { isVirtual: true } : {}),
         }
       }
     })

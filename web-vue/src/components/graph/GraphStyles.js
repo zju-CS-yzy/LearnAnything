@@ -297,8 +297,9 @@ export function buildCyStyles(paradigmConfig = null) {
       }
     },
     // ========== 虚拟节点样式（LA-046 / LA-052）==========
+    // Cytoscape [isVirtual] 只要属性存在就匹配，必须指定值
     {
-      selector: 'node[isVirtual]',
+      selector: 'node[isVirtual = true]',
       style: {
         'label': 'data(label)',
         'text-wrap': 'wrap',
