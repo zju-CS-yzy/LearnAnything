@@ -1376,3 +1376,90 @@ unTreeLayout 中的逐树 dagre 逻辑
 ---
 
 *记录日期：2026-07-20*
+
+---
+
+## 2026-07-23 更新
+
+### 问题状态变更
+
+#### 已解决（标记为 ✅）
+
+- **LA-046**: Gap 检测 + 虚拟节点 → ✅ **已测试通过**（2026-07-23 00:30）
+  - 后端：`semantic_linker.py` `_process_gaps_and_virtual_nodes()` 检测同类型 gap → 创建虚拟节点
+  - 后端：4 处自环过滤（策略1-3、策略4、embedding+LLM、gap处理）
+  - 后端：`graph_store.py` `_ensure_paradigm_rel_tables()` 动态创建关系表
+  - 前端：虚拟节点在 `cy.add()` 时直接传入 `style` 属性（width:24, height:24, shape:ellipse, 虚线橙色边框）
+  - 前端：普通节点大卡片（圆角矩形），类型颜色填充（红=需求，蓝=技术）
+  - 验证：RAG 学科重建，310 条语义连接边 + 125 个虚拟节点
+
+- **LA-027**: YAML 范式模板配置 → ✅ **已测试通过**（2026-07-22）
+  - `semantic_linker.py` 优先从 `paradigms.yaml` 加载配置
+  - `_build_paradigm_config()` 从 YAML 推导 levels/transitions/relations
+  - `link_all()` 使用 YAML 配置替代硬编码 `PARADIGM_LEVELS`
+  - 解决关系名不匹配问题（SOLUTION/DEPENDS_ON → IMPLEMENTS/DEPEND_ON）
+
+- **LA-048**: TutorAgent Markdown 渲染 → ✅ **已测试通过**（2026-07-21）
+- **LA-049**: 图片媒体引用 → ✅ **已测试通过**（2026-07-22）
+- **LA-047**: 智能问答引用能力 → ✅ **已测试通过**（2026-07-21）
+
+#### 新增问题
+
+- **LA-052**: 范式配置动态获取
+  - **状态**: 🟡 **部分完成**
+  - **设计文档**: `docs/design-paradigm-dynamic-config.md`
+  - **已完成**:
+    - 后端 `/api/knowledge-graph/{subject}/paradigm` API
+    - YAML `styles` 字段（engineering 范式）
+    - 前端 `ParadigmConfig.js` 模块
+    - `GraphLayout.js` 使用 `isSemanticEdge()` 替代硬编码
+  - **待完成**:
+    - `GraphView.vue` 图例动态渲染
+    - `GraphStyles.js` 动态样式生成
+    - 学科切换时自动重新加载范式配置
+  - **优先级**: P1
+
+- **树深度不足**（待编号）
+  - **状态**: 🟡 **排查中**
+  - **问题**: 概念树最深只有 2 层（requirement ↔ technology），预期 3-5 层递归结构
+  - **可能原因**: 
+    1. 输入知识库 parent_hint 质量
+    2. SemanticLinker embedding+LLM 阶段过滤过多
+    3. 虚拟节点边写入后后续连接未正确建立
+  - **优先级**: P1
+
+### 遗留问题完整清单（截至 2026-07-23 00:40）
+
+#### 🔴 P0（阻塞/高优先级）
+| 编号 | 问题 | 状态 |
+|:---|:---|:---|
+| （无） | 当前无 P0 阻塞问题 | - |
+
+#### 🟡 P1（重要）
+| 编号 | 问题 | 状态 |
+|:---|:---|:---|
+| LA-052 | 范式配置动态获取 | 🟡 部分完成 |
+| LA-044-#2 | Agent 个性化 Prompt | 🔴 未开始 |
+| LA-044-#3 | UserStateStore 同步 | 🔴 未开始 |
+| 树深度 | 概念树深度不足（2层 vs 3-5层） | 🟡 排查中 |
+
+#### 🟢 P2（一般）
+| 编号 | 问题 | 状态 |
+|:---|:---|:---|
+| LA-051 | Git 双仓库架构（Dev + Release） | 🔴 未开始 |
+| LA-050 | VLM API 调用不稳定（HTTP 500/400） | 🔴 未开始 |
+| LA-040-P1-QUIZ | 多题型支持（前端联调） | 🟡 后端已实现 |
+| LA-040-P1-VIS | 评测结果可视化 | 🔴 未开始 |
+
+#### ✅ 已解决（近期）
+| 编号 | 问题 |
+|:---|:---|
+| LA-046 | Gap 检测 + 虚拟节点 |
+| LA-027 | YAML 范式配置 |
+| LA-048 | TutorAgent Markdown 渲染 |
+| LA-049 | 图片媒体引用 |
+| LA-047 | 智能问答引用能力 |
+
+---
+
+*记录日期：2026-07-23*
