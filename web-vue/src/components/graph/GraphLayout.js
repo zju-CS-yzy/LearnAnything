@@ -553,73 +553,69 @@ export function runConceptLayout(cy) {
 
   console.log(`[runConceptLayout] Total roots (trees): ${roots.length}, total concept nodes: ${allConceptIds.size}`)
 
-  // LA-052 FIX: 使用连通分量作为布局单位，避免"反向孤岛"导致的 leaked 节点
-  // 从每个连通分量的第一个根出发，使用无向 BFS 遍历整个分量
+  // 2c. 从每个根出发，收集可达子树
   const allTrees = []
-  const processedNodes = new Set()
 
-  components.forEach((compNodes, compIdx) => {
-    // 找到连通分量中的根（入度为0的节点）
-    const rootsInComp = []
-    compNodes.forEach(id => {
-      if (!finalInDegree[id] || finalInDegree[id] === 0) {
-        rootsInComp.push(id)
-      }
-    })
-    // 如果没有根（纯环），任选一个节点作为伪根
-    if (rootsInComp.length === 0 && compNodes.size > 0) {
-      rootsInComp.push(compNodes.values().next().value)
+  roots.forEach(rootId => {
+    const treeNodes = new Set()
+    const queue = [rootId]
+
+    while (queue.length > 0) {
+      const nid = queue.shift()
+      if (treeNodes.has(nid)) continue
+      treeNodes.add(nid)
+
+      visibleEdges.forEach(e => {
+        if (e.source().id() === nid && !treeNodes.has(e.target().id())) {
+          queue.push(e.target().id())
+        }
+      })
     }
 
-    if (rootsInComp.length > 0) {
-      const rootId = rootsInComp[0]
-      const treeNodes = new Set()
-      const queue = [rootId]
-      while (queue.length > 0) {
-        const nid = queue.shift()
-        if (treeNodes.has(nid)) continue
-        treeNodes.add(nid)
-        processedNodes.add(nid)
-        // LA-052 FIX: 无向遍历 — 同时走出边和入边，确保整个连通分量都被访问
-        visibleEdges.forEach(e => {
-          const src = e.source().id()
-          const tgt = e.target().id()
-          if (src === nid && !treeNodes.has(tgt) && compNodes.has(tgt)) queue.push(tgt)
-          if (tgt === nid && !treeNodes.has(src) && compNodes.has(src)) queue.push(src)
-        })
-      }
-      allTrees.push({ rootId, nodes: treeNodes, compIdx })
+    if (treeNodes.size > 0) {
+      allTrees.push({ rootId, nodes: treeNodes })
     }
   })
 
   console.log(`[runConceptLayout] Trees after split: ${allTrees.length}`)
 
-  // LA-052 FIX: 检查是否有遗漏的节点（理论上不应再有）
+  // P19-FIX-3: 处理漏掉的节点（不在任何树中的连通节点，通常是环状结构）
+  const nodesInTrees = new Set()
+  allTrees.forEach(tree => {
+    tree.nodes.forEach(id => nodesInTrees.add(id))
+  })
   const leakedIds = []
   allConceptIds.forEach(id => {
-    if (!processedNodes.has(id)) leakedIds.push(id)
+    if (!nodesInTrees.has(id)) leakedIds.push(id)
   })
   if (leakedIds.length > 0) {
-    console.warn(`[runConceptLayout] ${leakedIds.length} leaked nodes (unexpected):`, leakedIds)
-    // 将遗漏的节点附加到最近的树
-    leakedIds.forEach(id => {
-      const parents = []
-      visibleEdges.forEach(e => {
-        if (e.target().id() === id) parents.push(e.source().id())
-      })
-      let attached = false
-      if (parents.length > 0) {
-        allTrees.forEach(tree => {
-          if (!attached && tree.nodes.has(parents[0])) {
-            tree.nodes.add(id)
-            attached = true
-          }
+    console.warn(`[runConceptLayout] ${leakedIds.length} leaked nodes not in any tree:`, leakedIds)
+    // 按连通分量将漏掉的节点分组，每组创建一个伪树
+    const leakedVisited = new Set()
+    leakedIds.forEach(startId => {
+      if (leakedVisited.has(startId)) return
+      const comp = new Set()
+      const stack = [startId]
+      while (stack.length > 0) {
+        const nid = stack.pop()
+        if (comp.has(nid)) continue
+        comp.add(nid)
+        leakedVisited.add(nid)
+        // 遍历可见边，找同分量的节点
+        visibleEdges.forEach(e => {
+          const src = e.source().id()
+          const tgt = e.target().id()
+          if (src === nid && !comp.has(tgt) && leakedIds.includes(tgt)) stack.push(tgt)
+          if (tgt === nid && !comp.has(src) && leakedIds.includes(src)) stack.push(src)
         })
       }
-      if (!attached) {
-        allTrees.push({ rootId: id, nodes: new Set([id]), isPseudo: true })
+      if (comp.size > 0) {
+        // 用第一个节点作为伪根
+        const pseudoRoot = comp.values().next().value
+        allTrees.push({ rootId: pseudoRoot, nodes: comp, isPseudo: true })
       }
     })
+    console.log(`[runConceptLayout] Added ${allTrees.length - (allTrees.length - leakedIds.length)} pseudo-trees for leaked nodes`)
   }
 
   // 2d. 每棵树独立跑 dagre LR
