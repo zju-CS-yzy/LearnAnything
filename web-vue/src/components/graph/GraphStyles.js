@@ -1,6 +1,8 @@
 /**
  * GraphStyles.js — Cytoscape.js 样式配置
  * 集中管理所有节点/边样式，便于统一调整
+ * LA-052 FIX: 移除所有无效的 isVirtual CSS 选择器（Cytoscape 不支持属性值匹配）
+ * 虚拟节点样式通过 ele.style() 在 GraphView.vue 中动态设置（优先级最高）
  */
 
 export const COLORS = {
@@ -57,34 +59,11 @@ export function buildCyStyles(paradigmConfig = null) {
         'border-color': COLORS.selected,
       }
     },
-    // ========== 虚拟节点样式（LA-046 / LA-052）==========
-    // 必须在概念节点样式之前定义，否则会被覆盖
-    {
-      selector: 'node[isVirtual = true]',
-      style: {
-        'label': 'data(label)',
-        'text-wrap': 'wrap',
-        'text-max-width': '80px',
-        'text-valign': 'center',
-        'text-halign': 'center',
-        'font-size': '9px',
-        'color': '#E67E22',
-        'text-outline-color': '#fff',
-        'text-outline-width': 1,
-        'width': 24,
-        'height': 24,
-        'border-width': 2,
-        'border-style': 'dashed',
-        'border-color': '#E67E22',
-        'background-color': 'rgba(230, 126, 34, 0.15)',
-        'shape': 'ellipse',
-      }
-    },
     // ========== 概念节点样式（UML 类图卡片风格）==========
-    // LA-052: 排除 isVirtual=true 的虚拟节点
-    // 拆分为独立选择器，避免 Cytoscape 复合选择器解析问题
+    // LA-052: 虚拟节点的样式通过 ele.style() 在 GraphView.vue 中设置（优先级高于 CSS）
+    // 此处不再使用 :not([isVirtual = true])（Cytoscape 不支持该语法）
     {
-      selector: 'node[type="concept"]:not([isVirtual = true])',
+      selector: 'node[type="concept"], node[type="requirement"], node[type="sub_requirement"], node[type="technology"], node[type="sub_technology"], node[type="definition"], node[type="law"], node[type="application"], node[type="extension"]',
       style: {
         'label': 'data(cardLabel)',
         'text-wrap': 'wrap',
@@ -103,313 +82,50 @@ export function buildCyStyles(paradigmConfig = null) {
         'corner-radius': 10,
       }
     },
+    // 需求类型 — 背景色红色
     {
-      selector: 'node[type="requirement"]:not([isVirtual = true])',
-      style: {
-        'label': 'data(cardLabel)',
-        'text-wrap': 'wrap',
-        'text-max-width': 'data(nodeWidth)',
-        'text-valign': 'center',
-        'text-halign': 'center',
-        'font-size': '11px',
-        'color': '#fff',
-        'text-outline-color': 'rgba(0,0,0,0.5)',
-        'text-outline-width': 1,
-        'width': 'data(nodeWidth)',
-        'height': 'data(cardHeight)',
-        'border-width': 3,
-        'border-color': 'data(borderColor)',
-        'shape': 'round-rectangle',
-        'corner-radius': 10,
-      }
-    },
-    {
-      selector: 'node[type="sub_requirement"]:not([isVirtual = true])',
-      style: {
-        'label': 'data(cardLabel)',
-        'text-wrap': 'wrap',
-        'text-max-width': 'data(nodeWidth)',
-        'text-valign': 'center',
-        'text-halign': 'center',
-        'font-size': '11px',
-        'color': '#fff',
-        'text-outline-color': 'rgba(0,0,0,0.5)',
-        'text-outline-width': 1,
-        'width': 'data(nodeWidth)',
-        'height': 'data(cardHeight)',
-        'border-width': 3,
-        'border-color': 'data(borderColor)',
-        'shape': 'round-rectangle',
-        'corner-radius': 10,
-      }
-    },
-    {
-      selector: 'node[type="technology"]:not([isVirtual = true])',
-      style: {
-        'label': 'data(cardLabel)',
-        'text-wrap': 'wrap',
-        'text-max-width': 'data(nodeWidth)',
-        'text-valign': 'center',
-        'text-halign': 'center',
-        'font-size': '11px',
-        'color': '#fff',
-        'text-outline-color': 'rgba(0,0,0,0.5)',
-        'text-outline-width': 1,
-        'width': 'data(nodeWidth)',
-        'height': 'data(cardHeight)',
-        'border-width': 3,
-        'border-color': 'data(borderColor)',
-        'shape': 'round-rectangle',
-        'corner-radius': 10,
-      }
-    },
-    {
-      selector: 'node[type="sub_technology"]:not([isVirtual = true])',
-      style: {
-        'label': 'data(cardLabel)',
-        'text-wrap': 'wrap',
-        'text-max-width': 'data(nodeWidth)',
-        'text-valign': 'center',
-        'text-halign': 'center',
-        'font-size': '11px',
-        'color': '#fff',
-        'text-outline-color': 'rgba(0,0,0,0.5)',
-        'text-outline-width': 1,
-        'width': 'data(nodeWidth)',
-        'height': 'data(cardHeight)',
-        'border-width': 3,
-        'border-color': 'data(borderColor)',
-        'shape': 'round-rectangle',
-        'corner-radius': 10,
-      }
-    },
-    {
-      selector: 'node[type="definition"]:not([isVirtual = true])',
-      style: {
-        'label': 'data(cardLabel)',
-        'text-wrap': 'wrap',
-        'text-max-width': 'data(nodeWidth)',
-        'text-valign': 'center',
-        'text-halign': 'center',
-        'font-size': '11px',
-        'color': '#fff',
-        'text-outline-color': 'rgba(0,0,0,0.5)',
-        'text-outline-width': 1,
-        'width': 'data(nodeWidth)',
-        'height': 'data(cardHeight)',
-        'border-width': 3,
-        'border-color': 'data(borderColor)',
-        'shape': 'round-rectangle',
-        'corner-radius': 10,
-      }
-    },
-    {
-      selector: 'node[type="law"]:not([isVirtual = true])',
-      style: {
-        'label': 'data(cardLabel)',
-        'text-wrap': 'wrap',
-        'text-max-width': 'data(nodeWidth)',
-        'text-valign': 'center',
-        'text-halign': 'center',
-        'font-size': '11px',
-        'color': '#fff',
-        'text-outline-color': 'rgba(0,0,0,0.5)',
-        'text-outline-width': 1,
-        'width': 'data(nodeWidth)',
-        'height': 'data(cardHeight)',
-        'border-width': 3,
-        'border-color': 'data(borderColor)',
-        'shape': 'round-rectangle',
-        'corner-radius': 10,
-      }
-    },
-    {
-      selector: 'node[type="application"]:not([isVirtual = true])',
-      style: {
-        'label': 'data(cardLabel)',
-        'text-wrap': 'wrap',
-        'text-max-width': 'data(nodeWidth)',
-        'text-valign': 'center',
-        'text-halign': 'center',
-        'font-size': '11px',
-        'color': '#fff',
-        'text-outline-color': 'rgba(0,0,0,0.5)',
-        'text-outline-width': 1,
-        'width': 'data(nodeWidth)',
-        'height': 'data(cardHeight)',
-        'border-width': 3,
-        'border-color': 'data(borderColor)',
-        'shape': 'round-rectangle',
-        'corner-radius': 10,
-      }
-    },
-    {
-      selector: 'node[type="extension"]:not([isVirtual = true])',
-      style: {
-        'label': 'data(cardLabel)',
-        'text-wrap': 'wrap',
-        'text-max-width': 'data(nodeWidth)',
-        'text-valign': 'center',
-        'text-halign': 'center',
-        'font-size': '11px',
-        'color': '#fff',
-        'text-outline-color': 'rgba(0,0,0,0.5)',
-        'text-outline-width': 1,
-        'width': 'data(nodeWidth)',
-        'height': 'data(cardHeight)',
-        'border-width': 3,
-        'border-color': 'data(borderColor)',
-        'shape': 'round-rectangle',
-        'corner-radius': 10,
-      }
-    },
-    // 需求类型 — 背景色红色（排除虚拟节点）
-    {
-      selector: 'node[type="requirement"]:not([isVirtual = true]), node[type="sub_requirement"]:not([isVirtual = true])',
+      selector: 'node[type="requirement"], node[type="sub_requirement"]',
       style: {
         'background-color': '#e74c3c',
       }
     },
-    // 技术类型 — 背景色蓝色（排除虚拟节点）
+    // 技术类型 — 背景色蓝色
     {
-      selector: 'node[type="technology"]:not([isVirtual = true]), node[type="sub_technology"]:not([isVirtual = true])',
+      selector: 'node[type="technology"], node[type="sub_technology"]',
       style: {
         'background-color': '#3498db',
       }
     },
-    // 通用概念 — 背景色绿色（排除虚拟节点）
+    // 通用概念 — 背景色绿色
     {
-      selector: 'node[type="concept"]:not([isVirtual = true]), node[type="definition"]:not([isVirtual = true]), node[type="law"]:not([isVirtual = true]), node[type="application"]:not([isVirtual = true]), node[type="extension"]:not([isVirtual = true])',
+      selector: 'node[type="concept"], node[type="definition"], node[type="law"], node[type="application"], node[type="extension"]',
       style: {
         'background-color': '#2ecc71',
       }
     },
-    // ========== 文档树节点卡片风格（P34）==========
-    // 通用卡片样式（heading/paragraph/document/child/markdown）
+    // ========== chunk-level 边样式（概念-段落归属）==========
     {
-      selector: 'node[chunkType="heading"], node[chunkType="paragraph"], node[chunkType="document"], node[chunkType="child"], node[chunkType="markdown"]',
+      selector: 'edge[type="HAS_CONCEPT"]',
       style: {
-        'label': 'data(cardLabel)',
-        'text-wrap': 'wrap',
-        'text-max-width': 'data(nodeWidth)',
-        'text-valign': 'center',
-        'text-halign': 'center',
-        'font-size': '10px',
-        'color': '#fff',
-        'text-outline-color': 'rgba(0,0,0,0.5)',
-        'text-outline-width': 1,
-        'width': 'data(nodeWidth)',
-        'height': 'data(cardHeight)',
-        'border-width': 2,
-        'shape': 'round-rectangle',
-        'corner-radius': 8,
-      }
-    },
-    // Heading 节点 — 红色
-    {
-      selector: 'node[chunkType="heading"]',
-      style: {
-        'background-color': '#e74c3c',
-        'border-color': '#c0392b',
-      }
-    },
-    // Paragraph 节点 — 蓝色
-    {
-      selector: 'node[chunkType="paragraph"]',
-      style: {
-        'background-color': '#3498db',
-        'border-color': '#2980b9',
-      }
-    },
-    // Document 节点 — 绿色
-    {
-      selector: 'node[chunkType="document"]',
-      style: {
-        'background-color': '#27ae60',
-        'border-color': '#1e8449',
-      }
-    },
-    // 其他 chunk 节点 — 灰色
-    {
-      selector: 'node[chunkType="child"], node[chunkType="markdown"]',
-      style: {
-        'background-color': '#7f8c8d',
-        'border-color': '#616a6b',
-      }
-    },
-    // ========== 图片节点样式（P41: 背景图预览）==========
-    {
-      selector: 'node[chunkType="image"], node[chunkType="image_pseudo"]',
-      style: {
-        'label': '',
-        'background-image': 'data(bgImage)',
-        'background-fit': 'cover',
-        'background-color': '#f39c12',
-        'width': 80,
-        'height': 80,
-        'border-width': 2,
-        'border-color': '#e67e22',
-        'shape': 'round-rectangle',
-        'corner-radius': 6,
-      }
-    },
-    // 图片节点加载失败时的回退样式（bgImage 为 'none' 时显示 📷）
-    {
-      selector: 'node[chunkType="image"][bgImage = "none"], node[chunkType="image_pseudo"][bgImage = "none"]',
-      style: {
-        'label': '📷',
-        'font-size': '24px',
-        'text-valign': 'center',
-        'text-halign': 'center',
-        'color': '#fff',
-        'width': 40,
-        'height': 40,
-      }
-    },
-    // 图片节点高亮
-    {
-      selector: 'node[chunkType="image"]:selected, node[chunkType="image_pseudo"]:selected',
-      style: {
-        'border-width': 4,
-        'border-color': COLORS.selected,
-      }
-    },
-    // 使用角度值精确固定在节点边界：
-    // - 0deg = 12点钟方向（上中）
-    // - 90deg = 3点钟方向（右中）← 源端点
-    // - 180deg = 6点钟方向（下中）
-    // - 270deg = 9点钟方向（左中）← 目标端点
-    {
-      selector: 'edge',
-      style: {
-        'curve-style': 'unbundled-bezier',
-        'source-endpoint': '90deg',
-        'target-endpoint': '270deg',
-      }
-    },
-    // BELONGS_TO: 文档树结构边
-    {
-      selector: 'edge[type="BELONGS_TO"]',
-      style: {
+        'width': 1,
         'line-color': COLORS.belongs_to,
-        'target-arrow-color': COLORS.belongs_to,
-        'line-style': 'solid',
         'target-arrow-shape': 'triangle',
-        'arrow-scale': 0.8,
+        'target-arrow-color': COLORS.belongs_to,
+        'curve-style': 'bezier',
+        'arrow-scale': 0.7,
       }
     },
-    // ADJACENT_TO: 相邻 chunk 边
+    // ========== 相邻关系（段落-段落）==========
     {
       selector: 'edge[type="ADJACENT_TO"]',
       style: {
+        'width': 1,
         'line-color': COLORS.adjacent_to,
-        'target-arrow-color': COLORS.adjacent_to,
         'line-style': 'dashed',
-        'target-arrow-shape': 'triangle',
-        'arrow-scale': 0.8,
+        'curve-style': 'bezier',
       }
     },
-    // SOLUTION: 概念层"解决"关系
+    // ========== SOLUTION: 概念层"解决"关系（上层→下层）==========
     {
       selector: 'edge[type="SOLUTION"]',
       style: {
@@ -421,7 +137,7 @@ export function buildCyStyles(paradigmConfig = null) {
         'arrow-scale': 0.8,
       }
     },
-    // DEPENDS_ON: 概念层"依赖"关系
+    // ========== DEPENDS_ON: 概念层"依赖"关系（旧名，有S）==========
     {
       selector: 'edge[type="DEPENDS_ON"]',
       style: {
@@ -433,7 +149,7 @@ export function buildCyStyles(paradigmConfig = null) {
         'arrow-scale': 0.8,
       }
     },
-    // LA-027 FIX: IMPLEMENTS（新类型，同 SOLUTION 样式）
+    // ========== IMPLEMENTS: 概念层"实现"关系（新名，YAML v2.0）==========
     {
       selector: 'edge[type="IMPLEMENTS"]',
       style: {
@@ -445,7 +161,7 @@ export function buildCyStyles(paradigmConfig = null) {
         'arrow-scale': 0.8,
       }
     },
-    // LA-027 FIX: DEPEND_ON（新类型，同 DEPENDS_ON 样式）
+    // ========== DEPEND_ON: 概念层"依赖"关系（新名，YAML v2.0，无S）==========
     {
       selector: 'edge[type="DEPEND_ON"]',
       style: {
@@ -457,40 +173,107 @@ export function buildCyStyles(paradigmConfig = null) {
         'arrow-scale': 0.8,
       }
     },
-    // DERIVED_FROM: ExtractedConcept → CanonicalConcept
+    // ========== DERIVED_FROM: ExtractedConcept → CanonicalConcept ==========
     {
       selector: 'edge[type="DERIVED_FROM"]',
       style: {
-        'line-color': '#9b59b6',
-        'target-arrow-color': '#9b59b6',
-        'line-style': 'dotted',
+        'width': 1.5,
+        'line-color': '#8e44ad',
+        'line-style': 'dashed',
+        'target-arrow-shape': 'triangle',
+        'target-arrow-color': '#8e44ad',
+        'curve-style': 'bezier',
+        'arrow-scale': 0.8,
+      }
+    },
+    // ========== 高亮状态（搜索高亮 / hover）==========
+    {
+      selector: '.highlighted',
+      style: {
+        'border-width': 3,
+        'border-color': COLORS.highlight,
+      }
+    },
+    {
+      selector: '.highlighted-edge',
+      style: {
+        'line-color': COLORS.highlight,
+        'target-arrow-color': COLORS.highlight,
+        'width': 2.5,
+      }
+    },
+    // ========== 其他语义边类型（通用兜底）==========
+    {
+      selector: 'edge[type="DEFINES"]',
+      style: {
+        'line-color': '#8e44ad',
+        'target-arrow-color': '#8e44ad',
         'width': 1.5,
         'target-arrow-shape': 'triangle',
         'arrow-scale': 0.8,
       }
     },
-    // HAS_CONCEPT: Chunk → ExtractedConcept
     {
-      selector: 'edge[type="HAS_CONCEPT"]',
+      selector: 'edge[type="REQUIRES"]',
       style: {
-        'line-color': '#1abc9c',
-        'target-arrow-color': '#1abc9c',
-        'line-style': 'solid',
+        'line-color': '#c0392b',
+        'target-arrow-color': '#c0392b',
+        'width': 1.5,
+        'target-arrow-shape': 'triangle',
+        'arrow-scale': 0.8,
+      }
+    },
+    {
+      selector: 'edge[type="HAS_LAW"]',
+      style: {
+        'line-color': '#16a085',
+        'target-arrow-color': '#16a085',
+        'width': 1.5,
+        'target-arrow-shape': 'triangle',
+        'arrow-scale': 0.8,
+      }
+    },
+    {
+      selector: 'edge[type="APPLIES_TO"]',
+      style: {
+        'line-color': '#d35400',
+        'target-arrow-color': '#d35400',
+        'width': 1.5,
+        'target-arrow-shape': 'triangle',
+        'arrow-scale': 0.8,
+      }
+    },
+    {
+      selector: 'edge[type="EXTENDS"]',
+      style: {
+        'line-color': '#2980b9',
+        'target-arrow-color': '#2980b9',
+        'width': 1.5,
+        'target-arrow-shape': 'triangle',
+        'arrow-scale': 0.8,
+      }
+    },
+    {
+      selector: 'edge[type="HAS_SUB"]',
+      style: {
+        'line-color': '#27ae60',
+        'target-arrow-color': '#27ae60',
+        'width': 1.5,
+        'target-arrow-shape': 'triangle',
+        'arrow-scale': 0.8,
+      }
+    },
+    {
+      selector: 'edge[type="HAS_IMPL"]',
+      style: {
+        'line-color': '#f39c12',
+        'target-arrow-color': '#f39c12',
         'width': 1.5,
         'target-arrow-shape': 'triangle',
         'arrow-scale': 0.8,
       }
     },
     // ========== 副本样式 ==========
-    {
-      selector: 'node[isCopy = 1]',
-      style: {
-        'border-style': 'dashed',
-        'border-width': 2,
-        'border-color': '#f39c12',
-        'opacity': 0.9,
-      }
-    },
     {
       selector: 'edge[isCopyEdge = 1]',
       style: {
