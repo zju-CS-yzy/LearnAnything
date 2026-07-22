@@ -7,13 +7,32 @@
 /web/dist/                      # Vite 前端构建产物
 
 # ---- 数据 & 大文件 ----
-/knowledge_base/graph_db/       # KùzuDB 数据库文件 (37MB+)
-/knowledge_base/*.db
-/knowledge_base/*_images/       # 运行时提取的原始图片（自动重新生成）
-/knowledge_base/*_thumbnails/   # 运行时生成的缩略图（自动重新生成）
-/knowledge_base/*.jsonl         # 运行时概念详情数据
-/knowledge_base/*.json          # 运行时名称映射
-/knowledge_base/cache/          # BM25 缓存
+/knowledge_base/                # 运行时生成的全部数据（数据库/图片/缓存/CSV）
+!/knowledge_base/.gitkeep       # 保留空目录占位
+
+# ---- 个人工作记录 ----
+/memory/                        # 每日工作日志（个人记录，不适合公开）
+
+# ---- 密钥 & 敏感文件 ----
+API.txt                         # API 密钥文档
+*.key
+*.pem
+.env
+
+# ---- 日志 & 临时文件 ----
+*.log
+rebuild_log.txt
+/tmp/
+/temp/
+
+# ---- 测试数据库 & 临时数据 ----
+subjects.db
+test_kuzu
+test_kuzu_v2
+
+# ---- 临时上传脚本 ----
+upload_pdfs.py
+upload_texts.py
 
 # ---- 依赖 ----
 /node_modules/                  # npm 依赖
@@ -34,13 +53,6 @@ __pycache__/
 *.swo
 *~
 
-# ---- 日志 & 临时文件 ----
-*.log
-/tmp/
-/temp/
-/scripts/diagnose_*.py          # 临时诊断脚本
-/scripts/test_*.py              # 临时测试脚本
-
 # ---- 操作系统文件 ----
 .DS_Store
 Thumbs.db
@@ -48,14 +60,19 @@ Thumbs.db
 # ============================================
 # 以下目录应纳入版本控制（核心代码）
 # ============================================
+# /docs/           - 设计文档
+# /tests/          - 测试用例
+# /scripts/        - 有用的构建/部署脚本（非临时诊断脚本）
 # /web-vue/src/    - 前端源码
 # /app/            - 后端 API
-# /core/           - 核心算法（语义分析、图构建）
+# /core/           - 核心算法
 # /config/         - 配置文件
 # /prompts/        - LLM 提示词模板
-# /tests/          - 测试用例
-# /knowledge_base/*.csv  - 概念数据（去重后的小文件）
 # ============================================
+
+# ---- 临时诊断脚本（保留在本地，不提交）----
+/scripts/diagnose_*.py
+/scripts/test_*.py
 
 /web-vue/node_modules/
 /web-vue/package-lock.json
