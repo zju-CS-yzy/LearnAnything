@@ -167,6 +167,17 @@ paradigms:
       IMPLEMENTS: "实现了"
       DEPEND_ON: "依赖于"
 
+    # 关系可视化样式（前端动态渲染使用）
+    styles:
+      IMPLEMENTS:
+        color: "#e67e22"
+        lineStyle: "solid"
+        width: 2
+      DEPEND_ON:
+        color: "#9b59b6"
+        lineStyle: "dashed"
+        width: 1.5
+
     # 关系作用域映射（parent_type → {relation: [child_types]}）
     #
     # 本范式的图谱结构是一个有向无环图（DAG），不是严格的树。

@@ -1622,6 +1622,95 @@ def list_concept_links(subject: str, limit: int = 500):
         raise HTTPException(status_code=500, detail=f"获取语义连接边失败: {str(e)}")
 
 
+@app.get("/api/knowledge-graph/{subject}/paradigm")
+def get_paradigm_config(subject: str):
+    """
+    LA-052: 获取指定学科的范式配置（供前端动态渲染使用）。
+    """
+    try:
+        # 从学科配置读取范式ID
+        paradigm_id = _get_subject_paradigm(subject)
+        
+        # 从 YAML 加载范式配置
+        from core.semantic_linker import _PARADIGMS_YAML
+        config = _PARADIGMS_YAML.get(paradigm_id)
+        
+        if not config:
+            raise HTTPException(
+                status_code=404,
+                detail=f"范式配置未找到: paradigm={paradigm_id}, subject={subject}"
+            )
+        
+        # 组装响应（增加 styles 和 types 等前端所需字段）
+        relations = config.get("relations", {})
+        styles = config.get("styles", {})
+        
+        # 为没有 styles 的关系类型补充默认样式
+        default_palette = ["#e67e22", "#9b59b6", "#3498db", "#27ae60", "#e74c3c", "#f39c12"]
+        for i, rel_type in enumerate(relations.keys()):
+            if rel_type not in styles:
+                styles[rel_type] = {
+                    "color": default_palette[i % len(default_palette)],
+                    "lineStyle": "solid" if i % 2 == 0 else "dashed",
+                    "width": 2 if i % 2 == 0 else 1.5,
+                }
+        
+        return {
+            "paradigm_id": paradigm_id,
+            "name": config.get("name", paradigm_id),
+            "description": config.get("description", ""),
+            "levels": list(config.get("types", {}).keys()),
+            "types": config.get("types", {}),
+            "relations": relations,
+            "relation_map": config.get("relation_map", {}),
+            "cyclic": config.get("cyclic", False),
+            "cycle_pattern": config.get("cycle_pattern", []),
+            "styles": styles,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"获取范式配置失败: {str(e)}")
+
+
+def _get_subject_paradigm(subject: str) -> str:
+    """
+    获取学科使用的范式ID。
+    优先从学科配置文件读取，fallback 到默认范式。
+    """
+    import json
+    from config.settings import PROJECT_ROOT
+    
+    # 尝试读取学科配置
+    subject_config_path = PROJECT_ROOT / "config" / "subjects" / f"{subject}.json"
+    if subject_config_path.exists():
+        try:
+            with open(subject_config_path, "r", encoding="utf-8") as f:
+                cfg = json.load(f)
+                paradigm = cfg.get("paradigm")
+                if paradigm:
+                    return paradigm
+        except Exception:
+            pass
+    
+    # Fallback: 从已构建的图谱元数据推断
+    meta_path = PROJECT_ROOT / "knowledge_base" / f"{subject}_build_meta.json"
+    if meta_path.exists():
+        try:
+            with open(meta_path, "r", encoding="utf-8") as f:
+                meta = json.load(f)
+                paradigm = meta.get("paradigm")
+                if paradigm:
+                    return paradigm
+        except Exception:
+            pass
+    
+    # 默认 fallback
+    return "engineering"
+
+
 # ========== 批量语义提取 + 去重 ==========
 
 @app.post("/api/knowledge-graph/{subject}/build/semantic")

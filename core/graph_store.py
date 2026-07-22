@@ -1697,7 +1697,7 @@ class GraphStore:
             try:
                 result = self._execute(conn, f"""
                     MATCH (c:CanonicalConcept)
-                    RETURN c.canonical_id, c.name, c.concept_type, c.description, c.parent_hint, c.source_chunks, c.media_refs
+                    RETURN c.canonical_id, c.name, c.concept_type, c.description, c.parent_hint, c.source_chunks, c.media_refs, c.is_virtual
                     LIMIT {limit}
                 """)
                 while result.has_next():
@@ -1722,7 +1722,12 @@ class GraphStore:
                         "parent_hint": row[4],
                         "source_chunks": row[5],
                         "media_refs": media_refs,
-                        "is_virtual": False,
+                        # LA-052 FIX: 正确读取 is_virtual（支持 BOOL/STRING/INT）
+                        "is_virtual": (
+                            (isinstance(row[7], bool) and row[7]) or
+                            (isinstance(row[7], str) and row[7].lower() in ('true', '1')) or
+                            (isinstance(row[7], int) and row[7] == 1)
+                        ) if row[7] is not None else False,
                     })
             except Exception as schema_e:
                 if "media_refs" in str(schema_e):

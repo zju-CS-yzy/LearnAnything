@@ -78,13 +78,10 @@
             <span class="legend-line" style="border-color: #95a5a6; border-style: dashed;"></span>
             <span>相邻关系</span>
           </div>
-          <div class="legend-item">
-            <span class="legend-line" style="border-color: #e67e22;"></span>
-            <span>实现 (IMPLEMENTS)</span>
-          </div>
-          <div class="legend-item">
-            <span class="legend-line" style="border-color: #9b59b6; border-style: dotted;"></span>
-            <span>依赖 (DEPEND_ON)</span>
+          <!-- LA-052: 动态渲染范式关系图例 -->
+          <div v-for="(label, type) in paradigmConfig?.relations || {}" :key="type" class="legend-item">
+            <span class="legend-line" :style="getLegendLineStyle(type)"></span>
+            <span>{{ label }} ({{ type }})</span>
           </div>
         </div>
       </div>
@@ -166,21 +163,11 @@ import cola from 'cytoscape-cola'
 import dagre from 'cytoscape-dagre'
 import { buildCyStyles } from './GraphStyles.js'
 import { runTreeLayout, runConceptLayout, generateNodeLabel, buildUMLCardLabel } from './GraphLayout.js'
+import { loadParadigmConfig, getRelationLabel, getRelationStyle, clearConfigCache } from './ParadigmConfig.js'
 import NodeDetailPanel from './NodeDetailPanel.vue'
 import BuildOptions from './BuildOptions.vue'
 import ConceptTable from './ConceptTable.vue'
 import GraphNodeTooltip from './GraphNodeTooltip.vue'
-
-// LA-027 FIX: 关系类型 → 中文标签映射（支持新旧类型）
-function getEdgeLabel(type) {
-  const labels = {
-    'SOLUTION': '解决',
-    'DEPENDS_ON': '依赖',
-    'IMPLEMENTS': '实现',
-    'DEPEND_ON': '依赖',
-  }
-  return labels[type] || type
-}
 
 cytoscape.use(cola)
 cytoscape.use(dagre)
@@ -228,7 +215,18 @@ const selectedParadigm = ref('theory')
 const selectedConcept = ref(null)
 const showConceptModal = ref(false)
 
-// LA-035-P10: 悬浮预览卡片状态
+// LA-052: 范式配置（动态获取）
+const paradigmConfig = ref(null)
+
+// 图例行样式辅助函数
+function getLegendLineStyle(relType) {
+  const style = getRelationStyle(relType)
+  if (!style) return {}
+  return {
+    borderColor: style.color,
+    borderStyle: style.lineStyle === 'dashed' ? 'dotted' : style.lineStyle || 'solid',
+  }
+}
 const tooltipVisible = ref(false)
 const tooltipNode = ref(null)
 const tooltipPosition = ref({ x: 0, y: 0 })
@@ -360,8 +358,21 @@ async function loadAllNodes() {
       }
     } else {
       // LA-035-P19: 知识图谱视图 - 只加载 CanonicalConcept + 语义边
+      // LA-052: 先加载范式配置，用于动态渲染边样式和图例
+      try {
+        paradigmConfig.value = await loadParadigmConfig(currentSubject.value)
+        console.log('[GraphView] LA-052: 范式配置加载完成:', paradigmConfig.value?.paradigm_id)
+      } catch (e) {
+        console.warn('[GraphView] LA-052: 范式配置加载失败，使用 fallback:', e)
+        paradigmConfig.value = null
+      }
       await loadConceptNodes()
       await loadSemanticEdges()
+      // LA-052: 应用动态样式（基于范式配置）
+      if (cy && paradigmConfig.value) {
+        cy.style().fromJson(buildCyStyles(paradigmConfig.value)).update()
+        console.log('[GraphView] LA-052: 动态样式已应用')
+      }
       if (cy.nodes().length > 0) {
         runConceptLayout(cy)
       }
@@ -579,17 +590,32 @@ async function loadConceptNodes() {
         }
       }
 
-      // LA-035-P10: 解析 media_refs，计算内容类型和边框颜色
-      const mediaRefs = c.media_refs || []
+      // LA-052 FIX: 正确解析 media_refs，防止字符串遍历导致颜色错乱
+      let mediaRefs = c.media_refs || []
+      // 防御：media_refs 可能是 JSON 字符串
+      if (typeof mediaRefs === 'string') {
+        try {
+          const parsed = JSON.parse(mediaRefs)
+          mediaRefs = Array.isArray(parsed) ? parsed : []
+        } catch {
+          mediaRefs = []
+        }
+      }
+      if (!Array.isArray(mediaRefs)) {
+        mediaRefs = []
+      }
+
       let hasImage = false
       let hasTable = false
       let hasFormula = false
       mediaRefs.forEach(ref => {
-        const t = (ref.type || ref.media_type || '').toLowerCase()
+        // 防御：ref 可能是字符串
+        if (typeof ref === 'string') return
+        const t = (ref?.type || ref?.media_type || '').toLowerCase()
         if (t.includes('image') || t.includes('图片') || t.includes('fig')) hasImage = true
         else if (t.includes('table') || t.includes('表格') || t.includes('tab')) hasTable = true
         else if (t.includes('formula') || t.includes('公式') || t.includes('math') || t.includes('equation')) hasFormula = true
-        else hasImage = true // 默认归类为图片
+        // 移除默认归类为图片的 else 分支
       })
 
       // 根据媒体类型确定边框颜色
@@ -640,8 +666,8 @@ async function loadConceptNodes() {
           hasImage: hasImage,
           hasTable: hasTable,
           hasFormula: hasFormula,
-          // LA-046: 虚拟节点标记
-          isVirtual: c.is_virtual || false,
+          // LA-046/LA-052 FIX: 正确判断虚拟节点（处理字符串/数字/布尔值）
+          isVirtual: (c.is_virtual === true) || (c.is_virtual === 'true') || (c.is_virtual === 1),
         }
       }
     })
@@ -668,7 +694,7 @@ async function loadSemanticEdges() {
         source: edge.source,
         target: edge.target,
         type: edge.type,
-        label: getEdgeLabel(edge.type),
+        label: getRelationLabel(edge.type),
         confidence: edge.confidence || 0,
       }
     }))
@@ -1019,6 +1045,9 @@ onUnmounted(() => {
 })
 
 watch(currentSubject, () => {
+  // LA-052: 切换学科时清除范式配置缓存
+  clearConfigCache()
+  paradigmConfig.value = null
   if (cy) {
     cy.elements().remove()
     loadAllNodes()
