@@ -657,6 +657,10 @@ export function runConceptLayout(cy) {
     } else {
       // 重置位置并跑 dagre
       layoutCollection.nodes().forEach(n => n.position({ x: 0, y: 0 }))
+      
+      // DEBUG: 记录 dagre 前状态
+      console.log(`[runConceptLayout] Tree ${idx}: dagre 前节点数=${layoutCollection.nodes().length}, 边数=${layoutCollection.edges().length}`)
+      
       layoutCollection.layout({
         name: 'dagre',
         rankDir: 'LR',
@@ -667,16 +671,30 @@ export function runConceptLayout(cy) {
         fit: false,
         animate: false,
       }).run()
-
-      // P19-FIX: dagre fallback — 如果所有节点仍在原点（dagre 失败，可能有环），使用简单网格
+      
+      // DEBUG: 记录 dagre 后位置范围
       const dagreNodes = layoutCollection.nodes()
+      let dMinX = Infinity, dMaxX = -Infinity, dMinY = Infinity, dMaxY = -Infinity
+      dagreNodes.forEach(n => {
+        dMinX = Math.min(dMinX, n.position('x'))
+        dMaxX = Math.max(dMaxX, n.position('x'))
+        dMinY = Math.min(dMinY, n.position('y'))
+        dMaxY = Math.max(dMaxY, n.position('y'))
+      })
+      const dagreRangeX = dMaxX - dMinX
+      const dagreRangeY = dMaxY - dMinY
+      console.log(`[runConceptLayout] Tree ${idx}: dagre 后范围 x=[${dMinX.toFixed(0)}, ${dMaxX.toFixed(0)}](w=${dagreRangeX.toFixed(0)}), y=[${dMinY.toFixed(0)}, ${dMaxY.toFixed(0)}](h=${dagreRangeY.toFixed(0)})`)
+
+      // P19-FIX: dagre fallback — 如果所有节点仍在原点或范围极小（dagre 失败），使用简单网格
       const allAtOrigin = dagreNodes.length > 0 && dagreNodes.every(n => {
         const x = n.position('x')
         const y = n.position('y')
         return Math.abs(x) < 1 && Math.abs(y) < 1
       })
-      if (allAtOrigin && dagreNodes.length > 1) {
-        console.warn(`[runConceptLayout] Tree ${idx} dagre failed (all at origin), using fallback grid`)
+      // LA-052 FIX: 新增检查 — dagre 布局范围极小（<50px）也认为失败
+      const dagreTooSmall = dagreRangeX < 50 && dagreRangeY < 50 && dagreNodes.length > 1
+      if ((allAtOrigin || dagreTooSmall) && dagreNodes.length > 1) {
+        console.warn(`[runConceptLayout] Tree ${idx} dagre failed (allAtOrigin=${allAtOrigin}, tooSmall=${dagreTooSmall}), using fallback grid`)
         const fCols = Math.max(1, Math.ceil(Math.sqrt(dagreNodes.length)))
         const fGapX = 200
         const fGapY = 120
