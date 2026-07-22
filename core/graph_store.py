@@ -14,15 +14,17 @@ import threading
 
 from pathlib import Path
 
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Set
 
 
 
 import kuzu
 
+import yaml
 
 
-from config.settings import GRAPH_DB_DIR, PROJECT_ROOT
+
+from config.settings import GRAPH_DB_DIR, PROJECT_ROOT, KNOWLEDGE_BASE_DIR
 
 
 
@@ -314,6 +316,9 @@ class GraphStore:
 
         print(f"[GraphStore] Schema created for {self.collection_name}")
 
+        # LA-027 FIX: 从 paradigms.yaml 动态创建范式定义的关系表
+        self._ensure_paradigm_rel_tables(conn)
+
     def _check_schema_version(self, conn):
         """
         LA-035: 检查 schema 版本，尝试自动升级旧版本。
@@ -377,6 +382,52 @@ class GraphStore:
                 print(f"[GraphStore] 旧版本 Chunk schema 检测到：{self.collection_name}")
 
 
+
+        # LA-027 FIX: 旧数据库也升级范式关系表
+        self._ensure_paradigm_rel_tables(conn)
+
+    def _ensure_paradigm_rel_tables(self, conn):
+        """
+        LA-027 FIX: 从 paradigms.yaml 读取所有范式定义的关系类型，
+        为缺失的关系表执行 CREATE REL TABLE。
+        已存在的表会被忽略（KùzuDB CREATE IF NOT EXISTS 语义）。
+        """
+        try:
+            yaml_path = KNOWLEDGE_BASE_DIR.parent / "config" / "paradigms.yaml"
+            if not yaml_path.exists():
+                return
+            with open(yaml_path, "r", encoding="utf-8") as f:
+                data = yaml.safe_load(f)
+            paradigms = data.get("paradigms", {})
+
+            # 收集所有范式中定义的关系类型
+            rel_types: Set[str] = set()
+            for p in paradigms.values():
+                rels = p.get("relations", {})
+                rel_types.update(rels.keys())
+
+            if not rel_types:
+                return
+
+            created = 0
+            for rel_type in rel_types:
+                # 尝试创建关系表，已存在则忽略错误
+                ddl = f"""CREATE REL TABLE {rel_type} (
+                    FROM CanonicalConcept TO CanonicalConcept,
+                    confidence DOUBLE,
+                    MANY_MANY
+                )"""
+                try:
+                    self._execute(conn, ddl)
+                    created += 1
+                except Exception:
+                    # 表已存在或其他错误，忽略
+                    pass
+
+            if created > 0:
+                print(f"[GraphStore] 创建 {created} 个范式关系表: {', '.join(sorted(rel_types))}")
+        except Exception as e:
+            print(f"[GraphStore] 动态创建范式关系表失败: {e}")
 
     def _escape_cypher_string(self, text: str) -> str:
 
