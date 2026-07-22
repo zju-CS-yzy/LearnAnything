@@ -682,6 +682,22 @@ async function loadConceptNodes() {
     })
     if (conceptNodes.length > 0 && cy) {
       cy.add(conceptNodes)
+      // LA-052 FIX: 使用 ele.style() 设置虚拟节点样式（优先级高于 CSS 选择器）
+      cy.nodes().forEach(n => {
+        if (n.data('isVirtual') === true) {
+          n.style({
+            'width': 24,
+            'height': 24,
+            'shape': 'ellipse',
+            'border-width': 2,
+            'border-style': 'dashed',
+            'border-color': '#E67E22',
+            'background-color': 'rgba(230, 126, 34, 0.15)',
+            'font-size': '9px',
+            'color': '#E67E22',
+          })
+        }
+      })
       // LA-052 DEBUG: 检查添加的节点数据
       console.log('[GraphView] loadConceptNodes: 添加了', conceptNodes.length, '个节点')
       const sample = conceptNodes[0]
