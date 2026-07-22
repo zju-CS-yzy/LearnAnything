@@ -80,11 +80,11 @@
           </div>
           <div class="legend-item">
             <span class="legend-line" style="border-color: #e67e22;"></span>
-            <span>解决 (SOLUTION)</span>
+            <span>实现 (IMPLEMENTS)</span>
           </div>
           <div class="legend-item">
             <span class="legend-line" style="border-color: #9b59b6; border-style: dotted;"></span>
-            <span>依赖 (DEPENDS_ON)</span>
+            <span>依赖 (DEPEND_ON)</span>
           </div>
         </div>
       </div>
@@ -170,6 +170,17 @@ import NodeDetailPanel from './NodeDetailPanel.vue'
 import BuildOptions from './BuildOptions.vue'
 import ConceptTable from './ConceptTable.vue'
 import GraphNodeTooltip from './GraphNodeTooltip.vue'
+
+// LA-027 FIX: 关系类型 → 中文标签映射（支持新旧类型）
+function getEdgeLabel(type) {
+  const labels = {
+    'SOLUTION': '解决',
+    'DEPENDS_ON': '依赖',
+    'IMPLEMENTS': '实现',
+    'DEPEND_ON': '依赖',
+  }
+  return labels[type] || type
+}
 
 cytoscape.use(cola)
 cytoscape.use(dagre)
@@ -657,7 +668,7 @@ async function loadSemanticEdges() {
         source: edge.source,
         target: edge.target,
         type: edge.type,
-        label: edge.type === 'SOLUTION' ? '解决' : '依赖',
+        label: getEdgeLabel(edge.type),
         confidence: edge.confidence || 0,
       }
     }))

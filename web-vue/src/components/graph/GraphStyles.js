@@ -247,6 +247,30 @@ export function buildCyStyles() {
         'arrow-scale': 0.8,
       }
     },
+    // LA-027 FIX: IMPLEMENTS（新类型，同 SOLUTION 样式）
+    {
+      selector: 'edge[type="IMPLEMENTS"]',
+      style: {
+        'line-color': COLORS.solution,
+        'target-arrow-color': COLORS.solution,
+        'line-style': 'solid',
+        'width': 2,
+        'target-arrow-shape': 'triangle',
+        'arrow-scale': 0.8,
+      }
+    },
+    // LA-027 FIX: DEPEND_ON（新类型，同 DEPENDS_ON 样式）
+    {
+      selector: 'edge[type="DEPEND_ON"]',
+      style: {
+        'line-color': COLORS.depends_on,
+        'target-arrow-color': COLORS.depends_on,
+        'line-style': 'dashed',
+        'width': 1.5,
+        'target-arrow-shape': 'triangle',
+        'arrow-scale': 0.8,
+      }
+    },
     // DERIVED_FROM: ExtractedConcept → CanonicalConcept
     {
       selector: 'edge[type="DERIVED_FROM"]',
