@@ -472,6 +472,10 @@ class SemanticLinker:
                             match_reason = f"全局映射: '{hint}' -> '{matched_parent['name']}'"
 
                 if matched_parent:
+                    # 跳过自环
+                    if matched_parent["id"] == child["id"]:
+                        continue
+                    
                     # 如果匹配到的 parent 类型和期望的 upper_type 不同，调整关系类型
                     actual_relation = relation_type
                     if matched_parent.get("type") != upper_type:
@@ -526,6 +530,10 @@ class SemanticLinker:
                             matched_parent = type_id_map[canonical_id]
 
                     if matched_parent:
+                        # 跳过自环
+                        if matched_parent["id"] == child["id"]:
+                            continue
+                        
                         # LA-027 FIX: 从 YAML 推导同类型连接的关系类型（替代硬编码 DEPEND_ON）
                         # 对于循环范式，同类型连接使用 concept_type -> cycle_pattern[next] 的关系
                         cycle_pattern = paradigm_config.get("cycle_pattern", [])
@@ -632,6 +640,11 @@ class SemanticLinker:
         for edge in edges:
             parent_id = edge["parent_id"]
             child_id = edge["child_id"]
+            
+            # 跳过自环边（不应产生虚拟节点）
+            if parent_id == child_id:
+                continue
+            
             relation_type = edge["relation_type"]
 
             # 查询类型
@@ -856,6 +869,10 @@ class SemanticLinker:
 
             # 阶段3: LLM 二次确认
             for parent, child, sim in candidate_pairs:
+                # 跳过自环
+                if parent["id"] == child["id"]:
+                    continue
+                
                 pair_key = (parent["id"], child["id"])
                 if pair_key in existing_pairs:
                     continue
