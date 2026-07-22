@@ -105,29 +105,86 @@ def _is_valid_relation(
     return target_type in allowed_targets
 
 
-# ========== 范式层级配置（向后兼容） ==========
+def _build_paradigm_config(paradigm_id: str) -> Optional[Dict[str, Any]]:
+    """
+    从 paradigms.yaml 构建 SemanticLinker 内部使用的范式配置。
+    优先使用 YAML 配置，YAML 不存在时 fallback 到 PARADIGM_LEVELS 硬编码。
+    
+    Returns:
+        {
+            "levels": [...],
+            "transitions": {(source_type, target_type): relation_type, ...},
+            "relation_map": {...},
+            "relations": {...},
+            "cyclic": bool,
+            "gap_rules": {...},
+            "fallback": {...},
+        }
+    """
+    p = _PARADIGMS_YAML.get(paradigm_id)
+    if not p:
+        # Fallback 到硬编码（向后兼容）
+        hardcoded = PARADIGM_LEVELS.get(paradigm_id)
+        if not hardcoded:
+            return None
+        return {
+            "levels": hardcoded["levels"],
+            "transitions": hardcoded["transitions"],
+            "relation_map": None,
+            "relations": {},
+            "cyclic": False,
+            "gap_rules": {},
+            "fallback": {},
+        }
+    
+    # 从 YAML 的 relation_map 推导 transitions
+    # transitions 格式: {(source_type, target_type): relation_type}
+    levels = list(p.get("types", {}).keys())
+    transitions = {}
+    for source_type, rel_map in p.get("relation_map", {}).items():
+        for relation_type, target_types in rel_map.items():
+            for target_type in target_types:
+                transitions[(source_type, target_type)] = relation_type
+    
+    return {
+        "levels": levels,
+        "transitions": transitions,
+        "relation_map": p.get("relation_map"),
+        "relations": p.get("relations", {}),
+        "cyclic": p.get("cyclic", False),
+        "gap_rules": p.get("gap_rules", {}),
+        "fallback": p.get("fallback", {}),
+    }
 
+
+# ========== 范式层级配置（向后兼容 — 优先使用 paradigms.yaml）==========
+
+# 向后兼容配置 — 注意：关系类型名称必须与 paradigms.yaml 中的 relations 完全一致
 PARADIGM_LEVELS = {
     "engineering": {
-        "levels": ["requirement", "technology", "sub_requirement", "sub_technology"],
-        # 层级间允许的连接规则：(上层类型, 下层类型) -> 边类型
+        "levels": ["requirement", "technology"],
+        # 层级间允许的连接规则：(parent_type, child_type) -> relation_type
+        # 必须与 paradigms.yaml 中 engineering.relations 的 key 一致
         "transitions": {
-            ("requirement", "technology"): "SOLUTION",
-            ("technology", "sub_requirement"): "DEPENDS_ON",
-            ("sub_requirement", "sub_technology"): "SOLUTION",
+            ("requirement", "technology"): "IMPLEMENTS",
+            ("technology", "requirement"): "DEPEND_ON",
         },
     },
     "theory": {
         "levels": ["definition", "law", "application", "extension"],
         "transitions": {
-            ("definition", "law"): "DEPENDS_ON",      # 规律依赖于定义
-            ("law", "application"): "SOLUTION",       # 应用实现/验证规律
-            ("application", "extension"): "SOLUTION",  # 扩展基于应用
+            ("definition", "law"): "HAS_LAW",
+            ("law", "application"): "APPLIES_TO",
+            ("application", "extension"): "EXTENDS",
         },
     },
     "hierarchical": {
         "levels": ["fact", "concept", "method", "evaluation"],
-        "transitions": {},  # 暂不支持层级归纳的全局连接
+        "transitions": {
+            ("fact", "concept"): "DEFINES_AS",
+            ("concept", "method"): "USES",
+            ("method", "evaluation"): "EVALUATES",
+        },
     },
 }
 
@@ -210,7 +267,8 @@ class SemanticLinker:
         Returns:
             {"edges_created": int, "by_stage": {...}, "paradigm": str}
         """
-        config = PARADIGM_LEVELS.get(paradigm)
+        # LA-027 FIX: 优先从 paradigms.yaml 加载配置，替代硬编码 PARADIGM_LEVELS
+        config = _build_paradigm_config(paradigm)
         if not config:
             raise ValueError(f"不支持的范式: {paradigm}")
 
@@ -223,7 +281,7 @@ class SemanticLinker:
         level_groups = self._group_by_level(concepts, config["levels"])
 
         # 3. 阶段1: parent_hint 精确匹配
-        edges_stage1 = self._stage1_parent_hint_match(level_groups, config)
+        edges_stage1 = self._stage1_parent_hint_match(level_groups, config, paradigm)
 
         # 4. 阶段2+3: embedding 初筛 + LLM 确认（排除已有连接的节点对）
         # LA-035 Phase 3: 同时排除已建立 HAS_DETAIL 关系的概念对
@@ -235,10 +293,26 @@ class SemanticLinker:
             level_groups, config, existing_pairs
         )
 
-        # 5. 合并并校验 relation_map
+        # 5. LA-046: Gap 检测 + 虚拟节点创建（移到 relation_map 校验之前）
+        # 策略: 先让同类型连接通过 gap 检测生成虚拟节点，再用 relation_map 校验替换后的合法边
+        paradigm_config = _PARADIGMS_YAML.get(paradigm, {})
+        fallback_config = paradigm_config.get("fallback", {})
+        
         all_edges = edges_stage1 + edges_stage23
         
-        # LA-027 FIX: 使用 paradigms.yaml 的 relation_map 校验连接合法性
+        virtual_nodes_created = 0
+        gap_edges_detected = 0
+        if fallback_config.get("create_virtual_nodes", False):
+            all_edges, gap_info = self._process_gaps_and_virtual_nodes(
+                all_edges, paradigm_config, paradigm
+            )
+            virtual_nodes_created = gap_info.get("virtual_nodes", 0)
+            gap_edges_detected = gap_info.get("gap_edges", 0)
+            if gap_edges_detected > 0:
+                print(f"[SemanticLinker] LA-046: 检测到 {gap_edges_detected} 条 gap 边，创建 {virtual_nodes_created} 个虚拟节点")
+        
+        # 6. LA-027 FIX: 使用 paradigms.yaml 的 relation_map 校验连接合法性
+        # 在 gap 检测之后执行，确保虚拟节点产生的合法边不被误杀
         relation_map = _build_relation_validator(paradigm)
         if relation_map:
             valid_edges = []
@@ -269,21 +343,6 @@ class SemanticLinker:
                     print(f"  ... 还有 {len(rejected) - 5} 条")
             
             all_edges = valid_edges
-        
-        # 6. LA-046: Gap 检测 + 虚拟节点创建
-        paradigm_config = _PARADIGMS_YAML.get(paradigm, {})
-        fallback_config = paradigm_config.get("fallback", {})
-        
-        virtual_nodes_created = 0
-        gap_edges_detected = 0
-        if fallback_config.get("create_virtual_nodes", False):
-            all_edges, gap_info = self._process_gaps_and_virtual_nodes(
-                all_edges, paradigm_config
-            )
-            virtual_nodes_created = gap_info.get("virtual_nodes", 0)
-            gap_edges_detected = gap_info.get("gap_edges", 0)
-            if gap_edges_detected > 0:
-                print(f"[SemanticLinker] LA-046: 检测到 {gap_edges_detected} 条 gap 边，创建 {virtual_nodes_created} 个虚拟节点")
         
         # 7. 写入数据库
         self._write_edges(all_edges)
@@ -330,6 +389,7 @@ class SemanticLinker:
         self,
         level_groups: Dict[str, List[Dict]],
         config: Dict,
+        paradigm: str = "engineering",
     ) -> List[Dict[str, Any]]:
         """
         基于提取时记录的 parent_hint 进行精确匹配。
@@ -337,6 +397,7 @@ class SemanticLinker:
         1. parent_hint 与 immediate upper level 的 canonical name 精确匹配
         2. parent_hint 通过名称映射表查找 canonical ID，再匹配 immediate upper level
         3. parent_hint 在所有层级中搜索（处理 LLM 层级判断不准确的情况）
+        4. 【循环范式】同类型 parent_hint（如 technology->technology），用于 gap 检测
         """
         edges = []
         transitions = config["transitions"]
@@ -431,19 +492,90 @@ class SemanticLinker:
                     })
                     existing_pairs.add(pair_key)
 
+        # 策略4: 【循环范式】同类型 parent_hint（如 technology->technology）
+        # 这些连接会被 gap 检测识别为同类型 gap，自动创建虚拟 requirement 节点
+        paradigm_config = _PARADIGMS_YAML.get(paradigm, {})
+        if paradigm_config.get("cyclic") and paradigm_config.get("gap_rules", {}).get("detect_by_same_type", False):
+            for concept_type in level_groups:
+                nodes = level_groups.get(concept_type, [])
+                if len(nodes) < 2:
+                    continue
+                # 建立本类型的名称映射
+                type_map = {}
+                type_id_map = {}
+                for n in nodes:
+                    type_map[n["name"].strip().lower()] = n
+                    type_id_map[n["id"]] = n
+                    for alias in n.get("aliases", []):
+                        if alias:
+                            type_map[alias.strip().lower()] = n
+
+                for child in nodes:
+                    hint = child.get("parent_hint", "").strip()
+                    if not hint:
+                        continue
+                    hint_lower = hint.lower()
+                    pair_key = (hint_lower, child["id"])
+                    if pair_key in existing_pairs:
+                        continue
+
+                    matched_parent = type_map.get(hint_lower)
+                    if not matched_parent and name_mapping:
+                        canonical_id = name_mapping.get(hint_lower)
+                        if canonical_id and canonical_id in type_id_map:
+                            matched_parent = type_id_map[canonical_id]
+
+                    if matched_parent:
+                        # LA-027 FIX: 从 YAML 推导同类型连接的关系类型（替代硬编码 DEPEND_ON）
+                        # 对于循环范式，同类型连接使用 concept_type -> cycle_pattern[next] 的关系
+                        cycle_pattern = paradigm_config.get("cycle_pattern", [])
+                        same_type_relation = "DEPEND_ON"  # fallback
+                        if len(cycle_pattern) >= 2:
+                            try:
+                                idx = cycle_pattern.index(concept_type)
+                                next_type = cycle_pattern[(idx + 1) % len(cycle_pattern)]
+                                same_type_relation = self._determine_cross_level_relation(
+                                    concept_type, next_type, paradigm
+                                )
+                            except ValueError:
+                                pass
+                        
+                        edges.append({
+                            "parent_id": matched_parent["id"],
+                            "parent_name": matched_parent["name"],
+                            "child_id": child["id"],
+                            "child_name": child["name"],
+                            "relation_type": same_type_relation,
+                            "confidence": 1.0,
+                            "reason": f"同类型parent_hint: '{hint}' -> '{matched_parent['name']}' ({concept_type})",
+                            "stage": "parent_hint_same_type",
+                        })
+                        existing_pairs.add(pair_key)
+
         return edges
 
-    def _determine_cross_level_relation(self, parent_type: str, child_type: str) -> str:
+    def _determine_cross_level_relation(
+        self, parent_type: str, child_type: str, paradigm: str = ""
+    ) -> str:
         """
         根据实际类型确定跨层级连接的关系类型。
+        优先从 paradigms.yaml 的 relation_map 推导，fallback 到硬编码规则。
         """
-        # requirement -> anything = SOLUTION
-        if parent_type in ["requirement", "sub_requirement"]:
-            return "SOLUTION"
-        # technology -> anything = DEPENDS_ON (技术依赖于下层需求)
-        if parent_type in ["technology", "sub_technology"]:
-            return "DEPENDS_ON"
-        return "SOLUTION"
+        # 优先从 YAML relation_map 查询
+        if paradigm:
+            p = _PARADIGMS_YAML.get(paradigm, {})
+            relation_map = p.get("relation_map", {})
+            source_map = relation_map.get(parent_type, {})
+            for relation_type, targets in source_map.items():
+                if child_type in targets:
+                    return relation_type
+        
+        # Fallback 硬编码规则（向后兼容）
+        if parent_type == "requirement" and child_type == "technology":
+            return "IMPLEMENTS"
+        if parent_type == "technology" and child_type == "requirement":
+            return "DEPEND_ON"
+        return "DEPEND_ON"
 
     # ========== LA-046: Gap 检测与虚拟节点 ==========
 
@@ -479,9 +611,13 @@ class SemanticLinker:
         self,
         edges: List[Dict[str, Any]],
         paradigm_config: dict,
+        paradigm: str = "",
     ) -> Tuple[List[Dict[str, Any]], Dict[str, int]]:
         """
         LA-046: 遍历所有边，检测 gap，创建虚拟节点替换 gap 边。
+
+        Args:
+            paradigm: 范式ID，用于从 YAML 推导关系类型
 
         Returns:
             (new_edges, {"gap_edges": int, "virtual_nodes": int})
@@ -533,7 +669,7 @@ class SemanticLinker:
 
                 # 推断两条正常边
                 # edge1: parent -> virtual（使用正常关系）
-                rel1 = self._determine_cross_level_relation(parent_type, missing_type)
+                rel1 = self._determine_cross_level_relation(parent_type, missing_type, paradigm)
                 new_edges.append({
                     "parent_id": parent_id,
                     "parent_name": edge.get("parent_name", ""),
@@ -545,7 +681,7 @@ class SemanticLinker:
                 })
 
                 # edge2: virtual -> child（使用正常关系）
-                rel2 = self._determine_cross_level_relation(missing_type, child_type)
+                rel2 = self._determine_cross_level_relation(missing_type, child_type, paradigm)
                 new_edges.append({
                     "parent_id": virtual_id,
                     "parent_name": virtual_nodes[-1]["name"],
@@ -693,10 +829,12 @@ class SemanticLinker:
             if not parents or not children:
                 continue
 
-            relation_meaning = {
-                "SOLUTION": "子概念是父概念的解决方案/实现手段",
-                "DEPENDS_ON": "父概念的实现依赖于子概念所描述的需求/约束",
-            }.get(relation_type, "上层概念与下层概念存在语义关联")
+            # LA-027 FIX: 从 config.relations 动态获取关系含义，替代硬编码字典
+            relations_dict = config.get("relations", {})
+            relation_meaning = relations_dict.get(
+                relation_type,
+                "上层概念与下层概念存在语义关联"
+            )
 
             # 阶段2: embedding 初筛
             candidate_pairs = []

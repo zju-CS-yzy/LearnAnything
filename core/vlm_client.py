@@ -111,7 +111,7 @@ class VLMClient:
         }
 
         try:
-            resp = requests.post(url, headers=headers, json=payload, timeout=120)
+            resp = requests.post(url, headers=headers, json=payload, timeout=300)
             
             # LA-035: 打印详细业务错误码
             if resp.status_code != 200:
