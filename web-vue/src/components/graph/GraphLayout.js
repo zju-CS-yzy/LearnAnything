@@ -3,20 +3,9 @@
  * 包含文档树自定义布局 + 概念层 dagre 布局
  */
 
-// ========== 辅助函数 ==========
+import { isSemanticEdge, getRelationLabel } from './ParadigmConfig.js'
 
-/**
- * LA-027 FIX: 关系类型 → 中文标签映射（支持新旧类型）
- */
-function getRelationLabel(type) {
-  const labels = {
-    'SOLUTION': '解决',
-    'DEPENDS_ON': '依赖',
-    'IMPLEMENTS': '实现',
-    'DEPEND_ON': '依赖',
-  }
-  return labels[type] || type
-}
+// ========== 辅助函数 ==========
 
 /**
  * 从 chunk text 生成简洁的节点标题
@@ -387,9 +376,8 @@ export function runConceptLayout(cy) {
   })
 
   const semanticEdges = cy.edges().filter(e => {
-    const t = e.data('type')
-    // LA-027 FIX: 同时支持新旧关系类型（向后兼容）
-    return t === 'SOLUTION' || t === 'DEPENDS_ON' || t === 'IMPLEMENTS' || t === 'DEPEND_ON'
+    // LA-052: 使用范式配置动态判断语义边类型
+    return isSemanticEdge(e.data('type'))
   })
 
   // 收集边：过滤自环边，但自环节点仍作为普通节点显示
@@ -422,9 +410,8 @@ export function runConceptLayout(cy) {
     }
   })
   cy.edges().forEach(e => {
-    const t = e.data('type')
-    // LA-027 FIX: 同时支持新旧关系类型（向后兼容）
-    if (t !== 'SOLUTION' && t !== 'DEPENDS_ON' && t !== 'IMPLEMENTS' && t !== 'DEPEND_ON') {
+    // LA-052: 使用范式配置动态判断语义边类型
+    if (!isSemanticEdge(e.data('type'))) {
       e.style('display', 'none')
     }
   })
@@ -533,9 +520,8 @@ export function runConceptLayout(cy) {
   // 2b. 基于 cy 中实际可见的边，识别所有根和子树
   // P19-FIX-3: visibleEdges 也过滤自环，确保自环节点入度=0，成为根节点
   const visibleEdges = cy.edges().filter(e => {
-    const t = e.data('type')
-    // LA-027 FIX: 同时支持新旧关系类型（向后兼容）
-    const isSemantic = t === 'SOLUTION' || t === 'DEPENDS_ON' || t === 'IMPLEMENTS' || t === 'DEPEND_ON'
+    // LA-052: 使用范式配置动态判断语义边类型
+    const isSemantic = isSemanticEdge(e.data('type'))
     const isVisible = e.style('display') !== 'none'
     const isSelfLoop = e.source().id() === e.target().id()
     return isSemantic && isVisible && !isSelfLoop
