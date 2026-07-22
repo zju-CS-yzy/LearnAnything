@@ -183,7 +183,7 @@ paradigms:
       requirement:
         IMPLEMENTS: [technology]    # 需求实现为技术
       technology:
-        DEPEND_ON: [requirement]    # 技术分解出子需求/约束
+        DEPEND_ON: [requirement, technology]  # 技术分解出子需求，或技术之间的依赖（gap检测用）
 
     # parent_hint 的合法性约束
     parent_rules:
