@@ -2054,7 +2054,8 @@ class GraphStore:
 
         # 语义层关系类型（包含语义推断生成??SOLUTION/DEPENDS_ON ??chunk-level ??DEFINES/REQUIRES 等）
 
-        rel_types = ["SOLUTION", "DEPENDS_ON", "DEFINES", "REQUIRES", "HAS_LAW", "APPLIES_TO", "EXTENDS", "IMPLEMENTS", "HAS_SUB", "HAS_IMPL"]
+        rel_types = ["SOLUTION", "DEPENDS_ON", "DEPEND_ON", "DEFINES", "REQUIRES", "HAS_LAW", "APPLIES_TO", "EXTENDS", "IMPLEMENTS", "HAS_SUB", "HAS_IMPL"]
+        # LA-052: 注意：DEPENDS_ON（旧，有S）和 DEPEND_ON（新，无S）都保留，兼容旧数据库
 
         for rel_type in rel_types:
 

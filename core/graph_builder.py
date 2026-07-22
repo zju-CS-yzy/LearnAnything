@@ -164,8 +164,17 @@ class GraphBuilder:
         print(f"[GraphBuilder] 向量存储中所有 chunk 类型分布: {chunk_type_counts}")
         
         # 检查是否有图片相关的 chunk — 放宽识别条件
-        image_chunks = [c for c in all_chunks if c.get("metadata", {}).get("chunk_type", "") in ("image", "image_pseudo", "text_image") or c.get("metadata", {}).get("image_refs", [])]
-        print(f"[GraphBuilder] 找到 {len(image_chunks)} 个图片相关 chunk")
+        # LA-052 FIX: 排除已带 VLM 描述的 image_pseudo chunks（避免重复调用 VLM）
+        image_chunks = []
+        for c in all_chunks:
+            chunk_type = c.get("metadata", {}).get("chunk_type", "")
+            # 跳过已处理的 image_pseudo chunks（已有 VLM 描述）
+            if chunk_type == "image_pseudo":
+                continue
+            if chunk_type in ("image", "text_image") or c.get("metadata", {}).get("image_refs", []):
+                image_chunks.append(c)
+        
+        print(f"[GraphBuilder] 找到 {len(image_chunks)} 个需要 VLM 描述的图片 chunk (排除了 image_pseudo)")
         for ic in image_chunks[:3]:
             ic_meta = ic.get("metadata", {})
             print(f"  - {ic['id']}: type={ic_meta.get('chunk_type')}, text_len={len(ic.get('text', ''))}, has_media_refs={bool(ic_meta.get('media_refs'))}, image_refs_count={len(ic_meta.get('image_refs', []))}")
