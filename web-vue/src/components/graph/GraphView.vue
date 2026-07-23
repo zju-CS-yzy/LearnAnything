@@ -784,7 +784,12 @@ async function expandNode(nodeId) {
     if (newEdges.length > 0) cy.add(newEdges)
 
     cy.getElementById(nodeId).data('isCenter', true)
-    runTreeLayout(cy)
+    // LA-057 FIX: 根据当前视图模式调用正确的布局函数
+    if (viewMode.value === 'document') {
+      runTreeLayout(cy)
+    } else {
+      runConceptLayout(cy)
+    }
   } catch (e) {
     console.error('展开节点失败:', e)
   }

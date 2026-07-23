@@ -1675,6 +1675,115 @@ def get_paradigm_config(subject: str):
         raise HTTPException(status_code=500, detail=f"获取范式配置失败: {str(e)}")
 
 
+# ========== LA-052: 范式管理 API ==========
+
+@app.get("/api/paradigms")
+def list_paradigms():
+    """
+    获取所有可用范式列表（内置 + 自定义）
+    """
+    try:
+        from core.paradigm_manager import get_paradigm_manager
+        manager = get_paradigm_manager()
+        return {"paradigms": manager.list_paradigms()}
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"获取范式列表失败: {str(e)}")
+
+
+@app.get("/api/paradigms/{paradigm_id}")
+def get_paradigm_detail(paradigm_id: str):
+    """
+    获取指定范式的完整配置
+    """
+    try:
+        from core.paradigm_manager import get_paradigm_manager
+        manager = get_paradigm_manager()
+        config = manager.get_paradigm(paradigm_id)
+        if not config:
+            raise HTTPException(status_code=404, detail=f"范式未找到: {paradigm_id}")
+        return config
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"获取范式详情失败: {str(e)}")
+
+
+class CreateParadigmRequest(BaseModel):
+    """创建范式请求体"""
+    paradigm_id: str = Field(..., min_length=1, max_length=50, description="范式唯一标识")
+    name: str = Field(..., min_length=1, max_length=50, description="显示名称")
+    description: str = Field(..., min_length=1, max_length=200, description="范式描述")
+    icon: str = Field(default="", max_length=10, description="图标 emoji")
+    color: str = Field(default="#3498db", max_length=20, description="主题色")
+    types: Dict[str, str] = Field(..., description="概念类型 {key: label}")
+    relations: Dict[str, str] = Field(..., description="关系类型 {key: label}")
+    relation_map: Dict[str, Dict[str, List[str]]] = Field(..., description="连接规则")
+    ideal_chain: Optional[List[str]] = Field(default=None, description="理想层级链条")
+    cyclic: bool = Field(default=False, description="是否循环范式")
+    cycle_pattern: Optional[List[str]] = Field(default=None, description="循环模式")
+    fallback: Optional[Dict] = Field(default=None, description="降级策略")
+    gap_rules: Optional[Dict] = Field(default=None, description="Gap 检测规则")
+    styles: Optional[Dict] = Field(default=None, description="可视化样式（可选，自动分配）")
+    prompt_addon: Optional[str] = Field(default=None, description="LLM 提示词附加（可选，自动生成）")
+
+
+@app.post("/api/paradigms")
+def create_paradigm_api(request: CreateParadigmRequest):
+    """
+    创建新范式
+    
+    前端提交最小必填集，后端自动推导 parent_rules、styles、ideal_chain、prompt_addon。
+    """
+    try:
+        from core.paradigm_manager import get_paradigm_manager
+        manager = get_paradigm_manager()
+        
+        # 将 Pydantic 模型转为字典
+        data = request.dict()
+        
+        result = manager.create_paradigm(data)
+        
+        if not result.get("success"):
+            errors = result.get("errors", ["未知错误"])
+            raise HTTPException(status_code=400, detail="; ".join(errors))
+        
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"创建范式失败: {str(e)}")
+
+
+@app.delete("/api/paradigms/{paradigm_id}")
+def delete_paradigm_api(paradigm_id: str):
+    """
+    删除自定义范式（内置范式不允许删除）
+    """
+    try:
+        from core.paradigm_manager import get_paradigm_manager
+        manager = get_paradigm_manager()
+        
+        result = manager.delete_paradigm(paradigm_id)
+        
+        if not result.get("success"):
+            errors = result.get("errors", ["未知错误"])
+            raise HTTPException(status_code=400, detail="; ".join(errors))
+        
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"删除范式失败: {str(e)}")
+
+
 def _get_subject_paradigm(subject: str) -> str:
     """
     获取学科使用的范式ID。

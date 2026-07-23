@@ -60,6 +60,15 @@ class GraphStore:
 
     # Schema 定义（Cypher DDL??
 
+    # LA-052 FIX: 关系名映射（YAML v2.0 名 → 数据库表名，向后兼容）
+    # 旧数据库使用 SOLUTION/DEPENDS_ON，新 YAML 使用 IMPLEMENTS/DEPEND_ON
+    RELATION_NAME_MAP = {
+        'IMPLEMENTS': 'SOLUTION',
+        'DEPEND_ON': 'DEPENDS_ON',
+    }
+    # 反向映射（数据库表名 → YAML 名）
+    RELATION_NAME_REVERSE = {v: k for k, v in RELATION_NAME_MAP.items()}
+
     SCHEMA_DEFINITIONS = [
         # Layer 1: Chunk 节点（文档片段）
         """CREATE NODE TABLE Chunk (
@@ -428,6 +437,19 @@ class GraphStore:
                 print(f"[GraphStore] 创建 {created} 个范式关系表: {', '.join(sorted(rel_types))}")
         except Exception as e:
             print(f"[GraphStore] 动态创建范式关系表失败: {e}")
+
+    def _rel_table_name(self, relation_type: str) -> str:
+        """
+        LA-052 FIX: 将 YAML 关系名映射到数据库表名（向后兼容）。
+        旧数据库使用 SOLUTION/DEPENDS_ON，新 YAML 使用 IMPLEMENTS/DEPEND_ON。
+        """
+        return self.RELATION_NAME_MAP.get(relation_type, relation_type)
+
+    def _rel_yaml_name(self, table_name: str) -> str:
+        """
+        LA-052 FIX: 将数据库表名映射回 YAML 关系名。
+        """
+        return self.RELATION_NAME_REVERSE.get(table_name, table_name)
 
     def _escape_cypher_string(self, text: str) -> str:
 
@@ -1244,7 +1266,7 @@ class GraphStore:
 
                             "target": nid,
 
-                            "type": rel_type,
+                            "type": self._rel_yaml_name(rel_type),
 
                         })
 
@@ -2081,7 +2103,7 @@ class GraphStore:
 
                         "target": row[1],
 
-                        "type": rel_type,
+                        "type": self._rel_yaml_name(rel_type),
 
                         "confidence": row[2] if row[2] else 0.0,
 

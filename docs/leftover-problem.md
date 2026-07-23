@@ -1406,37 +1406,50 @@ unTreeLayout 中的逐树 dagre 逻辑
 #### 新增问题
 
 - **LA-052**: 范式配置动态获取
-  - **状态**: 🟡 **部分完成**
-  - **设计文档**: `docs/design-paradigm-dynamic-config.md`
+  - **状态**: 🟡 **后端已完成，前端待实现**
   - **已完成**:
-    - 后端 `/api/knowledge-graph/{subject}/paradigm` API
-    - YAML `styles` 字段（engineering 范式）
-    - 前端 `ParadigmConfig.js` 模块
-    - `GraphLayout.js` 使用 `isSemanticEdge()` 替代硬编码
-  - **待完成**:
-    - `GraphView.vue` 图例动态渲染
-    - `GraphStyles.js` 动态样式生成
-    - 学科切换时自动重新加载范式配置
+    - 后端 API `/api/paradigms`（GET/POST/DELETE）✅
+    - 后端 `ParadigmValidator`（校验 + 环检测 + 自动生成 parent_rules/styles/prompt_addon）✅
+    - 后端 `ParadigmManager`（CRUD + YAML 持久化 + 备份）✅
+    - `GraphStore._rel_table_name()`（IMPLEMENTS→SOLUTION 映射）✅
+    - `SemanticLinker._write_edges()`（写入时映射）✅
+    - `GraphStore.get_concept_links()`（读取时反向映射）✅
+    - 设计文档 DESIGN.md 15 章（新增范式设计）✅
+  - **待完成（前端）**:
+    - `GraphView.vue` 图例动态渲染（从 `/api/paradigms/{id}` 读取 styles）
+    - `GraphStyles.js` 样式动态生成（替代硬编码 IMPLEMENTS/DEPEND_ON 选择器）
+    - `BuildOptions.vue` 新增"➕ 新建范式"按钮 → 打开 `ParadigmDesigner.vue`
+    - `ParadigmDesigner.vue` 5步表单（基础信息 → 类型 → 关系 → 连接规则 → 高级）
   - **优先级**: P1
+  - **依赖**: 需等 LA-053/054 验证后再推进前端
 
 - **LA-053**: 概念树布局重叠/凌乱
-  - **状态**: 🔴 **回退到之前版本，待重新修复**
+  - **状态**: 🟡 **已修复，待前端验证**
   - **问题**: dagre 布局后多棵树重叠（部分树 dagre 范围极小）
-  - **根因分析**:
-    1. 原始设计（dagre + 复制共享子节点 + bbox 排列）对普通节点有效
-    2. 引入虚拟节点后，部分虚拟节点可能形成独立的连通分量
-    3. 虚拟节点可能有多个入边（需要排查原因）
-  - **注意**: GraphLayout.js 已回退到之前版本
+  - **根因**: 
+    1. 副本节点没有继承原始节点的出边，导致大量节点变成"死路"（路径断裂）
+    2. 虚拟节点大量存在（RAG子树中71个），进一步放大了路径断裂问题
+    3. 小树（≤5节点）被 dagre 布局后范围极小，bbox计算误差导致重叠
+  - **修复**:
+    1. GraphLayout.js: 副本节点创建时同步继承原始节点的所有出边（`isCopyOutEdge`）
+    2. 小树（≤5节点）改用手动网格布局，不跑 dagre
+    3. dagre 间距增大（rankSep: 80→180, nodeSep: 40→60）
+    4. 树间间距增大（treeGapX: 60→120, treeGapY: 80→150）
+  - **验证结果**（模拟脚本）:
+    - 原始图可达: 166 节点 → 副本后可达: 232 节点（+66副本）
+    - 丢失节点: 118 → **4**（仅剩4个孤立节点）
+    - RAG子树: 130 → 182
+  - **待验证**: 用户回家后刷新前端，确认概念视图布局正常
   - **优先级**: P1
 
 - **LA-054**: 虚拟节点多入边问题
-  - **状态**: 🔴 **待排查**
-  - **问题**: 为什么虚拟节点会有多个入边？
-  - **根因猜测**:
-    1. 多个不同的 technology 节点都 gap 到了同一个缺失的 requirement
-    2. _process_gaps_and_virtual_nodes 中缺少去重逻辑
-    3. 或者 virtual node 创建时 parent_id 相同但 child_id 不同
-  - **优先级**: P1
+  - **状态**: ✅ **已排查，非bug**
+  - **结论**: 虚拟节点本身入度全部为1（135个虚拟节点，入度分布{1:135}）
+  - **实际现象**: 33个真实节点被多个虚拟节点指向（如"检索器模块"被4个虚拟节点指向）
+  - **根因**: SemanticLinker 的 embedding 阶段，一个 child 可能与多个 parent 有高相似度（如"检索器模块"与"向量检索"/"关键词检索"/"稠密检索"都相关）
+  - **这是预期设计**: 不同 technology 节点 gap 到同一个缺失的 requirement，每个 gap 独立创建虚拟节点，语义上合理（不同需求驱动同一技术）
+  - **不修复**: 虚拟节点不应合并，否则会丢失"多源驱动"的语义信息
+  - **优先级**: P1 → 已关闭
 
 - **树深度不足**（已修复 DEPEND_ON 查询，待验证）
   - **状态**: 🟡 **待验证**
@@ -1478,5 +1491,50 @@ unTreeLayout 中的逐树 dagre 逻辑
 | LA-047 | 智能问答引用能力 |
 
 ---
+
+- **LA-054**: 虚拟节点多入边问题
+  - **状态**: ✅ **已解决**
+  - **排查结论**: 虚拟节点本身入度全为1（135/135），不存在多入边问题
+  - **实际发现**: 12个强连通分量中存在36条环边（双向IMPLEMENTS+DEPEND_ON）
+  - **根因**: SemanticLinker 缺少增量环检测，LLM在阶段1和阶段3给出相反方向判断
+  - **已修复**:
+    - `core/cycle_detector.py` 已存在（周二完成），集成到 `SemanticLinker.link_all()`
+    - `scripts/cleanup_cycles.py` 清理 rag_v1 数据库，删除36条环边
+    - 清理后语义边: 320→284
+  - **待验证**: 重建RAG学科，确认新边不再产生环
+  - **优先级**: P1
+
+- **LA-055**: GraphStore 统一环检测集成（重构）
+  - **状态**: 🔴 **待排期**
+  - **背景**: 当前 CycleDetector 集成在 SemanticLinker 中，仅覆盖 IMPLEMENTS/DEPEND_ON 边
+  - **目标**: 将环检测下沉到 GraphStore 层，覆盖所有可能产生有向环的写边操作
+  - **与当前方案差异**: SemanticLinker集成是局部精确（只检测可能环的边），GraphStore集成是全局兜底（防止任何绕过SemanticLinker的写操作）
+  - **前置条件**: 先验证 SemanticLinker 集成在重建RAG后有效
+  - **优先级**: P2（待 LA-054 验证通过后再推进）
+
+- **LA-056**: 悬空虚拟节点清理
+  - **状态**: ✅ **已解决**
+  - **问题**: CycleDetector 过滤 virtual->child 的环边后，虚拟节点变成悬空（只有入边没有出边）
+  - **根因**: `_cleanup_orphaned_virtual_nodes` 只过滤边列表，没有删除已写入数据库的节点
+  - **已修复**:
+    - `SemanticLinker._cleanup_orphaned_virtual_nodes()` 返回 orphaned ID 集合
+    - 新增 `SemanticLinker._delete_virtual_nodes()` 从数据库删除 orphaned 节点
+    - `scripts/cleanup_floating_virtual.py` 清理已有数据（删除20个悬空节点）
+  - **优先级**: P1
+
+- **LA-057**: 双击节点时图谱布局失效
+  - **状态**: 🔴 **待排查**
+  - **问题**: 用户报告双击某个节点时，图谱布局会失效
+  - **可能根因**: 双击事件触发了 `highlightNeighbors` 或节点展开逻辑，与 dagre 布局冲突
+  - **待排查**: 需要前端调试确认具体触发条件
+  - **优先级**: P1
+
+- **LA-058**: 小树（2-3节点）布局失效
+  - **状态**: 🔴 **待排查**
+  - **问题**: 只有2或3个节点的小树布局异常（节点重叠）
+  - **截图**: 见附件（用户提供的第二张截图）
+  - **可能根因**: 小树（≤5节点）使用手动网格布局，但 grid 参数（sCols/sGapX/sGapY）计算有误
+  - **待排查**: 检查 `runConceptLayout` 中小树分支的布局逻辑
+  - **优先级**: P1
 
 *记录日期：2026-07-23*
