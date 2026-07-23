@@ -246,6 +246,9 @@ class SemanticLinker:
         from core.embedding import EmbeddingManager
         self.embeddings = EmbeddingManager()
         self._embedding_cache = {}
+        
+        # LA-054 FIX: 初始化 CycleDetector（延迟加载，避免循环导入）
+        self._cycle_detector = None
 
     # ========== 核心 API ==========
 
@@ -337,18 +340,58 @@ class SemanticLinker:
             
             if rejected:
                 print(f"[SemanticLinker] relation_map 校验拒绝 {len(rejected)} 条非法连接:")
-                for r in rejected[:5]:  # 最多打印5条
-                    print(f"  ❌ {r['parent']}({r['parent_type']}) --{r['relation']}--> {r['child']}({r['child_type']})")
-                if len(rejected) > 5:
-                    print(f"  ... 还有 {len(rejected) - 5} 条")
+                for r in rejected[:10]:  # 最多打印10条
+                    is_v = "[VIRTUAL]" if "__virtual_" in str(r['parent']) or "__virtual_" in str(r['child']) else ""
+                    print(f"  ❌ {is_v} {r['parent']}({r['parent_type']}) --{r['relation']}--> {r['child']}({r['child_type']})")
+                if len(rejected) > 10:
+                    print(f"  ... 还有 {len(rejected) - 10} 条")
             
             all_edges = valid_edges
         
-        # 7. 写入数据库
-        self._write_edges(all_edges)
+        # 7. LA-054 FIX: CycleDetector 增量环检测
+        # 用本次生成的边构建检测器，过滤掉会形成环的边
+        from core.cycle_detector import CycleDetector
+        detector = CycleDetector()
+        acyclic_edges = []
+        cycle_rejected = []
+        
+        for edge in all_edges:
+            parent_id = edge['parent_id']
+            child_id = edge['child_id']
+            
+            # 检查是否会形成环
+            if detector.would_form_cycle(parent_id, child_id):
+                cycle_rejected.append({
+                    'parent': edge.get('parent_name', parent_id),
+                    'child': edge.get('child_name', child_id),
+                    'relation': edge['relation_type'],
+                })
+                continue
+            
+            # 添加边到检测器（不会形成环才添加）
+            detector.add_edge(parent_id, child_id, raise_on_cycle=False)
+            acyclic_edges.append(edge)
+        
+        if cycle_rejected:
+            print(f"[SemanticLinker] CycleDetector 拒绝 {len(cycle_rejected)} 条环边:")
+            for r in cycle_rejected[:10]:
+                is_v = "[VIRTUAL]" if "__virtual_" in str(r['parent']) or "__virtual_" in str(r['child']) else ""
+                print(f"  🚫 {is_v} {r['parent']} --{r['relation']}--> {r['child']}")
+            if len(cycle_rejected) > 10:
+                print(f"  ... 还有 {len(cycle_rejected) - 10} 条")
+        
+        # LA-054-FIX-2: 清理 orphaned 虚拟节点（没有出边的虚拟节点）
+        acyclic_edges, orphaned_virtual_ids = self._cleanup_orphaned_virtual_nodes(acyclic_edges)
+        
+        # 8. 写入数据库
+        self._write_edges(acyclic_edges)
+        
+        # LA-054-FIX-3: 删除 orphaned 虚拟节点（已从边中移除，现在删除节点本身）
+        if orphaned_virtual_ids:
+            self._delete_virtual_nodes(orphaned_virtual_ids)
 
         return {
-            "edges_created": len(all_edges),
+            "edges_created": len(acyclic_edges),
             "by_stage": {
                 "parent_hint_match": len(edges_stage1),
                 "embedding_llm": len(edges_stage23),
@@ -358,6 +401,9 @@ class SemanticLinker:
             "gap_detection": {
                 "gap_edges": gap_edges_detected,
                 "virtual_nodes": virtual_nodes_created,
+            },
+            "cycle_detection": {
+                "rejected": len(cycle_rejected),
             },
         }
 
@@ -710,6 +756,22 @@ class SemanticLinker:
         # 先写入虚拟节点
         if virtual_nodes:
             self._write_virtual_nodes(virtual_nodes)
+            
+            # LA-054-DEBUG: 打印每个虚拟节点创建的边
+            print(f"[SemanticLinker] LA-046: 虚拟节点详情:")
+            for v in virtual_nodes:
+                vid = v["canonical_id"]
+                vname = v["name"]
+                # 找该虚拟节点的入边和出边
+                incoming = [e for e in new_edges if e.get("child_id") == vid]
+                outgoing = [e for e in new_edges if e.get("parent_id") == vid]
+                print(f"  📍 {vname} ({vid[:40]})")
+                print(f"     入边: {len(incoming)} 条")
+                for ie in incoming:
+                    print(f"       <- {ie.get('parent_name', ie['parent_id'][:20])} --{ie['relation_type']}--")
+                print(f"     出边: {len(outgoing)} 条")
+                for oe in outgoing:
+                    print(f"       --{oe['relation_type']}--> {oe.get('child_name', oe['child_id'][:20])}")
 
         return new_edges, {"gap_edges": gap_edges, "virtual_nodes": len(virtual_nodes)}
 
@@ -1165,6 +1227,88 @@ class SemanticLinker:
             pass
         return ""
 
+    def _cleanup_orphaned_virtual_nodes(
+        self, edges: List[Dict[str, Any]]
+    ) -> Tuple[List[Dict[str, Any]], Set[str]]:
+        """
+        LA-054-FIX-2: 清理 orphaned 虚拟节点。
+        
+        虚拟节点必须有至少一条出边（virtual -> child）。
+        如果某个虚拟节点只有入边没有出边，删除该虚拟节点及其所有入边。
+        
+        Returns:
+            (清理后的边列表, 需要删除的虚拟节点 ID 集合)
+        """
+        # 收集所有虚拟节点
+        virtual_ids = set()
+        for edge in edges:
+            if "__virtual_" in edge.get("parent_id", ""):
+                virtual_ids.add(edge["parent_id"])
+            if "__virtual_" in edge.get("child_id", ""):
+                virtual_ids.add(edge["child_id"])
+        
+        if not virtual_ids:
+            return edges, set()
+        
+        # 检查每个虚拟节点的出度
+        virtual_outdegree = {vid: 0 for vid in virtual_ids}
+        for edge in edges:
+            pid = edge.get("parent_id", "")
+            if pid in virtual_ids:
+                virtual_outdegree[pid] += 1
+        
+        # 找出 orphaned 虚拟节点（出度=0）
+        orphaned = {vid for vid, outdeg in virtual_outdegree.items() if outdeg == 0}
+        
+        if not orphaned:
+            return edges, set()
+        
+        print(f"[SemanticLinker] 发现 {len(orphaned)} 个 orphaned 虚拟节点（无出边），清理中...")
+        for vid in orphaned:
+            # 查找该虚拟节点的入边（用于日志）
+            incoming = [e for e in edges if e.get("child_id") == vid]
+            parent_names = [e.get("parent_name", e.get("parent_id", "?")) for e in incoming]
+            print(f"  🧹 删除 orphaned 虚拟节点: {vid} (来自: {', '.join(parent_names[:3])})")
+        
+        # 过滤掉所有涉及 orphaned 虚拟节点的边
+        cleaned = []
+        for edge in edges:
+            pid = edge.get("parent_id", "")
+            cid = edge.get("child_id", "")
+            if pid in orphaned or cid in orphaned:
+                continue  # 跳过涉及 orphaned 虚拟节点的边
+            cleaned.append(edge)
+        
+        print(f"[SemanticLinker] 清理后: {len(edges)} -> {len(cleaned)} 条边")
+        return cleaned, orphaned
+    
+    def _delete_virtual_nodes(self, virtual_ids: Set[str]) -> int:
+        """
+        LA-054-FIX-3: 从数据库中删除 orphaned 虚拟节点。
+        
+        这些虚拟节点已在边列表中被移除，现在删除节点本身。
+        """
+        if not virtual_ids:
+            return 0
+        
+        conn = self.graph_store._ensure_db()
+        esc = self.graph_store._escape_cypher_string
+        deleted = 0
+        
+        for vid in virtual_ids:
+            try:
+                cypher = f"""
+                    MATCH (c:CanonicalConcept {{canonical_id: '{esc(vid)}'}})
+                    DELETE c
+                """
+                conn.execute(cypher)
+                deleted += 1
+            except Exception as e:
+                print(f"[SemanticLinker] 删除虚拟节点失败 {vid}: {e}")
+        
+        print(f"[SemanticLinker] 已从数据库删除 {deleted} 个 orphaned 虚拟节点")
+        return deleted
+
     def _group_by_level(
         self,
         concepts: List[Dict],
@@ -1229,7 +1373,10 @@ class SemanticLinker:
             # 创建关系
             safe_parent_id = esc(parent_id)
             safe_child_id = esc(child_id)
-            safe_relation = esc(edge['relation_type'])
+            # LA-052 FIX: 关系名映射（YAML v2.0 名 → 数据库表名）
+            relation_type = edge['relation_type']
+            table_name = self.graph_store._rel_table_name(relation_type)
+            safe_relation = esc(table_name)
             confidence = float(edge.get('confidence', 0.0))
             cypher = f"""
                 MATCH (p:CanonicalConcept {{canonical_id: '{safe_parent_id}'}}),

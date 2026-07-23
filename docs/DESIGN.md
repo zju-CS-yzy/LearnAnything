@@ -1909,4 +1909,215 @@ schema:
 
 ---
 
+## 15. 新增范式功能设计（2026-07-23）
+
+### 15.1 概述
+
+本章节定义用户在前端界面创建自定义知识提取范式的完整设计方案。支持通过可视化表单配置概念类型、关系类型、连接规则等，系统自动生成范式 YAML 配置并持久化。
+
+### 15.2 前端功能面板
+
+#### 15.2.1 入口位置
+- **位置**: `BuildOptions.vue` 的"范式选择"下拉框旁新增"➕ 新建范式"按钮
+- **交互方式**: 抽屉式面板（Drawer）或独立路由 `/paradigm-designer`
+
+#### 15.2.2 分步表单（Wizard 4步）
+
+**Step 1: 基础信息**
+| 字段 | 类型 | 必填 | 示例 | 校验规则 |
+|:---|:---|:---:|:---|:---|
+| 范式ID | 输入框 | ✅ | `medical_diagnosis` | `^[a-z_]+$`，唯一 |
+| 显示名称 | 输入框 | ✅ | `医疗诊断` | 长度 ≤ 50 |
+| 描述 | 文本域 | ✅ | `适合临床知识` | 长度 ≤ 200 |
+| 图标 | Emoji选择器 | | `🏥` | 单个字符 |
+| 主题色 | 颜色选择器 | | `#E74C3C` | 有效 HEX 颜色 |
+
+**Step 2: 概念类型（Type）配置**
+- 动态表格，可增删行
+- 每行：`type_key`（英文ID，如 `symptom`）+ `type_label`（中文名，如 `症状`）
+- 最少2个，最多8个
+- 第一个 type 自动标记为顶层根节点
+
+**Step 3: 关系类型（Relation）配置**
+- 动态表格，可增删行
+- 每行：`rel_key`（大写+下划线，如 `REQUIRES`）+ `rel_label`（中文名，如 `需要`）
+- 最少2个，最多6个
+- 自动为每个关系分配默认样式（颜色+线型）
+
+**Step 4: 连接规则（Relation Map）配置**
+- 表格形式（MVP阶段）：选择 `source_type` → `relation` → `target_types`（多选）
+- 未来版本：可视化DAG拖拽编辑器
+- 实时 CycleDetector 校验，防止 type-level 环
+
+**Step 5: 高级配置（可折叠）**
+| 字段 | 类型 | 默认值 | 说明 |
+|:---|:---|:---|:---|
+| 理想链条 | 拖拽排序 | type 定义顺序 | 用于 gap 检测 |
+| 循环范式 | 开关 | false | engineering 类交替递归 |
+| 允许跳过层级 | 开关 | true | fallback 策略 |
+| Gap检测-同类型连接 | 开关 | false | 循环范式专用 |
+| LLM提示词附加 | 文本域 | 自动生成 | 可编辑的基础模板 |
+
+#### 15.2.3 实时预览面板
+- **DAG 结构预览**: 基于 relation_map 实时渲染有向图
+- **YAML 预览**: 实时生成最终 YAML 配置
+- **校验提示**: 每步完成时显示校验结果（错误/警告）
+
+### 15.3 后端 API 设计
+
+#### 15.3.1 接口列表
+
+| 方法 | 路径 | 说明 | 状态 |
+|:---|:---|:---|:---:|
+| GET | `/api/paradigms` | 获取所有范式列表 | 已有 |
+| GET | `/api/paradigms/{paradigm_id}` | 获取单个范式完整配置 | 已有 |
+| POST | `/api/paradigms` | 创建新范式 | **新增** |
+| PUT | `/api/paradigms/{paradigm_id}` | 修改范式（自定义） | 预留 |
+| DELETE | `/api/paradigms/{paradigm_id}` | 删除范式（自定义） | 预留 |
+
+#### 15.3.2 POST /api/paradigms 详细设计
+
+**请求体（最小必填）**:
+```json
+{
+  "paradigm_id": "medical_diagnosis",
+  "name": "医疗诊断",
+  "description": "适合临床知识：症状→检查→诊断→治疗",
+  "icon": "🏥",
+  "color": "#E74C3C",
+  "types": {
+    "symptom": "症状",
+    "examination": "检查",
+    "diagnosis": "诊断",
+    "treatment": "治疗"
+  },
+  "relations": {
+    "REQUIRES": "需要",
+    "LEADS_TO": "导致",
+    "TREATS": "治疗"
+  },
+  "relation_map": {
+    "symptom": {
+      "REQUIRES": ["examination"]
+    },
+    "examination": {
+      "LEADS_TO": ["diagnosis"]
+    },
+    "diagnosis": {
+      "TREATS": ["treatment"]
+    }
+  }
+}
+```
+
+**校验链**:
+1. schema 校验（必填字段、类型、格式）
+2. `paradigm_id` 唯一性（不与内置/已有自定义冲突）
+3. `types` 数量 `[2, 8]`，key 匹配 `^[a-z_]+$`
+4. `relations` 数量 `[2, 6]`，key 匹配 `^[A-Z_]+$`
+5. `relation_map` 合法性（所有 type/relation 必须在已定义范围内）
+6. CycleDetector.type_level 校验（relation_map 无 type-level 环）
+7. `parent_rules` 自动生成（从 relation_map 反向推导）
+8. `styles` 自动生成（为每个 relation 分配默认样式）
+9. `prompt_addon` 自动生成（基础提示词模板）
+
+**响应**:
+```json
+{
+  "success": true,
+  "paradigm_id": "medical_diagnosis",
+  "warnings": ["未设置 cycle_pattern，非循环范式可忽略"],
+  "auto_generated": {
+    "parent_rules": {
+      "symptom": [],
+      "examination": ["symptom"],
+      "diagnosis": ["examination"],
+      "treatment": ["diagnosis"]
+    },
+    "styles": {
+      "REQUIRES": {"color": "#e67e22", "lineStyle": "solid", "width": 2},
+      "LEADS_TO": {"color": "#9b59b6", "lineStyle": "dashed", "width": 1.5},
+      "TREATS": {"color": "#3498db", "lineStyle": "solid", "width": 2}
+    },
+    "prompt_addon": "## 医疗诊断范式 — 概念类型判断标准..."
+  }
+}
+```
+
+#### 15.3.3 数据持久化
+
+- **写入位置**: `config/paradigms.yaml` 的 `paradigms:` 下新增条目
+- **内置 vs 自定义标记**: 新增 `is_builtin: false`
+- **文件锁**: 写入时加文件锁（`filelock` 库），防止并发修改
+- **备份**: 修改前自动备份 `paradigms.yaml.bak.YYYYMMDD_HHMMSS`
+- **热加载**: 写入后自动刷新 `_PARADIGMS_YAML` 内存缓存
+
+### 15.4 后端组件设计
+
+#### 15.4.1 ParadigmManager 服务
+
+```python
+class ParadigmManager:
+    """范式管理服务：CRUD + 校验 + 持久化"""
+    
+    YAML_PATH = Path("config/paradigms.yaml")
+    
+    def list_paradigms(self) -> List[Dict]
+    def get_paradigm(self, paradigm_id: str) -> Optional[Dict]
+    def create_paradigm(self, data: Dict) -> Dict  # 返回 {success, warnings, auto_generated}
+    def update_paradigm(self, paradigm_id: str, data: Dict) -> Dict
+    def delete_paradigm(self, paradigm_id: str) -> bool
+    def _auto_generate_fields(self, data: Dict) -> Dict
+    def _backup_yaml(self)
+    def _reload_cache(self)
+```
+
+#### 15.4.2 ParadigmValidator 校验器
+
+```python
+class ParadigmValidator:
+    """范式配置校验器"""
+    
+    def validate(self, data: Dict) -> ValidationResult
+    def _validate_schema(self, data: Dict) -> List[str]  # 错误列表
+    def _validate_types(self, types: Dict) -> List[str]
+    def _validate_relations(self, relations: Dict) -> List[str]
+    def _validate_relation_map(self, data: Dict) -> List[str]
+    def _check_type_level_cycles(self, relation_map: Dict) -> List[str]
+    def _auto_parent_rules(self, relation_map: Dict, types: Dict) -> Dict
+    def _auto_styles(self, relations: Dict) -> Dict
+    def _auto_prompt_addon(self, data: Dict) -> str
+```
+
+### 15.5 前端组件设计
+
+```
+ParadigmDesigner.vue（路由 /paradigm-designer）
+├── StepIndicator（步骤指示器 1-5）
+├── Step1_BasicInfo.vue（基础信息表单）
+├── Step2_TypesConfig.vue（类型配置表格）
+├── Step3_RelationsConfig.vue（关系配置表格）
+├── Step4_RelationMap.vue（连接规则表格）
+├── Step5_Advanced.vue（高级配置）
+└── PreviewPanel.vue（右侧实时预览）
+    ├── DagPreview.vue（DAG结构预览）
+    └── YamlPreview.vue（YAML实时生成）
+```
+
+### 15.6 开发计划
+
+| 阶段 | 内容 | 预计耗时 | 依赖 |
+|:---|:---|:---:|:---|
+| 1 | ParadigmValidator + 测试 | 2h | 无 |
+| 2 | ParadigmManager + 持久化 | 1.5h | 阶段1 |
+| 3 | 后端 API 端点（POST/GET） | 1h | 阶段2 |
+| 4 | 联调测试 | 0.5h | 阶段3 |
+| **总计** | | **~5h** | |
+
+---
+
+*本章节记录日期：2026-07-23*
+
+---
+
 *本章节的实现状态请参阅 docs/leftover-problem.md 中的 LA-027 和 LA-044 条目。*

@@ -654,6 +654,90 @@ export function runConceptLayout(cy) {
         const row = Math.floor(i / pCols)
         n.position({ x: 50 + col * pGap, y: 50 + row * pGap })
       })
+    } else if (layoutCollection.nodes().length <= 5) {
+      // LA-058-FIX-2: 小树使用基于父子关系的层次布局（替代简单网格）
+      const smallNodes = layoutCollection.nodes()
+      const smallEdges = layoutCollection.edges()
+      const nodeCount = smallNodes.length
+      
+      // 计算最大节点尺寸
+      let maxW = 160, maxH = 80
+      smallNodes.forEach(n => {
+        maxW = Math.max(maxW, n.width() || 160)
+        maxH = Math.max(maxH, n.height() || n.data('cardHeight') || 80)
+      })
+      
+      // LA-058-FIX-2: 基于BFS层次布局
+      // 1. 找出根节点（入度=0）
+      const nodeIds = new Set(smallNodes.map(n => n.id()))
+      const indegree = {}
+      smallNodes.forEach(n => indegree[n.id()] = 0)
+      smallEdges.forEach(e => {
+        const target = e.target().id()
+        if (nodeIds.has(target)) {
+          indegree[target] = (indegree[target] || 0) + 1
+        }
+      })
+      const roots = smallNodes.filter(n => (indegree[n.id()] || 0) === 0)
+      const rootId = roots.length > 0 ? roots[0].id() : smallNodes[0].id()
+      
+      // 2. BFS计算层次
+      const levels = {}
+      const visited = new Set()
+      const queue = [rootId]
+      levels[rootId] = 0
+      visited.add(rootId)
+      
+      while (queue.length > 0) {
+        const cur = queue.shift()
+        // 找子节点
+        smallEdges.forEach(e => {
+          const src = e.source().id()
+          const tgt = e.target().id()
+          if (src === cur && nodeIds.has(tgt) && !visited.has(tgt)) {
+            visited.add(tgt)
+            levels[tgt] = levels[cur] + 1
+            queue.push(tgt)
+          }
+        })
+      }
+      
+      // 3. 按层次分组
+      const levelGroups = {}
+      Object.entries(levels).forEach(([nid, lvl]) => {
+        if (!levelGroups[lvl]) levelGroups[lvl] = []
+        levelGroups[lvl].push(nid)
+      })
+      
+      const maxLevel = Math.max(...Object.keys(levelGroups).map(Number))
+      const levelCount = maxLevel + 1
+      
+      // 4. 计算布局参数
+      const hGap = maxW + 40  // 水平间距
+      const vGap = maxH + 30  // 垂直间距（同一层内）
+      
+      console.log(`[runConceptLayout] Tree ${idx}: ${nodeCount} nodes, BFS tree layout`)
+      console.log(`[runConceptLayout] Tree ${idx}: levels=${levelCount}, root=${rootId.substring(0,20)}`)
+      
+      // 5. 设置位置
+      smallNodes.forEach(n => {
+        const nid = n.id()
+        const lvl = levels[nid] !== undefined ? levels[nid] : 0
+        const siblings = levelGroups[lvl] || []
+        const idxInLevel = siblings.indexOf(nid)
+        const siblingsCount = siblings.length
+        
+        // 水平：根在左，子节点在右
+        const x = 50 + lvl * hGap
+        // 垂直：同层节点均匀分布
+        const totalHeight = siblingsCount * vGap
+        const y = 50 + idxInLevel * vGap - totalHeight / 2 + vGap / 2
+        
+        n.position({ x: 0, y: 0 })
+        n.position({ x, y })
+        
+        console.log(`[runConceptLayout] Tree ${idx} Node: ${n.data('label')?.substring(0,15)} | level=${lvl} idx=${idxInLevel} pos=(${Math.round(x)},${Math.round(y)})`)
+      })
     } else {
       // 重置位置并跑 dagre
       layoutCollection.nodes().forEach(n => n.position({ x: 0, y: 0 }))
@@ -664,9 +748,9 @@ export function runConceptLayout(cy) {
       layoutCollection.layout({
         name: 'dagre',
         rankDir: 'LR',
-        rankSep: 80,
-        nodeSep: 40,
-        edgeSep: 10,
+        rankSep: 180,   // LA-053 FIX: 80→180，大于卡片宽度避免重叠
+        nodeSep: 60,    // LA-053 FIX: 40→60
+        edgeSep: 20,    // LA-053 FIX: 10→20
         padding: 10,
         fit: false,
         animate: false,
@@ -691,13 +775,13 @@ export function runConceptLayout(cy) {
         const y = n.position('y')
         return Math.abs(x) < 1 && Math.abs(y) < 1
       })
-      // LA-052 FIX: 新增检查 — dagre 布局范围极小（<50px）也认为失败
-      const dagreTooSmall = dagreRangeX < 50 && dagreRangeY < 50 && dagreNodes.length > 1
+      // LA-053 FIX: 范围极小阈值 50→100
+      const dagreTooSmall = dagreRangeX < 100 && dagreRangeY < 100 && dagreNodes.length > 1
       if ((allAtOrigin || dagreTooSmall) && dagreNodes.length > 1) {
         console.warn(`[runConceptLayout] Tree ${idx} dagre failed (allAtOrigin=${allAtOrigin}, tooSmall=${dagreTooSmall}), using fallback grid`)
         const fCols = Math.max(1, Math.ceil(Math.sqrt(dagreNodes.length)))
-        const fGapX = 200
-        const fGapY = 120
+        const fGapX = 220  // LA-053 FIX: 增大避免重叠
+        const fGapY = 140
         // P19-FIX-3b: 网格起始位置偏移 50，避免被 stuckNodes 误判
         dagreNodes.forEach((n, i) => {
           const col = i % fCols
@@ -744,8 +828,8 @@ export function runConceptLayout(cy) {
   const rows = [] // 每行包含的 tree indices
   let currentRow = []
   let currentRowWidth = 0
-  const treeGapX = 60  // 树之间水平间距
-  const treeGapY = 80  // 行之间垂直间距
+  const treeGapX = 120  // LA-053 FIX: 60→120，树之间水平间距
+  const treeGapY = 150  // LA-053 FIX: 80→150，行之间垂直间距
 
   sortedTrees.forEach(({ treeIdx, bbox }) => {
     const treeWidth = bbox.w + treeGapX
