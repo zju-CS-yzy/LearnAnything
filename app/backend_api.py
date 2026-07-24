@@ -157,6 +157,24 @@ class AskResponse(BaseModel):
     current_topic: Optional[str] = None  # LA-044: 当前话题
 
 
+# LA-044-#3: 用户状态 API 模型
+class UserStateUpdateRequest(BaseModel):
+    """用户状态更新请求"""
+    user_id: str = Field(..., description="用户ID")
+    subject: str = Field("generic", description="学科标识")
+    global_theta: Optional[float] = Field(None, ge=0.0, le=1.0, description="全局能力值 0.0~1.0")
+    weak_areas: Optional[List[str]] = Field(None, description="薄弱点列表")
+
+
+class UserStateResponse(BaseModel):
+    """用户状态响应"""
+    user_id: str
+    subject_id: str
+    profile: Dict[str, Any]
+    concept_states: List[Dict[str, Any]]
+    stats: Dict[str, Any]
+
+
 class QuizRequest(BaseModel):
     """出题请求"""
     topic: str = Field(..., description="出题主题", min_length=1)
@@ -368,6 +386,9 @@ def ask_question(request: AskRequest):
         user_theta=request.user_theta,
     )
     print(f"[API] /api/ask returning answer length={len(result.get('text', ''))}")
+
+    # LA-044-#3: 对话结束时自动保存用户状态
+    _save_user_state_after_dialog(request, result)
 
     # LA-IMG: 提取 metadata 中的媒体资源
     # FIX-LA049: agent_result 在 result["result"] 中，而非 result["metadata"]
@@ -2175,6 +2196,168 @@ def _get_session_topic(session_id: Optional[str]) -> Optional[str]:
     except Exception as e:
         print(f"[API] 获取会话话题失败: {e}")
         return None
+
+
+# ========== LA-044-#3: 用户状态自动保存与 API ==========
+
+# 全局 UserStateStore 实例（延迟初始化）
+_user_state_store: Optional[Any] = None
+
+def _get_user_state_store():
+    """获取或创建 UserStateStore 实例"""
+    global _user_state_store
+    if _user_state_store is None:
+        from core.graph_education.user_state_store import UserStateStore
+        _user_state_store = UserStateStore()
+        print(f"[API] LA-044-#3: UserStateStore 初始化完成")
+    return _user_state_store
+
+
+def _save_user_state_after_dialog(request: AskRequest, result: Dict[str, Any]):
+    """LA-044-#3: 对话结束后自动保存用户状态（theta + 薄弱点）
+
+    从对话结果中提取 theta 和薄弱点信息，写回 UserStateStore。
+    此函数在 /api/ask 返回响应前调用，不阻塞响应。
+    """
+    user_id = request.user_id or "anonymous"
+    subject_id = f"{request.subject}_v1"
+
+    print(f"\n[API] LA-044-#3: ====== 自动保存用户状态 ======")
+    print(f"[API] 输入: user_id={user_id}, subject_id={subject_id}")
+
+    # 1. 提取 theta（从 IRT 结果或 user_theta 请求参数）
+    theta = None
+    agent_result = result.get("result", {})
+    if isinstance(agent_result, dict):
+        # 从 evaluate 意图的 IRT 结果中提取
+        if "irt_theta" in agent_result:
+            theta = agent_result["irt_theta"]
+            print(f"[API] LA-044-#3: 从 IRT 结果提取 theta={theta}")
+        # 从 user_theta 请求参数回写（如果用户传了）
+        elif request.user_theta is not None:
+            theta = request.user_theta
+            print(f"[API] LA-044-#3: 从请求参数回写 theta={theta}")
+
+    # 2. 提取薄弱点（从对话上下文的答错记录或 streak 信息）
+    weak_areas = []
+    if isinstance(agent_result, dict) and agent_result.get("metadata"):
+        metadata = agent_result["metadata"]
+        # 薄弱点可能存储在 metadata 中（由 CoachAgent 或 TutorAgent 标注）
+        if metadata.get("weak_areas"):
+            weak_areas = metadata["weak_areas"]
+            print(f"[API] LA-044-#3: 从 metadata 提取薄弱点={weak_areas}")
+
+    # 3. 如果没有任何可保存的数据，跳过
+    if theta is None and not weak_areas:
+        print(f"[API] LA-044-#3: 无状态更新（theta=None, weak_areas=[]），跳过保存")
+        return
+
+    # 4. 调用 UserStateStore 保存
+    try:
+        store = _get_user_state_store()
+        success = store.update_from_dialog(
+            user_id=user_id,
+            subject_id=subject_id,
+            theta=theta,
+            weak_areas=weak_areas if weak_areas else None,
+        )
+        if success:
+            print(f"[API] LA-044-#3: 用户状态自动保存成功")
+        else:
+            print(f"[API] LA-044-#3: 用户状态自动保存失败")
+    except Exception as e:
+        print(f"[API] LA-044-#3: 自动保存异常: {e}")
+        import traceback
+        traceback.print_exc()
+
+
+@app.get("/api/user-state", response_model=UserStateResponse)
+def get_user_state(user_id: str, subject: str = "generic"):
+    """
+    LA-044-#3: 获取用户完整状态（全局画像 + 概念级别知识状态）
+
+    参数:
+        user_id: 用户ID（必填）
+        subject: 学科标识（默认 generic）
+
+    返回:
+        {
+            "user_id": "...",
+            "subject_id": "...",
+            "profile": {
+                "global_theta": 0.5,
+                "weak_areas": ["概念A", "概念B"],
+                "total_questions": 10,
+                "total_correct": 7,
+                "accuracy": 70.0
+            },
+            "concept_states": [...],
+            "stats": {...}
+        }
+    """
+    print(f"\n[API] LA-044-#3: GET /api/user-state | user_id={user_id}, subject={subject}")
+
+    if not user_id:
+        raise HTTPException(status_code=400, detail="user_id 不能为空")
+
+    try:
+        store = _get_user_state_store()
+        subject_id = f"{subject}_v1"
+        state = store.get_full_user_state(user_id, subject_id)
+        print(f"[API] LA-044-#3: 返回用户状态 | concepts={len(state['concept_states'])}, "
+              f"theta={state['profile']['global_theta']:.2f}")
+        return UserStateResponse(**state)
+    except Exception as e:
+        print(f"[API] LA-044-#3: 获取用户状态失败: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"获取用户状态失败: {str(e)}")
+
+
+@app.post("/api/user-state")
+def update_user_state(request: UserStateUpdateRequest):
+    """
+    LA-044-#3: 更新用户全局画像（theta + 薄弱点）
+
+    请求体:
+        {
+            "user_id": "user123",
+            "subject": "rag",
+            "global_theta": 0.65,
+            "weak_areas": ["向量检索", "BM25"]
+        }
+
+    返回:
+        {"success": true, "message": "..."}
+    """
+    print(f"\n[API] LA-044-#3: POST /api/user-state | user_id={request.user_id}, subject={request.subject}")
+    print(f"[API] LA-044-#3: 请求数据: theta={request.global_theta}, weak_areas={request.weak_areas}")
+
+    if not request.user_id:
+        raise HTTPException(status_code=400, detail="user_id 不能为空")
+
+    try:
+        store = _get_user_state_store()
+        subject_id = f"{request.subject}_v1"
+
+        success = store.update_from_dialog(
+            user_id=request.user_id,
+            subject_id=subject_id,
+            theta=request.global_theta,
+            weak_areas=request.weak_areas,
+        )
+
+        if success:
+            print(f"[API] LA-044-#3: 用户状态更新成功")
+            return {"success": True, "message": "用户状态更新成功"}
+        else:
+            print(f"[API] LA-044-#3: 用户状态更新失败")
+            raise HTTPException(status_code=500, detail="用户状态更新失败")
+    except Exception as e:
+        print(f"[API] LA-044-#3: 更新用户状态异常: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"更新用户状态失败: {str(e)}")
 
 
 # ========== 启动入口 ==========
