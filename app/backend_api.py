@@ -355,7 +355,7 @@ def ask_question(request: AskRequest):
 
     根据用户问题自动路由到合适的 Agent，返回完整回答。
     """
-    print(f"[API] /api/ask called: query={request.query}, subject={request.subject}")
+    print(f"[API] /api/ask called: query={request.query}, subject={request.subject}, user_theta={request.user_theta}")
     coordinator = Coordinator(
         collection_name=f"{request.subject}_v1",
         top_k=5,
