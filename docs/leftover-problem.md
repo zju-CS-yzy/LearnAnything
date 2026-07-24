@@ -1458,9 +1458,9 @@ unTreeLayout 中的逐树 dagre 逻辑
 | 编号 | 问题 | 状态 |
 |:---|:---|:---|
 | LA-052 | 范式配置动态获取 | 🟡 部分完成 |
-| LA-044-#2 | Agent 个性化 Prompt | 🔴 未开始 |
-| LA-044-#3 | UserStateStore 同步 | 🔴 未开始 |
-| 树深度 | 概念树深度不足（2层 vs 3-5层） | 🟡 排查中 |
+| LA-044-#2 | Agent 个性化 Prompt | ✅ 已完成 |
+| LA-044-#3 | UserStateStore 同步 | ✅ 已完成 |
+| 树深度 | 概念树深度不足（2层 vs 3-5层） | ✅ 已解决（用户确认） |
 
 #### 🟢 P2（一般）
 | 编号 | 问题 | 状态 |
@@ -1469,6 +1469,7 @@ unTreeLayout 中的逐树 dagre 逻辑
 | LA-050 | VLM API 调用不稳定（HTTP 500/400） | 🔴 未开始 |
 | LA-040-P1-QUIZ | 多题型支持（前端联调） | 🟡 后端已实现 |
 | LA-040-P1-VIS | 评测结果可视化 | 🔴 未开始 |
+| LA-055 | GraphStore 统一环检测集成 | ✅ 已完成 |
 
 #### ✅ 已解决（近期）
 | 编号 | 问题 |
@@ -1563,11 +1564,19 @@ unTreeLayout 中的逐树 dagre 逻辑
     - `ParadigmDesigner.vue` 5步表单
 
 - **LA-055**: GraphStore 统一环检测集成（重构）
-  - **状态**: 🔴 **待排期**
-  - **说明**: SemanticLinker 集成已验证有效，可后续再下沉到 GraphStore
+  - **状态**: ✅ **已实现并测试通过（2026-07-24）**
+  - **实现内容**:
+    1. GraphStore 新增 `_cycle_detector` 懒加载，首次使用时从现有图谱构建
+    2. 新增 `add_canonical_edge()`: 统一写入 CanonicalConcept 边（HAS_DETAIL/SOLUTION/DEPENDS_ON），带环检测
+    3. `add_has_detail_relations()` 改用 `add_canonical_edge()`
+    4. SemanticLinker._write_edges() 使用 `GraphStore.add_canonical_edge()` 作为最终防线
+    5. 数据库删除时自动重置 CycleDetector
+    6. 打印链追踪：构建/拒绝/写入/失败均有 `[GraphStore] LA-055:` 前缀
+  - **测试**: `scripts/test_la055_graphstore_cycle.py` 4 组测试全部通过
+  - **优先级**: P2 → 已关闭
 
 - **树深度**: 概念树深度验证
-  - **状态**: 🟡 **待验证**
-  - **说明**: 重建 RAG 后用户反馈树形结构清晰，需确认最大深度是否达到预期（3-5层）
+  - **状态**: ✅ **已解决（2026-07-24 用户确认）**
+  - **说明**: 重建 RAG 后树形结构清晰，最大深度已达预期（3-5层）
 
 *记录日期：2026-07-24*
