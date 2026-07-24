@@ -187,18 +187,29 @@ export function buildCyStyles(paradigmConfig = null) {
         'background-color': '#2ecc71',
       }
     },
+    // ========== 全局边默认样式 ==========
+    {
+      selector: 'edge',
+      style: {
+        'curve-style': 'bezier',
+        'source-endpoint': '100% 50%',
+        'target-endpoint': '0% 50%',
+      }
+    },
     // ========== chunk-level 边样式（概念-段落归属 / 文档树层级）==========
     // BELONGS_TO: 文档树结构边（父→子）
     // HAS_CONCEPT: 概念-段落归属边
     {
       selector: 'edge[type="BELONGS_TO"], edge[type="HAS_CONCEPT"]',
       style: {
-        'width': 1,
+        'width': 1.5,
         'line-color': COLORS.belongs_to,
         'target-arrow-shape': 'triangle',
         'target-arrow-color': COLORS.belongs_to,
         'curve-style': 'bezier',
-        'arrow-scale': 0.7,
+        'source-endpoint': '100% 50%',
+        'target-endpoint': '0% 50%',
+        'arrow-scale': 0.8,
       }
     },
     // ========== 相邻关系（段落-段落）==========
