@@ -1542,8 +1542,15 @@ unTreeLayout 中的逐树 dagre 逻辑
   - **优先级**: P1 → 已关闭
 
 - **LA-044-#3**: UserStateStore 双向同步（对话结束时 theta/薄弱点写回 SQLite）
-  - **状态**: 🔴 **今天推进**
-  - **依赖**: LA-044-#2 已完成
+  - **状态**: ✅ **已实现并测试通过（2026-07-24）**
+  - **实现内容**:
+    1. UserStateStore 新增 `user_subject_profiles` 表（全局 theta + 薄弱点列表）
+    2. 新增 save_profile / load_profile / update_from_dialog / get_full_user_state 方法
+    3. 新增 `/api/user-state` GET/POST API
+    4. `/api/ask` 响应后自动调用 `_save_user_state_after_dialog` 保存 theta + 薄弱点
+    5. 全流程打印链追踪：API 层 → UserStateStore 层
+  - **测试**: `scripts/test_la044_user_state_sync.py` 4 组测试全部通过
+  - **优先级**: P1 → 已关闭
 
 ### 🟡 P2 优先级
 
