@@ -24,7 +24,7 @@ class TutorAgent(BaseAgent):
     def agent_name(self) -> str:
         return "TutorAgent"
 
-    def __init__(self, collection_name: str = "learnanything_v1", top_k: int = 5, message_bus=None):
+    def __init__(self, collection_name: str = "learnanything_v1", top_k: int = 5, message_bus=None, user_theta: Optional[float] = None):
         self.collection_name = collection_name
         self.top_k = top_k
         self._retriever = None
@@ -37,6 +37,8 @@ class TutorAgent(BaseAgent):
         self._message_bus = message_bus
         # P0-INT-6: 用户薄弱点（从消息总线接收）
         self._user_weak_areas: List[str] = []
+        # LA-044-#2: 用户能力水平（IRT theta），用于个性化讲解深度
+        self.user_theta = user_theta
 
     def _get_retriever(self):
         if self._retriever is None:
@@ -48,8 +50,8 @@ class TutorAgent(BaseAgent):
             self._reranker = RerankerFactory.create()
         return self._reranker
 
-    def _generate_answer(self, query: str, context_chunks: List[Dict[str, Any]], context_text_override: str = None, media: List[Dict[str, Any]] = None, history_text: str = None) -> str:
-        """调用 LLM 生成润色后的自然语言回答（阶段 1：支持对话历史注入）。
+    def _generate_answer(self, query: str, context_chunks: List[Dict[str, Any]], context_text_override: str = None, media: List[Dict[str, Any]] = None, history_text: str = None, user_theta: Optional[float] = None) -> str:
+        """调用 LLM 生成润色后的自然语言回答（阶段 1：支持对话历史注入 + LA-044-#2：支持 theta 个性化）。
 
         Args:
             query: 用户问题
@@ -57,6 +59,7 @@ class TutorAgent(BaseAgent):
             context_text_override: 可选，直接使用提供的上下文文本（P0 图谱上下文）
             media: 可选，关联的媒体资源列表（LA-IMG）
             history_text: 可选，对话历史文本（阶段 1 新增）
+            user_theta: 可选，用户 IRT 能力值 0.0~1.0（LA-044-#2 新增）
         """
         if not self._llm.available:
             # LLM 不可用时返回原始上下文拼接
@@ -113,6 +116,44 @@ class TutorAgent(BaseAgent):
         print(f"  - 媒体资源: {len(media) if media else 0} 个")
         print(f"  - 薄弱领域: {len(self._user_weak_areas)} 个")
 
+        # LA-044-#2: 根据 user_theta 生成个性化讲解深度指示
+        effective_theta = user_theta if user_theta is not None else self.user_theta
+        personalization_hint = ""
+        if effective_theta is not None:
+            if effective_theta <= 0.3:
+                personalization_hint = (
+                    "\n\n【个性化讲解指示】该用户当前处于初学者水平。"
+                    "请按照以下方式讲解：\n"
+                    "1. 先解释'是什么'，再解释'为什么'，最后讲'怎么用'\n"
+                    "2. 每个专业术语都必须用通俗类比来解释（如把'向量'类比为'带方向的箭头'）\n"
+                    "3. 避免任何跳步，将推导/计算过程拆解到最细的步骤\n"
+                    "4. 多用具体例子帮助理解，少用抽象描述\n"
+                    "5. 回答长度可以适当增加，确保用户完全理解"
+                )
+            elif effective_theta <= 0.7:
+                personalization_hint = (
+                    "\n\n【个性化讲解指示】该用户当前处于中级水平。"
+                    "请按照以下方式讲解：\n"
+                    "1. 平衡直觉理解和形式化描述，既讲原理也讲推导\n"
+                    "2. 关键步骤需要展开解释，非关键步骤可以适当跳步\n"
+                    "3. 专业术语可以默认用户已了解基础含义，重点讲深层联系\n"
+                    "4. 适当引入与其他知识点的关联，帮助构建知识网络\n"
+                    "5. 回答长度适中，重点突出核心逻辑链"
+                )
+            else:
+                personalization_hint = (
+                    "\n\n【个性化讲解指示】该用户当前处于高级水平。"
+                    "请按照以下方式讲解：\n"
+                    "1. 直接聚焦核心原理和深层机制，默认基础知识已掌握\n"
+                    "2. 允许大量跳步，只讲解最关键的创新点和难点\n"
+                    "3. 深入技术细节（如公式推导、算法复杂度、边界条件）\n"
+                    "4. 可以讨论前沿进展、变体方法和未解决问题\n"
+                    "5. 回答简洁精炼，避免冗余解释，优先形式化表达"
+                )
+            print(f"[TutorAgent] LA-044-#2: 个性化指示已注入 (theta={effective_theta:.2f}, 级别={'初学者' if effective_theta <= 0.3 else '中级' if effective_theta <= 0.7 else '高级'})")
+        else:
+            print(f"[TutorAgent] LA-044-#2: 无 theta 值，使用默认讲解风格")
+
         system_prompt = (
             "你是一位知识渊博的AI助教。请根据提供的参考资料，为用户的问题生成一个"
             "清晰、连贯、有结构的回答。要求：\n"
@@ -125,6 +166,7 @@ class TutorAgent(BaseAgent):
             "要在讲解到对应内容时直接嵌入到段落中\n"
             "6. 如果资料不足以完全回答问题，诚实说明\n"
             "7. 如果提供了对话历史，请注意保持与上下文的连贯性"
+            f"{personalization_hint}"
         )
 
         user_prompt = f"{history_hint}用户问题：{query}{source_note}\n\n参考资料：\n{context}{media_hint}\n\n请生成回答："
@@ -148,11 +190,17 @@ class TutorAgent(BaseAgent):
             # 降级：返回原始上下文
             return "\n\n---\n\n".join(c.get("text", "")[:500] for c in context_chunks)
 
-    def handle(self, query: str, context: Optional[Any] = None, filters: Optional[Dict[str, Any]] = None, graph_context=None, **kwargs) -> Dict[str, Any]:
+    def handle(self, query: str, context: Optional[Any] = None, filters: Optional[Dict[str, Any]] = None, graph_context=None, user_theta: Optional[float] = None, **kwargs) -> Dict[str, Any]:
         """
         概念讲解主入口。
         阶段 1 增强: 支持对话上下文注入（含跨学科记忆分层）。
+        LA-044-#2: 支持动态传入 user_theta 覆盖默认值。
         """
+        # LA-044-#2: 动态更新 theta（如果本次请求传入了新值）
+        if user_theta is not None:
+            self.user_theta = user_theta
+            print(f"[TutorAgent] LA-044-#2: 动态更新 user_theta={user_theta:.2f}")
+
         print(f"\n[TutorAgent] ====== handle 调用 ======")
         print(f"[TutorAgent] 查询: {query[:60]}...")
         
@@ -230,7 +278,7 @@ class TutorAgent(BaseAgent):
 
         # 生成回答
         print(f"[TutorAgent] 调用 LLM 生成回答...")
-        answer = self._generate_answer(query, context_chunks, context_text_override=context_text, media=media, history_text=history_text)
+        answer = self._generate_answer(query, context_chunks, context_text_override=context_text, media=media, history_text=history_text, user_theta=self.user_theta)
         print(f"[TutorAgent] 回答生成完成: {len(answer)} 字符")
         
         print(f"\n{'='*60}")
@@ -560,7 +608,7 @@ class TutorAgent(BaseAgent):
                 history_text = ""
                 if context is not None and hasattr(context, 'to_prompt_context'):
                     history_text = context.to_prompt_context(max_turns=5)
-                answer = self._generate_answer(query, chunks, history_text=history_text)
+                answer = self._generate_answer(query, chunks, history_text=history_text, user_theta=self.user_theta)
                 return {
                     "text": answer,
                     "metadata": {"cache_hit": True, "hit_type": cached.get("hit_type", "unknown")},
@@ -595,7 +643,7 @@ class TutorAgent(BaseAgent):
             history_text = context.to_prompt_context(max_turns=5)
 
         # 调用 LLM 生成润色回答
-        answer = self._generate_answer(query, final_results, history_text=history_text)
+        answer = self._generate_answer(query, final_results, history_text=history_text, user_theta=self.user_theta)
 
         # 写入缓存（新结构：包含 chunks 和 answer）
         cache_data = {
