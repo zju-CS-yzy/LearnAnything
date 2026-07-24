@@ -94,57 +94,76 @@
       </div>
 
       <!-- 步骤3：结果报告 -->
-      <div v-if="step === 'result'" class="eval-result card">
-        <div class="score-circle">
-          <div class="score-number">{{ report.percentage }}%</div>
-          <div class="score-label">{{ report.level }}</div>
-        </div>
-        <div class="score-detail">
-          {{ report.correct_count }} / {{ report.total_questions }} 正确 · 得分 {{ report.total_score }} / {{ report.max_score }}
-        </div>
-        <div class="summary">{{ report.summary }}</div>
-
-        <div v-if="report.strong_areas.length" class="areas-section">
-          <div class="areas-title strong">✅ 优势领域</div>
-          <div class="areas-list">
-            <span v-for="area in report.strong_areas" :key="area" class="area-tag">{{ area }}</span>
+      <div v-if="step === 'result'" class="eval-result-wrapper">
+        <!-- 简版结果 -->
+        <div class="eval-result card">
+          <div class="score-circle">
+            <div class="score-number">{{ report.percentage }}%</div>
+            <div class="score-label">{{ report.level }}</div>
           </div>
-        </div>
-
-        <div v-if="report.weak_areas.length" class="areas-section">
-          <div class="areas-title weak">⚠️ 薄弱环节</div>
-          <div class="areas-list">
-            <span v-for="area in report.weak_areas" :key="area" class="area-tag">{{ area }}</span>
+          <div class="score-detail">
+            {{ report.correct_count }} / {{ report.total_questions }} 正确 · 得分 {{ report.total_score }} / {{ report.max_score }}
           </div>
-        </div>
+          <div class="summary">{{ report.summary }}</div>
 
-        <div class="details-section">
-          <div class="details-title">答题详情</div>
-          <div class="details-list">
-            <div
-              v-for="d in report.details"
-              :key="d.id"
-              class="detail-item"
-              :class="{ correct: d.is_correct, wrong: !d.is_correct }"
-            >
-              <div class="detail-header">
-                <span class="detail-status">{{ d.is_correct ? '✅' : '❌' }}</span>
-                <span class="detail-question">{{ d.question }}</span>
-              </div>
-              <div class="detail-answers">
-                <span :class="{ 'user-correct': d.is_correct, 'user-wrong': !d.is_correct }">
-                  你的答案：{{ d.user_answer || '(未作答)' }}
-                </span>
-                <span class="correct-answer">正确答案：{{ d.correct_answer }}</span>
-              </div>
-              <div class="detail-feedback">{{ d.feedback }}</div>
+          <div v-if="report.strong_areas.length" class="areas-section">
+            <div class="areas-title strong">✅ 优势领域</div>
+            <div class="areas-list">
+              <span v-for="area in report.strong_areas" :key="area" class="area-tag">{{ area }}</span>
             </div>
           </div>
-        </div>
 
-        <button class="btn btn-primary" @click="restart" style="margin-top: 20px;">
-          重新评测
-        </button>
+          <div v-if="report.weak_areas.length" class="areas-section">
+            <div class="areas-title weak">⚠️ 薄弱环节</div>
+            <div class="areas-list">
+              <span v-for="area in report.weak_areas" :key="area" class="area-tag">{{ area }}</span>
+            </div>
+          </div>
+
+          <!-- LA-040-P1-VIS: 展开/收起详细报告 -->
+          <button class="btn btn-primary" @click="showReport = !showReport" style="margin: 16px 0;">
+            {{ showReport ? '▲ 收起详细报告' : '▼ 查看详细能力报告' }}
+          </button>
+
+          <!-- 详细报告面板（内嵌，不覆盖侧边栏） -->
+          <div v-if="showReport" class="report-detail-panel">
+            <EvaluationReport
+              :subject="currentSubject"
+              :eval-report="report"
+              @close="showReport = false"
+              @review="handleReview"
+              @practice="handlePractice"
+            />
+          </div>
+
+          <div class="details-section">
+            <div class="details-title">答题详情</div>
+            <div class="details-list">
+              <div
+                v-for="d in report.details"
+                :key="d.id"
+                class="detail-item"
+                :class="{ correct: d.is_correct, wrong: !d.is_correct }"
+              >
+                <div class="detail-header">
+                  <span class="detail-status">{{ d.is_correct ? '✅' : '❌' }}</span>
+                  <span class="detail-question">{{ d.question }}</span>
+                </div>
+                <div class="detail-answers">
+                  <span :class="{ 'user-correct': d.is_correct, 'user-wrong': !d.is_correct }">
+                    你的答案：{{ d.user_answer || '(未作答)' }}
+                  </span>
+                  <span class="correct-answer">正确答案：{{ d.correct_answer }}</span>
+                </div>
+                <div class="detail-feedback">{{ d.feedback }}</div>
+              </div>
+            </div>
+          </div>
+
+          <button class="btn btn-primary" @click="restart" style="margin-top: 20px;">
+            重新评测
+          </button>
+        </div>
       </div>
     </div>
   </div>
@@ -153,6 +172,7 @@
 <script setup>
 import { ref, computed, inject } from 'vue'
 import { apiEvalStart, apiEvalSubmit } from '../composables/useApi.js'
+import EvaluationReport from './EvaluationReport.vue'
 
 // 全局学科状态
 const subjectState = inject('subjectState')
@@ -164,6 +184,8 @@ const count = ref(5)
 const evalMode = ref('generate')
 const isLoading = ref(false)
 const isSubmitting = ref(false)
+
+const showReport = ref(false)
 
 const modeHint = computed(() => {
   const hints = {
@@ -193,6 +215,7 @@ async function startEval() {
     userAnswers.value = new Array(questions.value.length).fill('')
     currentIndex.value = 0
     step.value = 'quiz'
+    showReport.value = false
   } catch (e) {
     alert('开始评测失败: ' + e.message)
   } finally {
@@ -212,6 +235,7 @@ async function submitEval() {
     const result = await apiEvalSubmit(sessionId.value, userAnswers.value)
     report.value = result
     step.value = 'result'
+    showReport.value = true  // LA-040-P1-VIS: 自动展示详细报告
   } catch (e) {
     alert('提交失败: ' + e.message)
   } finally {
@@ -226,6 +250,17 @@ function restart() {
   userAnswers.value = []
   currentIndex.value = 0
   report.value = null
+  showReport.value = false
+}
+
+function handleReview(conceptName) {
+  // 触发父组件切换到 ChatView 并传入查询
+  window.dispatchEvent(new CustomEvent('la-switch-tab', { detail: { tab: 'chat', query: `什么是${conceptName}？` } }))
+}
+
+function handlePractice(conceptName) {
+  // 触发父组件切换到 QuizView 并传入主题
+  window.dispatchEvent(new CustomEvent('la-switch-tab', { detail: { tab: 'quiz', topic: conceptName } }))
 }
 </script>
 
@@ -520,5 +555,18 @@ function restart() {
   line-height: 1.4;
   padding-top: 6px;
   border-top: 1px dashed var(--border-color);
+}
+
+/* LA-040-P1-VIS: 报告详情面板（内嵌，不覆盖侧边栏） */
+.eval-result-wrapper {
+  /* 不需要特殊定位 */
+}
+
+.report-detail-panel {
+  margin: 16px 0;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+  background: var(--bg-primary);
 }
 </style>
