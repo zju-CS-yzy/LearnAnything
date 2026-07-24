@@ -141,6 +141,7 @@ class AskRequest(BaseModel):
     subject: str = Field("generic", description="学科标识")
     user_id: Optional[str] = Field(None, description="用户ID（可选，用于监控）")
     session_id: Optional[str] = Field(None, description="会话ID（可选）")
+    user_theta: Optional[float] = Field(None, ge=0.0, le=1.0, description="用户能力水平 0.0~1.0（可选，用于个性化讲解深度）")
 
 
 class AskResponse(BaseModel):
@@ -358,11 +359,13 @@ def ask_question(request: AskRequest):
     coordinator = Coordinator(
         collection_name=f"{request.subject}_v1",
         top_k=5,
+        user_theta=request.user_theta,
     )
     result = coordinator.handle(
         query=request.query,
         user_id=request.user_id,
         session_id=request.session_id,
+        user_theta=request.user_theta,
     )
     print(f"[API] /api/ask returning answer length={len(result.get('text', ''))}")
 
@@ -409,11 +412,13 @@ def ask_stream(request: AskRequest):
         coordinator = Coordinator(
             collection_name=f"{request.subject}_v1",
             top_k=5,
+            user_theta=request.user_theta,
         )
         result = coordinator.handle(
             query=request.query,
             user_id=request.user_id,
             session_id=request.session_id,
+            user_theta=request.user_theta,
         )
 
         intent = result.get("intent", {})

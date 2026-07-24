@@ -36,10 +36,11 @@ class Coordinator:
         result = coordinator.handle("给我出几道化学题")
     """
 
-    def __init__(self, collection_name: str = "learnanything_v1", top_k: int = 5, enabled_intents: List[str] = None, graph_store=None):
+    def __init__(self, collection_name: str = "learnanything_v1", top_k: int = 5, enabled_intents: List[str] = None, graph_store=None, user_theta: Optional[float] = None):
         self.collection_name = collection_name
         self.top_k = top_k
         self.enabled_intents = enabled_intents or ["concept", "quiz", "job", "evaluate"]
+        self.user_theta = user_theta
 
         self._intent_router = IntentRouter()
         self._agents: Dict[str, BaseAgent] = {}
@@ -48,7 +49,7 @@ class Coordinator:
         self._message_bus = MessageBus(enable_audit=True)
 
         # Lazy initialization of agents (pass message_bus)
-        self._agents["concept"] = TutorAgent(collection_name=collection_name, top_k=top_k, message_bus=self._message_bus)
+        self._agents["concept"] = TutorAgent(collection_name=collection_name, top_k=top_k, message_bus=self._message_bus, user_theta=user_theta)
         self._agents["quiz"] = QuizAgent(collection_name=collection_name, top_k=top_k, message_bus=self._message_bus)
         self._agents["evaluate"] = CoachAgent(collection_name=collection_name, top_k=top_k, message_bus=self._message_bus)
         self._agents["job"] = HeadhunterAgent(message_bus=self._message_bus)
@@ -67,11 +68,12 @@ class Coordinator:
         # 阶段 1: 延迟初始化 DialogContextManager
         self._dialog_manager = None
 
-    def handle(self, query: str, filters: Optional[Dict[str, Any]] = None, user_id: Optional[str] = None, session_id: Optional[str] = None) -> Dict[str, Any]:
+    def handle(self, query: str, filters: Optional[Dict[str, Any]] = None, user_id: Optional[str] = None, session_id: Optional[str] = None, user_theta: Optional[float] = None) -> Dict[str, Any]:
         """
         处理用户查询的统一入口。
         阶段 1: 新增对话上下文管理（会话持久化、指代解析、历史注入）。
         LA-044-B: 话题提取、切换检测、追踪。
+        LA-044-#2: 支持传入 user_theta 进行个性化讲解。
 
         Returns:
             {
@@ -208,18 +210,18 @@ class Coordinator:
                     print(f"[Coordinator] 组装上下文: {graph_context.token_count} tokens")
 
                     # 阶段 1: 传递 context 给 Agent
-                    agent_result = agent.handle(resolved_query, context=dialog_context, filters=filters, graph_context=graph_context)
+                    agent_result = agent.handle(resolved_query, context=dialog_context, filters=filters, graph_context=graph_context, user_theta=user_theta)
                 else:
                     print(f"[Coordinator] 无匹配概念，回退到旧方式")
-                    agent_result = agent.handle(resolved_query, context=dialog_context, filters=filters)
+                    agent_result = agent.handle(resolved_query, context=dialog_context, filters=filters, user_theta=user_theta)
             except Exception as e:
                 print(f"[Coordinator] P0 模块调用失败，回退到旧模式: {e}")
                 import traceback
                 traceback.print_exc()
-                agent_result = agent.handle(resolved_query, context=dialog_context, filters=filters)
+                agent_result = agent.handle(resolved_query, context=dialog_context, filters=filters, user_theta=user_theta)
         else:
             # 非 quiz/concept 意图，原方式执行（但传递 context）
-            agent_result = agent.handle(resolved_query, context=dialog_context, filters=filters)
+            agent_result = agent.handle(resolved_query, context=dialog_context, filters=filters, user_theta=user_theta)
 
         total_duration_ms = (time.time() - start_time) * 1000
 
