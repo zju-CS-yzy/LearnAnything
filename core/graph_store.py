@@ -227,6 +227,13 @@ class GraphStore:
 
         return self._conn
 
+    def _execute(self, conn, cypher):
+        """
+        Thread-safe Cypher query execution.
+        """
+        with GraphStore._conn_lock:
+            return conn.execute(cypher)
+
     def delete_all(self):
         """
         删除整个 KùzuDB 数据库目录（所有数据和 Schema）。
