@@ -59,6 +59,90 @@ export function buildCyStyles(paradigmConfig = null) {
         'border-color': COLORS.selected,
       }
     },
+    // ========== Chunk 节点卡片样式（文档树）==========
+    // heading/paragraph/document/child/markdown 统一卡片风格
+    {
+      selector: 'node[chunkType="heading"], node[chunkType="paragraph"], node[chunkType="document"], node[chunkType="child"], node[chunkType="markdown"]',
+      style: {
+        'label': 'data(cardLabel)',
+        'text-wrap': 'wrap',
+        'text-max-width': 'data(nodeWidth)',
+        'text-valign': 'center',
+        'text-halign': 'center',
+        'font-size': '11px',
+        'color': '#fff',
+        'text-outline-color': 'rgba(0,0,0,0.5)',
+        'text-outline-width': 1,
+        'width': 'data(nodeWidth)',
+        'height': 'data(cardHeight)',
+        'border-width': 3,
+        'border-color': 'data(borderColor)',
+        'shape': 'round-rectangle',
+        'corner-radius': 10,
+      }
+    },
+    // Heading 节点 — 红色
+    {
+      selector: 'node[chunkType="heading"]',
+      style: {
+        'background-color': '#e74c3c',
+      }
+    },
+    // Paragraph 节点 — 蓝色
+    {
+      selector: 'node[chunkType="paragraph"]',
+      style: {
+        'background-color': '#3498db',
+      }
+    },
+    // Document 节点 — 绿色
+    {
+      selector: 'node[chunkType="document"]',
+      style: {
+        'background-color': '#27ae60',
+      }
+    },
+    // Child/Markdown 节点 — 灰色
+    {
+      selector: 'node[chunkType="child"], node[chunkType="markdown"]',
+      style: {
+        'background-color': '#7f8c8d',
+        'border-color': '#616a6b',
+      }
+    },
+    // 图片节点
+    {
+      selector: 'node[chunkType="image"], node[chunkType="image_pseudo"]',
+      style: {
+        'label': '',
+        'background-image': 'data(bgImage)',
+        'background-fit': 'cover',
+        'background-color': '#f39c12',
+        'width': 60,
+        'height': 60,
+        'shape': 'round-rectangle',
+      }
+    },
+    // 图片节点无图片时显示图标
+    {
+      selector: 'node[chunkType="image"][bgImage = "none"], node[chunkType="image_pseudo"][bgImage = "none"]',
+      style: {
+        'label': '📷',
+        'font-size': '24px',
+        'text-valign': 'center',
+        'text-halign': 'center',
+        'color': '#fff',
+        'background-color': '#f39c12',
+      }
+    },
+    // 图片节点选中效果
+    {
+      selector: 'node[chunkType="image"]:selected, node[chunkType="image_pseudo"]:selected',
+      style: {
+        'border-width': 4,
+        'border-color': COLORS.selected,
+      }
+    },
     // ========== 概念节点样式（UML 类图卡片风格）==========
     // LA-052: 虚拟节点的样式通过 ele.style() 在 GraphView.vue 中设置（优先级高于 CSS）
     // 此处不再使用 :not([isVirtual = true])（Cytoscape 不支持该语法）
@@ -103,9 +187,11 @@ export function buildCyStyles(paradigmConfig = null) {
         'background-color': '#2ecc71',
       }
     },
-    // ========== chunk-level 边样式（概念-段落归属）==========
+    // ========== chunk-level 边样式（概念-段落归属 / 文档树层级）==========
+    // BELONGS_TO: 文档树结构边（父→子）
+    // HAS_CONCEPT: 概念-段落归属边
     {
-      selector: 'edge[type="HAS_CONCEPT"]',
+      selector: 'edge[type="BELONGS_TO"], edge[type="HAS_CONCEPT"]',
       style: {
         'width': 1,
         'line-color': COLORS.belongs_to,
