@@ -102,6 +102,7 @@ class Coordinator:
         print(f"[Coordinator]    - user_id: {actual_user_id}")
         print(f"[Coordinator]    - query: '{query[:80]}...'")
         print(f"[Coordinator]    - session_id: {session_id}")
+        print(f"[Coordinator]    - user_theta: {user_theta}")
         print(f"[Coordinator]    - collection_name: {self.collection_name}")
         print(f"[Coordinator]    - filters: {filters}")
         print(f"{'='*60}")
