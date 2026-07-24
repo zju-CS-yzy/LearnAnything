@@ -189,8 +189,9 @@ class GraphStore:
         self.db_path_str = str(self.db_path)  # LA-035-P12: 统一使用字符串缓存 key
 
         self._db = None
-
         self._conn = None
+        # LA-055: 懒加载 CycleDetector（首次使用时从现有图谱构建）
+        self._cycle_detector = None
 
 
 
@@ -237,6 +238,7 @@ class GraphStore:
                 del _db_cache[self.db_path_str]
         self._db = None
         self._conn = None
+        self._reset_cycle_detector()  # LA-055: 数据库删除后重置环检测器
         if self.db_path.exists():
             if self.db_path.is_dir():
                 shutil.rmtree(self.db_path)
@@ -244,9 +246,112 @@ class GraphStore:
                 self.db_path.unlink()
         print(f"[GraphStore] 已删除数据库: {self.db_path_str}")
 
+    # ========== LA-055: CycleDetector 集成（统一环检测）==========
 
+    def _get_cycle_detector(self) -> Optional["CycleDetector"]:
+        """LA-055: 懒加载 CycleDetector，从现有图谱构建
 
-    def _execute(self, conn, cypher):
+        首次调用时，查询所有 CanonicalConcept 之间的有向边，
+        构建 CycleDetector 的内存图结构，用于后续增量环检测。
+
+        Returns:
+            CycleDetector 实例，或 None（如果构建失败）
+        """
+        if self._cycle_detector is not None:
+            return self._cycle_detector
+
+        print(f"[GraphStore] LA-055: 首次构建 CycleDetector...")
+        try:
+            from core.cycle_detector import CycleDetector
+            detector = CycleDetector()
+            conn = self._ensure_db()
+
+            # 查询所有 CanonicalConcept 之间的有向边
+            # 注意：HAS_DETAIL/SOLUTION/DEPENDS_ON 方向是 parent->child
+            # 如果方向不一致（如双向 IMPLEMENTS），需要特别注意
+            edge_count = 0
+            for rel_type in ["HAS_DETAIL", "SOLUTION", "DEPENDS_ON"]:
+                try:
+                    result = self._execute(conn, f"""
+                        MATCH (a:CanonicalConcept)-[:{rel_type}]->(b:CanonicalConcept)
+                        RETURN a.canonical_id, b.canonical_id
+                    """)
+                    while result.has_next():
+                        row = result.get_next()
+                        detector.add_edge(row[0], row[1], raise_on_cycle=False)
+                        edge_count += 1
+                except Exception:
+                    pass  # 关系类型可能不存在
+
+            self._cycle_detector = detector
+            print(f"[GraphStore] LA-055: CycleDetector 构建完成 | "
+                  f"节点={len(detector._nodes)}, 边={edge_count}")
+            return detector
+        except Exception as e:
+            print(f"[GraphStore] LA-055: CycleDetector 构建失败: {e}")
+            return None
+
+    def _reset_cycle_detector(self):
+        """LA-055: 重置 CycleDetector（数据库删除/重建后调用）"""
+        self._cycle_detector = None
+        print(f"[GraphStore] LA-055: CycleDetector 已重置")
+
+    def add_canonical_edge(self, source_id: str, target_id: str,
+                           relation_type: str, confidence: float = 0.85,
+                           raise_on_cycle: bool = False) -> bool:
+        """LA-055: 统一写入 CanonicalConcept 之间的有向边（带环检测）
+
+        所有写入 CanonicalConcept 之间关系（HAS_DETAIL/SOLUTION/DEPENDS_ON 等）
+        的代码都应通过此方法，以确保环检测生效。
+
+        Args:
+            source_id: 源节点 canonical_id
+            target_id: 目标节点 canonical_id
+            relation_type: 关系类型（数据库表名，如 HAS_DETAIL, SOLUTION, DEPENDS_ON）
+            confidence: 置信度
+            raise_on_cycle: 检测到环时是否抛出异常（False 则静默拒绝）
+
+        Returns:
+            True: 边写入成功
+            False: 边会形成环，已拒绝
+        """
+        # 1. 环检测
+        detector = self._get_cycle_detector()
+        if detector is not None:
+            if detector.would_form_cycle(source_id, target_id):
+                cycle_path = detector._find_cycle_path(source_id, target_id)
+                print(f"[GraphStore] LA-055: 🚫 拒绝环边 | "
+                      f"{source_id} --[{relation_type}]--> {target_id} | "
+                      f"环路径: {' -> '.join(cycle_path + [source_id])}")
+                if raise_on_cycle:
+                    from core.cycle_detector import CycleError
+                    raise CycleError(cycle_path + [source_id])
+                return False
+
+        # 2. 写入数据库
+        esc = self._escape_cypher_string
+        safe_source = esc(source_id)
+        safe_target = esc(target_id)
+        safe_relation = esc(relation_type)
+
+        conn = self._ensure_db()
+        cypher = f"""
+            MATCH (a:CanonicalConcept {{canonical_id: '{safe_source}'}}),
+                  (b:CanonicalConcept {{canonical_id: '{safe_target}'}})
+            CREATE (a)-[:{safe_relation} {{confidence: {confidence}}}]->(b)
+        """
+        try:
+            self._execute(conn, cypher)
+            # 3. 更新内存中的 CycleDetector
+            if detector is not None:
+                detector.add_edge(source_id, target_id, raise_on_cycle=False)
+            print(f"[GraphStore] LA-055: ✅ 写入边 | "
+                  f"{source_id} --[{relation_type}]--> {target_id}")
+            return True
+        except Exception as e:
+            print(f"[GraphStore] LA-055: ❌ 写入边失败 | "
+                  f"{source_id} --[{relation_type}]--> {target_id} | {e}")
+            return False
 
         """
 
@@ -2124,31 +2229,23 @@ class GraphStore:
         """
         添加 HAS_DETAIL 关系（CanonicalConcept -> CanonicalConcept）。
         LA-035 Phase 2.3: 语义聚合产生的层级关系。
+        LA-055: 通过 add_canonical_edge 统一写入，带环检测。
         Args:
             relations: 关系列表，每个包含 {"from": canonical_id, "to": canonical_id, "confidence": float}
         Returns:
             成功创建的关系数量
         """
-        conn = self._ensure_db()
         created = 0
-        esc = self._escape_cypher_string
         for rel in relations:
-            from_id = esc(rel.get("from", ""))
-            to_id = esc(rel.get("to", ""))
+            from_id = rel.get("from", "")
+            to_id = rel.get("to", "")
             confidence = rel.get("confidence", 0.85)
             if not from_id or not to_id or from_id == to_id:
                 continue
-            cypher = f"""
-                MATCH (a:CanonicalConcept {{canonical_id: '{from_id}'}}),
-                      (b:CanonicalConcept {{canonical_id: '{to_id}'}})
-                MERGE (a)-[:HAS_DETAIL {{confidence: {confidence}}}]->(b)
-            """
-            try:
-                self._execute(conn, cypher)
+            # LA-055: 使用统一边写入方法（带环检测）
+            if self.add_canonical_edge(from_id, to_id, "HAS_DETAIL", confidence, raise_on_cycle=False):
                 created += 1
-            except Exception as e:
-                print(f"[GraphStore] HAS_DETAIL failed {from_id}->{to_id}: {e}")
-        print(f"[GraphStore] Created {created} HAS_DETAIL relations")
+        print(f"[GraphStore] LA-055: add_has_detail_relations 完成 | 请求={len(relations)}, 成功={created}")
         return created
 
     def get_has_detail_edges(self, limit: int = 500) -> List[Dict[str, Any]]:

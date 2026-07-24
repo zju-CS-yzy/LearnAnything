@@ -1330,6 +1330,7 @@ class SemanticLinker:
         """
         将语义连接边写入 KùzuDB。
         如果 canonical 概念节点不存在，则先创建。
+        LA-055: 使用 GraphStore.add_canonical_edge() 统一写入，带环检测兜底。
         """
         conn = self.graph_store._ensure_db()
         written = 0
@@ -1370,29 +1371,22 @@ class SemanticLinker:
                     else:
                         print(f"[SemanticLinker] 创建节点失败 {node_id}: {e}")
 
-            # 创建关系
-            safe_parent_id = esc(parent_id)
-            safe_child_id = esc(child_id)
-            # LA-052 FIX: 关系名映射（YAML v2.0 名 → 数据库表名）
+            # LA-055: 使用 GraphStore.add_canonical_edge() 统一写入（带环检测兜底）
+            # SemanticLinker.link_all() 已做预检测，此处作为最终防线
             relation_type = edge['relation_type']
             table_name = self.graph_store._rel_table_name(relation_type)
-            safe_relation = esc(table_name)
             confidence = float(edge.get('confidence', 0.0))
-            cypher = f"""
-                MATCH (p:CanonicalConcept {{canonical_id: '{safe_parent_id}'}}),
-                      (c:CanonicalConcept {{canonical_id: '{safe_child_id}'}})
-                CREATE (p)-[:{safe_relation} {{confidence: {confidence}}}]->(c)
-            """
-            try:
-                conn.execute(cypher)
+            
+            if self.graph_store.add_canonical_edge(
+                parent_id, child_id, table_name, confidence, raise_on_cycle=False
+            ):
                 written += 1
                 if is_virtual_edge:
-                    print(f"[SemanticLinker] 虚拟节点边写入: {parent_id[:30]} --{safe_relation}--> {child_id[:30]}")
-            except Exception as e:
-                if is_virtual_edge:
-                    print(f"[SemanticLinker] 虚拟节点边写入失败: {parent_id[:30]} --{safe_relation}--> {child_id[:30]}: {e}")
-                else:
-                    print(f"[SemanticLinker] 写入边失败: {e}")
+                    print(f"[SemanticLinker] 虚拟节点边写入: {parent_id[:30]} --{table_name}--> {child_id[:30]}")
+            else:
+                # LA-055: 环检测拒绝（理论上 link_all 预检测已过滤，此处作为兜底）
+                print(f"[SemanticLinker] LA-055: 环检测兜底拒绝 | "
+                      f"{parent_id[:30]} --{table_name}--> {child_id[:30]}")
 
         print(f"[SemanticLinker] 写入 {written} 条语义连接边")
         return written
