@@ -118,6 +118,11 @@
 import { ref, nextTick, onMounted, inject, computed } from 'vue'
 import { marked } from 'marked'
 import { apiAskStream } from '../composables/useApi.js'
+import { useUser } from '../composables/useUser.js'
+
+// LA-050-Phase5: 当前用户（用于对话用户隔离）
+const { currentUser, getAuthHeaders } = useUser()
+const currentUserId = computed(() => currentUser.value?.user_id || 'anonymous')
 
 // 全局学科状态
 const subjectState = inject('subjectState')
@@ -228,17 +233,43 @@ function handleKeydown(e) {
   }
 }
 
+// LA-044: 用户 theta 状态（从 UserStateStore 获取）
+const userTheta = ref(null)
+
+// LA-044: 从后端获取用户 theta
+async function loadUserTheta() {
+  try {
+    const resp = await fetch(`${window.location.origin}/api/user-state`, {
+      headers: getAuthHeaders(),
+    })
+    if (resp.ok) {
+      const data = await resp.json()
+      const theta = data?.state?.profile?.global_theta
+      if (theta !== undefined && theta !== null) {
+        userTheta.value = theta
+        console.log('[ChatView] LA-044: 加载用户 theta:', theta)
+      } else {
+        console.log('[ChatView] LA-044: 用户 theta 未设置')
+      }
+    }
+  } catch (e) {
+    console.error('[ChatView] LA-044: 加载 theta 失败:', e)
+  }
+}
+
 async function sendMessage(presetText = null) {
   const text = presetText || inputText.value.trim()
   if (!text || isStreaming.value) return
 
+  // LA-044: 如果 theta 未加载，尝试加载
+  if (userTheta.value === null) {
+    await loadUserTheta()
+  }
+
   // 第一用户消息作为会话标题
-  if (messages.value.length === 0) {
+  const isFirstMessage = messages.value.length === 0
+  if (isFirstMessage) {
     sessionTitle.value = text.slice(0, 30)
-    // 通知 Sidebar 创建新会话
-    window.dispatchEvent(new CustomEvent('chat-session-created', {
-      detail: { id: sessionId.value, title: sessionTitle.value }
-    }))
   }
 
   const userMsg = {
@@ -268,10 +299,24 @@ async function sendMessage(presetText = null) {
   messages.value.push(aiMsg)
 
   try {
-    const stream = apiAskStream(text, currentSubject.value)
+    console.log('[ChatView] sendMessage user_id:', currentUserId.value, 'subject:', currentSubject.value, 'session_id:', sessionId.value, 'theta:', userTheta.value)
+    // LA-050-HISTORY-FIX: 传入当前 session_id，后端会返回实际的 session_id
+    // LA-044: 传入 user_theta 实现个性化回答
+    const stream = apiAskStream(text, currentSubject.value, currentUserId.value, sessionId.value, userTheta.value)
     for await (const { event, data } of stream) {
       if (event === 'meta') {
         aiMsg.agent = data.agent || 'TutorAgent'
+        // LA-050-HISTORY-FIX: 更新 session_id（后端可能创建新 session）
+        if (data.session_id) {
+          const isNewSession = !sessionId.value
+          sessionId.value = data.session_id
+          console.log('[ChatView] 更新 session_id:', data.session_id)
+          if (isNewSession) {
+            window.dispatchEvent(new CustomEvent('chat-session-created', {
+              detail: { sessionId: data.session_id }
+            }))
+          }
+        }
         // LA-047: 保存引用来源
         if (data.sources && data.sources.length) {
           aiMsg.sources = data.sources
@@ -336,7 +381,9 @@ async function loadSession(id) {
     console.log('[ChatView] 加载历史会话:', id)
     
     // 从后端 API 获取历史消息
-    const resp = await fetch(`${window.location.origin}/api/dialog/sessions/${id}/messages`)
+    const resp = await fetch(`${window.location.origin}/api/dialog/sessions/${id}/messages`, {
+      headers: getAuthHeaders(),
+    })
     if (resp.ok) {
       const data = await resp.json()
       const historyMessages = (data.messages || []).map(m => ({
@@ -384,9 +431,12 @@ async function createNewSession() {
   try {
     const resp = await fetch(`${window.location.origin}/api/dialog/sessions`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        ...getAuthHeaders(),  // LA-051-SESSION: 添加认证头
+        'Content-Type': 'application/json',
+      },
       body: JSON.stringify({
-        user_id: 'anonymous',
+        user_id: currentUserId.value,  // LA-050-Phase5: 使用当前用户ID
         subject_id: currentSubject.value,
       }),
     })
@@ -397,8 +447,10 @@ async function createNewSession() {
       currentTopic.value = ''
       messages.value = []
       console.log('[ChatView] 新建会话:', data.session_id)
-      // LA-044: 通知 Sidebar 刷新会话列表
-      window.dispatchEvent(new CustomEvent('chat-session-created'))
+      // LA-044: 通知 Sidebar 刷新会话列表，并传递新会话 ID
+      window.dispatchEvent(new CustomEvent('chat-session-created', {
+        detail: { sessionId: data.session_id }
+      }))
     }
   } catch (e) {
     console.error('新建会话失败:', e)
@@ -552,6 +604,16 @@ onMounted(() => {
   background: var(--bg-card);
   border: 1px solid var(--border-color);
   word-break: break-word;
+  /* LA-053-FIX-2: 防止内容撑破气泡 */
+  min-width: 0;
+  max-width: 100%;
+  overflow-x: hidden;
+}
+
+.message-body {
+  /* LA-053-FIX-2: 确保 markdown 内容区域不会撑破父容器 */
+  min-width: 0;
+  overflow-x: hidden;
 }
 
 /* FIX-LA048: Markdown heading 样式 */
@@ -665,9 +727,12 @@ onMounted(() => {
 }
 
 /* LA-IMG: 内联图片样式（markdown 中引用的图片） */
-.chat-inline-image {
+/* LA-053-FIX-2: 必须使用 :deep() 因为图片通过 v-html/marked 渲染，不在 Vue scoped 范围内 */
+.markdown-body :deep(img) {
   max-width: 100%;
-  max-height: 300px;
+  height: auto;
+  max-height: min(50vh, 400px);
+  object-fit: contain;
   border-radius: var(--radius-md);
   border: 1px solid var(--border-color);
   margin: 8px 0;

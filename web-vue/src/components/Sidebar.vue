@@ -24,9 +24,11 @@
         <select v-model="selectedSubject" @change="changeSubject" class="subject-select">
           <option v-for="sub in subjectState.subjects.value" :key="sub.id" :value="sub.id">
             {{ sub.name }} ({{ sub.document_count }})
+            {{ sub.visibility === 'private' ? '🔒' : sub.visibility === 'group' ? '👥' : '🌐' }}
           </option>
         </select>
         <button class="btn-icon" @click="showCreateSubject = true" title="新建学科">+</button>
+        <button class="btn-icon btn-perm" v-if="canManageCurrentSubject" @click="openPermissionModal" title="权限管理">⚙️</button>
         <button class="btn-icon btn-delete" @click="deleteSubject" title="删除当前学科">🗑️</button>
       </div>
       <!-- 新建学科弹窗 -->
@@ -63,6 +65,16 @@
         <span class="nav-icon">{{ item.icon }}</span>
         <span class="nav-label" v-show="!collapsed">{{ item.label }}</span>
       </div>
+      <!-- LA-DEPLOY-FEAT: 设置入口，随时可重新配置 API Key -->
+      <div class="nav-divider"></div>
+      <div
+        class="nav-item settings-item"
+        @click="$emit('open-settings')"
+        :title="collapsed ? settingsItem.label : ''"
+      >
+        <span class="nav-icon">{{ settingsItem.icon }}</span>
+        <span class="nav-label" v-show="!collapsed">{{ settingsItem.label }}</span>
+      </div>
     </nav>
 
     <!-- 历史会话（仅智能对话视图时显示） -->
@@ -98,6 +110,58 @@
 
     <!-- 底部信息 -->
     <div class="sidebar-footer" v-show="!collapsed">
+      <!-- 用户切换器（LA-050-Phase5） -->
+      <div class="user-section" v-if="!collapsed">
+        <div class="user-current" @click="toggleUserPanel">
+          <span class="user-avatar">{{ currentUserDisplay[0] || '?' }}</span>
+          <div class="user-info">
+            <span class="user-name">{{ currentUserDisplay }}</span>
+            <span class="user-id">{{ currentUserId }}</span>
+          </div>
+          <span class="user-toggle">▼</span>
+        </div>
+        <!-- 用户面板 -->
+        <div v-if="showUserPanel" class="user-panel">
+          <div class="user-panel-header">切换用户</div>
+          <div
+            v-for="u in userList"
+            :key="u.user_id"
+            class="user-panel-item"
+            :class="{ active: u.user_id === currentUserId }"
+            @click="switchToUser(u.user_id)"
+          >
+            <span class="user-panel-avatar">{{ (u.display_name || u.username || '?')[0] }}</span>
+            <span class="user-panel-name">{{ u.display_name || u.username }}</span>
+            <span class="user-panel-id">{{ u.user_id }}</span>
+          </div>
+          <div class="user-panel-divider"></div>
+          <!-- LA-052: 已登录用户显示登出按钮，未登录显示登录/注册 -->
+          <button v-if="isLoggedIn" class="user-panel-btn" @click="doLogout">
+            🚪 登出
+          </button>
+          <button v-else class="user-panel-btn" @click="showLoginDialog = true">
+            🔐 登录 / 注册
+          </button>
+        </div>
+      </div>
+
+      <!-- LA-052: 登录/注册弹窗 -->
+      <LoginModal
+        :visible="showLoginDialog"
+        @close="showLoginDialog = false"
+        @success="window.location.reload()"
+      />
+
+      <!-- LA-051: 权限管理弹窗 -->
+      <PermissionModal
+        :visible="showPermissionModal"
+        :subject-id="selectedSubject"
+        :subject-name="currentSubjectName"
+        :role="currentSubjectRole"
+        @close="showPermissionModal = false"
+        @updated="onPermissionUpdated"
+      />
+
       <!-- 主题与字体设置 -->
       <div class="settings-section">
         <div class="setting-row">
@@ -142,14 +206,107 @@
 <script setup>
 import { ref, computed, inject, watch } from 'vue'
 import { useHealthCheck, apiCreateSubject, apiListSubjects, apiDeleteSubject } from '../composables/useApi.js'
+import { useUser } from '../composables/useUser.js'
+import LoginModal from './LoginModal.vue'
+import PermissionModal from './PermissionModal.vue'
 
 const props = defineProps({
   activeView: { type: String, default: 'chat' },
   collapsed: { type: Boolean, default: false },
 })
 
-defineEmits(['switch-view', 'toggle-sidebar'])
+defineEmits(['switch-view', 'toggle-sidebar', 'open-settings'])
 
+// ====== LA-050-Phase5 + LA-052: 用户管理 ======
+const { currentUser, xUserId, isLoggedIn, loginWithPassword, register, logout, switchUser, userList, getAuthHeaders } = useUser()
+
+const showUserPanel = ref(false)
+const showLoginDialog = ref(false)
+const showPermissionModal = ref(false)  // LA-051: 权限管理弹窗
+const loginForm = ref({ userId: '', username: '' })
+
+const currentUserId = computed(() => currentUser.value?.user_id || 'default')
+const currentUserDisplay = computed(() => currentUser.value?.display_name || currentUser.value?.username || '本地用户')
+
+// LA-051: 当前学科信息
+const currentSubject = computed(() =>
+  subjectState.subjects.value.find(s => s.id === selectedSubject.value)
+)
+const currentSubjectName = computed(() => currentSubject.value?.name || selectedSubject.value)
+const currentSubjectRole = computed(() => currentSubject.value?.role || '')
+const canManageCurrentSubject = computed(() => {
+  const role = currentSubjectRole.value
+  return role === 'owner' || role === 'maintainer'
+})
+
+function openPermissionModal() {
+  showPermissionModal.value = true
+}
+
+function onPermissionUpdated() {
+  // 权限变更后刷新学科列表
+  loadSubjects()
+}
+
+async function loadSubjects() {
+  try {
+    const resp = await apiListSubjects()
+    subjectState.setSubjects(resp.subjects || [])
+  } catch (e) {
+    console.error('[Sidebar] 加载学科列表失败:', e)
+  }
+}
+
+function toggleUserPanel() {
+  showUserPanel.value = !showUserPanel.value
+}
+
+// LA-052-A: 切换用户逻辑
+// - default 用户直接切换（本地主人，无需密码）
+// - 其他用户需要密码登录
+async function switchToUser(userId) {
+  if (userId === 'default') {
+    // default 用户直接切换
+    switchUser(userId)
+    showUserPanel.value = false
+    window.location.reload()
+    return
+  }
+
+  // 其他用户：检查是否已有 token
+  const list = userList.value
+  const target = list.find(u => u.user_id === userId)
+  if (!target) {
+    console.warn('[Sidebar] 用户不在列表中:', userId)
+    return
+  }
+
+  // 如果有 token 且是当前用户，直接切换
+  // 否则需要重新登录
+  showUserPanel.value = false
+  showLoginDialog.value = true
+}
+
+async function doLogout() {
+  await logout()
+  showUserPanel.value = false
+  window.location.reload()
+}
+
+function doLogin() {
+  const userId = loginForm.value.userId.trim()
+  const username = loginForm.value.username.trim() || userId
+  if (!userId) {
+    alert('请输入用户ID')
+    return
+  }
+  login(userId, username)
+  showLoginDialog.value = false
+  loginForm.value = { userId: '', username: '' }
+  window.location.reload()
+}
+
+// ====== 原有代码 ======
 // 全局学科状态
 const subjectState = inject('subjectState')
 const selectedSubject = ref(subjectState.currentSubject.value)
@@ -225,10 +382,13 @@ const navItems = [
   { id: 'chat', icon: '💬', label: '智能对话' },
   { id: 'quiz', icon: '📝', label: '出题' },
   { id: 'evaluate', icon: '📊', label: '评测' },
+  { id: 'progress', icon: '📈', label: '学习进度' },
   { id: 'import', icon: '📚', label: '导入' },
   { id: 'knowledge', icon: '🗂️', label: '知识库' },
   { id: 'graph', icon: '🕸️', label: '知识图谱' },
 ]
+
+const settingsItem = { id: 'settings', icon: '⚙️', label: '设置' }
 
 // 健康状态
 const { status: healthStatus } = useHealthCheck()
@@ -244,7 +404,10 @@ const currentSessionId = ref('')
 
 async function loadSessions() {
   try {
-    const resp = await fetch(`${window.location.origin}/api/dialog/sessions?user_id=anonymous`)
+    // LA-050-Phase5: 使用当前用户的 X-User-ID
+    const resp = await fetch(`${window.location.origin}/api/dialog/sessions?user_id=${currentUserId.value}`, {
+      headers: getAuthHeaders(),
+    })
     if (resp.ok) {
       const data = await resp.json()
       // 映射后端字段到前端格式
@@ -273,9 +436,10 @@ function selectSession(id) {
 // LA-044: 新建会话 — 调用 ChatView 的 createNewSession
 function newChatSession() {
   // 触发全局事件，ChatView 监听并创建新会话
+  // LA-051-SESSION-FIX: 移除 setTimeout(loadSessions, 500)
+  // 原因：500ms 的延迟无法保证后端已完成会话创建，造成竞态条件
+  // 刷新应完全由 chat-session-created 事件驱动（ChatView 创建成功后触发）
   window.dispatchEvent(new CustomEvent('create-new-chat-session'))
-  // 刷新会话列表
-  setTimeout(loadSessions, 500)
 }
 
 // LA-044: 删除会话
@@ -286,6 +450,7 @@ async function deleteSession(id) {
   try {
     const resp = await fetch(`${window.location.origin}/api/dialog/sessions/${id}`, {
       method: 'DELETE',
+      headers: getAuthHeaders(),
     })
     if (resp.ok) {
       console.log('[Sidebar] 会话已删除:', id)
@@ -306,8 +471,14 @@ async function deleteSession(id) {
 loadSessions()
 
 // 监听新会话创建（本地触发）
-window.addEventListener('chat-session-created', (e) => {
-  loadSessions()  // LA-044: 改为从后端刷新
+// LA-051-SESSION-FIX: 刷新后自动选中新会话
+window.addEventListener('chat-session-created', async (e) => {
+  await loadSessions()  // LA-044: 从后端刷新
+  // 如果事件中传递了新会话 ID，自动选中它
+  const newSessionId = e.detail?.sessionId
+  if (newSessionId && chatSessions.value.some(s => s.id === newSessionId)) {
+    currentSessionId.value = newSessionId
+  }
 })
 </script>
 
@@ -466,6 +637,20 @@ window.addEventListener('chat-session-created', (e) => {
   width: 20px;
   text-align: center;
   flex-shrink: 0;
+}
+
+/* 设置入口 */
+.nav-divider {
+  height: 1px;
+  background: var(--border-color);
+  margin: 8px 0;
+}
+
+.settings-item {
+  color: var(--text-muted);
+}
+.settings-item:hover {
+  color: var(--text-primary);
 }
 
 /* 历史会话 */
@@ -710,5 +895,238 @@ window.addEventListener('chat-session-created', (e) => {
   background: #dc2626;
   color: white;
   border-color: #dc2626;
+}
+
+/* LA-051: 权限管理按钮 */
+.btn-perm {
+  font-size: var(--font-size-sm);
+  transition: all var(--transition-fast);
+}
+.btn-perm:hover {
+  background: #3b82f6;
+  color: white;
+  border-color: #3b82f6;
+}
+
+/* ====== LA-050-Phase5: 用户切换器样式 ====== */
+.user-section {
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border-color);
+  margin-bottom: 8px;
+}
+
+.user-current {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: background var(--transition-fast);
+}
+.user-current:hover {
+  background: var(--bg-hover);
+}
+
+.user-avatar {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: var(--accent-primary);
+  color: white;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: var(--font-size-sm);
+  font-weight: 600;
+  flex-shrink: 0;
+}
+
+.user-info {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.user-name {
+  font-size: var(--font-size-sm);
+  font-weight: 500;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.user-id {
+  font-size: var(--font-size-xs);
+  color: var(--text-muted);
+}
+
+.user-toggle {
+  font-size: var(--font-size-xs);
+  color: var(--text-muted);
+  transition: transform var(--transition-fast);
+}
+
+/* 用户面板 */
+.user-panel {
+  margin-top: 4px;
+  padding: 4px;
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+}
+
+.user-panel-header {
+  padding: 4px 8px;
+  font-size: var(--font-size-xs);
+  color: var(--text-muted);
+  font-weight: 600;
+  text-transform: uppercase;
+}
+
+.user-panel-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: background var(--transition-fast);
+}
+.user-panel-item:hover {
+  background: var(--bg-hover);
+}
+.user-panel-item.active {
+  background: var(--bg-active);
+}
+
+.user-panel-avatar {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: var(--accent-primary);
+  color: white;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+  flex-shrink: 0;
+}
+
+.user-panel-name {
+  flex: 1;
+  font-size: var(--font-size-sm);
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.user-panel-id {
+  font-size: var(--font-size-xs);
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+
+.user-panel-divider {
+  height: 1px;
+  background: var(--border-color);
+  margin: 4px 0;
+}
+
+.user-panel-btn {
+  width: 100%;
+  padding: 6px 8px;
+  border: none;
+  background: none;
+  color: var(--accent-primary);
+  font-size: var(--font-size-sm);
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+  text-align: left;
+  transition: background var(--transition-fast);
+}
+.user-panel-btn:hover {
+  background: var(--bg-hover);
+}
+
+/* 登录弹窗 */
+.login-overlay {
+  position: fixed;
+  top: 0; left: 0; right: 0; bottom: 0;
+  background: rgba(0, 0, 0, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+
+.login-dialog {
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  padding: 24px;
+  width: 320px;
+  box-shadow: 0 8px 32px rgba(0,0,0,0.3);
+}
+
+.login-dialog h3 {
+  margin: 0 0 16px 0;
+  font-size: var(--font-size-lg);
+  color: var(--text-primary);
+}
+
+.login-input {
+  width: 100%;
+  padding: 10px 12px;
+  margin-bottom: 12px;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  background: var(--bg-input);
+  color: var(--text-primary);
+  font-size: var(--font-size-md);
+  box-sizing: border-box;
+}
+.login-input:focus {
+  outline: none;
+  border-color: var(--accent-primary);
+}
+
+.login-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 16px;
+}
+
+.login-btn {
+  flex: 1;
+  padding: 10px;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  background: var(--bg-active);
+  color: var(--text-primary);
+  font-size: var(--font-size-md);
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+.login-btn:hover {
+  background: var(--bg-hover);
+}
+.login-btn.primary {
+  background: var(--accent-primary);
+  color: white;
+  border-color: var(--accent-primary);
+}
+.login-btn.primary:hover {
+  opacity: 0.9;
+}
+
+.login-hint {
+  margin: 12px 0 0 0;
+  font-size: var(--font-size-xs);
+  color: var(--text-muted);
 }
 </style>
