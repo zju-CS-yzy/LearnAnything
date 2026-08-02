@@ -699,6 +699,11 @@ class FallbackLLMClient:
         """获取故障转移统计信息"""
         return dict(self._stats)
 
+    @property
+    def available(self) -> bool:
+        """代理主 LLM 的 available 属性"""
+        return self.primary.available
+
     def is_fallback_enabled(self) -> bool:
         """备用 LLM 是否可用"""
         return self.fallback_enabled

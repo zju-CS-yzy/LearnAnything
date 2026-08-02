@@ -652,7 +652,34 @@ class TutorAgent(BaseAgent):
         }
         self._cache.set(queries[0], query_embedding, cache_data)
 
-        return {"text": answer, "metadata": {"chunks": len(final_results), "has_context": bool(history_text)}, "chunks": final_results}
+        # LA-047: 从检索结果收集引用来源
+        sources = []
+        for r in final_results:
+            meta = r.get("metadata", {})
+            src = meta.get("source", "")
+            heading = meta.get("heading_path", "")
+            page = meta.get("page_number", "")
+            if src:
+                sources.append({
+                    "source": src,
+                    "heading_path": heading,
+                    "page_number": page,
+                })
+        # 去重
+        seen = set()
+        unique_sources = []
+        for s in sources:
+            key = s["source"]
+            if key not in seen:
+                seen.add(key)
+                unique_sources.append(s)
+        
+        return {
+            "text": answer,
+            "metadata": {"chunks": len(final_results), "has_context": bool(history_text)},
+            "sources": unique_sources,  # LA-047: 引用来源
+            "chunks": final_results,
+        }
 
     def _apply_mmr(self, query: str, candidates: List[Dict[str, Any]], n_results: int = 5, lambda_param: float = 0.7) -> List[Dict[str, Any]]:
         import numpy as np

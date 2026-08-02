@@ -4307,7 +4307,7 @@ def _save_user_state_after_dialog(user_id: str, request: AskRequest, result: Dic
 
 @app.get("/api/user-state", response_model=UserStateResponse)
 def get_user_state(
-    user_id: str,
+    user_id: str = "anonymous",  # LA-051-FIX: 添加默认值防止 422
     subject: str = "generic",
     x_user_id: Optional[str] = Header(None, alias="X-User-ID")
 ):
