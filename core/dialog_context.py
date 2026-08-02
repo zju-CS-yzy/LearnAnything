@@ -162,7 +162,7 @@ class DialogContext:
             return None
 
         try:
-            from core.llm_client import LLMClient
+            from core.llm_client import FallbackLLMClient as LLMClient  # LLM-ROBUST: 自动故障转移
 
             # 构建 LLM 输入：完整历史
             history_text = "\n".join([

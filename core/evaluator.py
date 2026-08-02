@@ -28,7 +28,7 @@ class Evaluator:
         if self._llm_available is not None:
             return self._llm_available
         try:
-            from core.llm_client import LLMClient
+            from core.llm_client import FallbackLLMClient as LLMClient  # LLM-ROBUST: 自动故障转移
             self._llm = LLMClient()
             self._llm_available = True
         except Exception:

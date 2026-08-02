@@ -17,7 +17,7 @@ from typing import Dict, Any, List, Optional
 from agents.quiz_agent import QuizAgent
 from agents.base_agent import BaseAgent
 from core.subject_analyzer import SubjectAnalyzer
-from core.llm_client import LLMClient
+from core.llm_client import FallbackLLMClient as LLMClient  # LLM-ROBUST: 自动故障转移
 from core.graph_education import IRTEstimator, IRTParams, UserKnowledgeState, AnswerRecord, UserStateStore
 
 

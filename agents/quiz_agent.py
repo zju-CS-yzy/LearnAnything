@@ -16,7 +16,7 @@ from core.vector_store import VectorStore
 from core.embedding import EmbeddingManager
 from core.query_rewriter import QueryRewriter
 from core.subject_analyzer import SubjectAnalyzer
-from core.llm_client import LLMClient
+from core.llm_client import FallbackLLMClient as LLMClient  # LLM-ROBUST: 自动故障转移
 from core.graph_education import GraphContext
 from agents.base_agent import BaseAgent
 

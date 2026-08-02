@@ -57,7 +57,7 @@ from core.subject_manager import (
     detect_subject, ensure_default_subjects, record_import,
 )
 from core.subject_analyzer import SubjectAnalyzer, save_subject_config
-from core.llm_client import LLMClient
+from core.llm_client import FallbackLLMClient as LLMClient  # LLM-ROBUST: 自动故障转移
 from core.quiz_bank import (
     save_question as qb_save,
     batch_save_questions as qb_batch_save,
@@ -1943,7 +1943,7 @@ def auto_label_bloom_level(
     返回:
         {"labeled": N, "skipped": M, "details": [...]}
     """
-    from core.llm_client import LLMClient
+    from core.llm_client import FallbackLLMClient as LLMClient  # LLM-ROBUST: 自动故障转移
     from core.quiz_bank import list_questions, update_bloom_level
 
     valid_levels = {"remember", "understand", "apply", "analyze", "evaluate", "create"}

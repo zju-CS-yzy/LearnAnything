@@ -13,7 +13,7 @@ from core.hybrid_retriever import HybridRetriever
 from core.reranker import RerankerFactory
 from core.query_rewriter import QueryRewriter
 from core.query_cache import QueryCache
-from core.llm_client import LLMClient
+from core.llm_client import FallbackLLMClient as LLMClient  # LLM-ROBUST: 自动故障转移
 from agents.base_agent import BaseAgent
 
 
