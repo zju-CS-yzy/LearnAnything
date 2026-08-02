@@ -1,51 +1,83 @@
-# Python
+# ============================================
+# LearnAnything Project - Git Ignore
+# ============================================
+
+# ---- 构建产物 ----
+/dist/                          # PyInstaller 打包产物 (142MB+)
+/web/dist/                      # Vite 前端构建产物
+/build/
+
+# ---- 数据 & 大文件 ----
+/data
+
+# ---- 个人工作记录 ----
+/memory/                        # 每日工作日志（个人记录，不适合公开）
+
+# ---- 密钥 & 敏感文件 ----
+API.txt                         # API 密钥文档
+*.key
+*.pem
+.env
+
+# ---- 日志 & 临时文件 ----
+*.log
+rebuild_log.txt
+/tmp/
+/temp/
+
+# ---- 测试数据库 & 临时数据 ----
+subjects.db
+test_kuzu
+test_kuzu_v2
+
+# ---- 临时上传脚本 ----
+upload_pdfs.py
+upload_texts.py
+
+# ---- 依赖 ----
+/node_modules/                  # npm 依赖
+/venv/                          # Python 虚拟环境
+/.venv/
+
+# ---- Python 缓存 ----
 __pycache__/
-*.py[cod]
-*.class
-*.so
+*.pyc
+*.pyo
+*.pyd
 .Python
 
-# Virtual environments
-venv/
-env/
-ENV/
-
-# IDE
+# ---- IDE & 编辑器 ----
 .vscode/
 .idea/
 *.swp
 *.swo
+*~
 
-# Node
-node_modules/
-web-vue/node_modules/
-
-# Build artifacts (Release �ֿⲻ���ٱ������)
-build/
-dist/
-web/dist/
-web-vue/dist/
-
-# Knowledge Base (Release �ֿⲻ�����û�����)
-knowledge_base/*
-!knowledge_base/.gitkeep
-
-# Sensitive config (Release �ֿⲻ������Կ)
-config/api_keys.ini
-.env
-API.txt
-
-# Database
-*.db
-quiz_bank.db
-user_states.db
-
-# Tests & temp (Release �ֿⲻ���ٲ������)
-.pytest_cache/
-tests/__pycache__/
-scripts/*.json
-scripts/*.txt
-
-# OS
+# ---- 操作系统文件 ----
 .DS_Store
 Thumbs.db
+
+# ============================================
+# 以下目录应纳入版本控制（核心代码）
+# ============================================
+# /docs/           - 设计文档
+# /tests/          - 测试用例
+# /scripts/        - 有用的构建/部署脚本（非临时诊断脚本）
+# /web-vue/src/    - 前端源码
+# /app/            - 后端 API
+# /core/           - 核心算法
+# /config/         - 配置文件
+# /prompts/        - LLM 提示词模板
+# ============================================
+
+# ---- 临时诊断脚本（保留在本地，不提交）----
+/scripts/diagnose_*.py
+/scripts/test_*.py
+/scripts/_*.py  # 下划线前缀的临时脚本
+/scripts/replace_*.py
+/scripts/fix_*.py
+/scripts/check_*.py
+/scripts/deploy_*.py
+
+/web-vue/node_modules/
+/web-vue/package-lock.json

@@ -887,6 +887,266 @@ BM25 检索      VectorSearch    KnowledgeGraph
 
 ---
 
+### 3.5 评测结果可视化模块（LA-040-P1-VIS）
+
+#### 3.5.1 设计目标
+
+传统 RAG 系统的评测功能通常只返回一个总分或正确率，用户难以从中获得 actionable 的学习洞察。LearnAnything 的评测结果可视化模块旨在：
+
+1. **即时反馈**：评测完成后立即展示结构化报告，无需等待
+2. **能力画像**：将答题结果映射到知识图谱的概念维度，生成细粒度的能力画像
+3. **薄弱点聚焦**：自动识别薄弱知识点，提供"去复习"和"去练习"的快捷入口
+4. **进度追踪**：支持历次评测的对比分析，追踪学习进步曲线
+
+#### 3.5.2 核心组件
+
+**能力条形图（Capability Bars）**：
+
+```
+能力掌握度
+│
+│ ████████████░░░░░░  向量检索        80%  🟢
+│ █████████░░░░░░░░░  Transformer     65%  🟡
+│ ████████░░░░░░░░░░  RAG框架        60%  🟡
+│ █████░░░░░░░░░░░░░  注意力机制      45%  🟡
+│ ████░░░░░░░░░░░░░░  稠密检索        35%  🔴  ⚠️
+│ ███░░░░░░░░░░░░░░░  BM25           30%  🔴  ⚠️
+│
+└──────────────────────────────────────────────→
+       0%      25%      50%      75%     100%
+```
+
+**设计决策**：
+- 放弃传统雷达图（N维度过大不可控），改用可扩展的条形图
+- 支持任意数量维度，默认显示 Top-6 聚焦，可展开显示全部
+- 颜色编码：🟢 强 (≥70%) / 🟡 中 (40%-70%) / 🔴 弱 (<40%)
+- 点击条形可展开详情面板（概念定义、掌握度变化趋势、关联错题数）
+
+**评测报告概览面板**：
+
+```
+┌─────────────────────────────────────────────────────┐
+│   ┌──────────┐  ┌──────────┐  ┌──────────┐         │
+│   │   72%    │  │   0.65   │  │  ↑ +0.15 │         │
+│   │  正确率   │  │  能力值  │  │  较上次  │         │
+│   │  7/10    │  │  中级    │  │  进步    │         │
+│   └──────────┘  └──────────┘  └──────────┘         │
+│                                                      │
+│   📋 一句话总结：                                    │
+│   "向量检索掌握较好，但注意力机制理解仍需加强"        │
+│                                                      │
+│   ⚠️ 薄弱知识点（3个）：                              │
+│   • 注意力机制           [去复习] [去练习]           │
+│   • 稠密向量检索         [去复习] [去练习]           │
+│   • BM25 算法           [去复习] [去练习]           │
+└─────────────────────────────────────────────────────┘
+```
+
+**与 Agent 的联动**：
+- 薄弱知识点行的 [去复习] 按钮 → 自动跳转 TutorAgent 对话，带入该知识点
+- [去练习] 按钮 → 调用 QuizAgent 生成针对性练习题
+- 评测结果自动写入 `user_knowledge_states` 表，作为后续自适应测评的输入
+
+#### 3.5.3 技术实现
+
+**数据来源**：
+- 单次评测详细结果：`/api/evaluate/submit` 返回的答题记录
+- 概念级别能力值：`user_knowledge_states` 表（IRT 能力估计 + 答题历史统计）
+- 全局画像：`user_subject_profiles` 表（LA-044 新增）
+
+**前端实现**：
+- 框架：Vue 3 + ECharts（Bar Chart）
+- 排序/筛选/Top-N 逻辑纯前端，无需后端计算
+- 响应式设计：条形宽度自适应容器，支持横向滚动
+
+**阶段演进**：
+- **Phase 1（已实现）**：概览面板 + 能力条形图，基于现有 `user_knowledge_states` 数据
+- **Phase 2（开发中）**：进步曲线 + 错题本，需新增 `evaluation_history` 和 `wrong_answers` 表
+- **Phase 3（规划中）**：Bloom 认知分类法雷达图，基于题库认知层次标注
+
+---
+
+### 3.6 多 Agent 群聊架构（LA-044）
+
+#### 3.6.1 设计背景
+
+传统"功能视图切换"模式（用户先切换到 Quiz 视图出题，再切换到 Evaluate 视图测评，再切换到 Chat 视图讲解）存在以下问题：
+
+1. **上下文断裂**：每次切换视图，Agent 之间的上下文丢失
+2. **操作路径长**：完成"出题→测评→讲解"闭环需要多次切换视图
+3. **Agent 协作不可见**：用户看不到 Agent 之间的协作过程
+
+#### 3.6.2 Trae 式分栏群聊架构
+
+**布局设计**：
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│  Sidebar (窄边栏)    │  主内容区 (左侧 65%)     │  ChatView (右侧 35%) │
+│                      │                          │                      │
+│  📚 学科选择          │  ┌──────────────────┐   │  ┌────────────────┐  │
+│  📊 知识图谱          │  │  GraphView       │   │  │ 群聊标题栏      │  │
+│  📝 出题             │  │  或              │   │  │ Tutor | Quiz   │  │
+│  📊 评测             │  │  QuizView        │   │  │ Coach | ...    │  │
+│  📁 文档树           │  │  或              │   │  ├────────────────┤  │
+│  💬 智能问答         │  │  EvaluateView    │   │  │ 消息列表        │  │
+│                      │  │  或              │   │  │ 👤 用户: ...   │  │
+│                      │  │  KnowledgeBase   │   │  │ 🎓 Tutor: ...  │  │
+│                      │  └──────────────────┘   │  │ 📝 Quiz: ...   │  │
+│                      │                          │  │ 📊 Coach: ...  │  │
+│                      │                          │  ├────────────────┤  │
+│                      │                          │  │ 输入框          │  │
+│                      │                          │  │ [发送]         │  │
+│                      │                          │  └────────────────┘  │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+**消息类型体系**：
+
+```typescript
+interface TextMessage {
+  type: 'text';
+  content: string;  // Markdown 格式
+  agent_name?: string;
+}
+
+interface CardMessage {
+  type: 'card';
+  card_type: 'concept' | 'question' | 'quiz_result';
+  title: string;
+  data: any;
+  actions: {label: string, action: string}[];
+}
+
+interface CommandMessage {
+  type: 'command';
+  command: 'navigate' | 'highlight' | 'open_modal';
+  target: string;
+  payload: any;
+}
+```
+
+**核心交互协议**：
+
+1. **用户 → Agent**：`@quiz 出5道RAG相关的题目` → Coordinator 路由到 QuizAgent
+2. **Agent → 左侧视图**：QuizAgent 返回 `CommandMessage` → 驱动左侧视图导航/高亮
+3. **左侧 → 右侧分享**：用户在 GraphView 右键节点 → "分享到群聊" → 生成 `CardMessage`
+4. **跨 Agent 协作**：CoachAgent 测评完成后 → 发布事件 → TutorAgent 自动订阅 → 生成针对性讲解
+
+#### 3.6.3 对话上下文管理（DialogContextManager）
+
+**三层记忆架构**：
+
+| 层级 | 名称 | 共享范围 | 存储位置 | 数据内容 |
+|:---|:---|:---|:---|:---|
+| **L0** | 对话上下文 | 学科隔离 | `dialog_messages` | 当前会话的对话历史、当前话题 |
+| **L1** | Agent 集体记忆 | 学科隔离 | `user_knowledge_states` | 学科内薄弱点、能力评估 |
+| **L2** | 全局知识库 | 全局共享 | `user_profiles` | 用户画像、通用薄弱领域 |
+
+**指代解析（ReferenceResolver）**：
+
+```python
+class ReferenceResolver:
+    """基于对话历史的指代解析器"""
+    
+    def resolve(self, query: str, context: DialogContext) -> str:
+        # 代词解析（"它" -> 当前话题）
+        if self._has_pronoun(query) and context.current_topic:
+            query = query.replace("它", context.current_topic)
+        
+        # 省略主语解析（"和 GraphRAG 有什么区别？" -> "RAG 和 GraphRAG 有什么区别？"）
+        if self._is_ellipsis(query) and context.current_topic:
+            query = f"{context.current_topic} {query}"
+        
+        return query
+```
+
+**Prompt 注入策略**：
+
+```python
+def build_prompt_with_context(base_prompt, query, context, max_history_turns=5):
+    # 1. 指代解析后的查询
+    resolved_query = ReferenceResolver().resolve(query, context)
+    
+    # 2. 生成对话历史文本（最近 N 轮）
+    history_text = context.to_prompt_context(max_turns=max_history_turns)
+    
+    # 3. 注入到 prompt
+    return f"""{base_prompt}
+
+【对话历史】
+{history_text}
+
+当前用户查询: {resolved_query}"""
+```
+
+#### 3.6.4 Agent 个性化 Prompt（LA-044-#2）
+
+根据用户 IRT 能力值（theta）动态调整 Agent Prompt：
+
+| theta 区间 | 用户等级 | TutorAgent 讲解策略 | QuizAgent 出题策略 |
+|:---|:---|:---|:---|
+| θ < 0.3 | 初级 | 通俗语言 + 详细解释 + 大量示例 | 基础概念题为主，降低干扰项迷惑性 |
+| 0.3 ≤ θ < 0.7 | 中级 | 专业术语 + 适度展开 + 关联知识 | 中等难度题，增加综合分析要求 |
+| θ ≥ 0.7 | 高级 | 精简概括 + 深度对比 + 前沿延伸 | 高难度题，开放性问题，跨概念关联 |
+
+**实现方式**：UserStateStore 存储用户能力值，每次 Agent 调用前通过 `GET /api/user-state` 获取并注入 Prompt。
+
+---
+
+### 3.7 部署架构（LA-DEPLOY）
+
+#### 3.7.1 部署方式
+
+**压缩包部署（推荐）**：
+
+```
+用户下载 LearnAnything-v1.0.0.zip
+    │
+    ▼
+解压到任意目录
+    │
+    ▼
+双击 LearnAnything.exe
+    │
+    ▼
+自动打开浏览器访问 http://localhost:5000
+    │
+    ▼
+首次启动：配置向导弹出 → 配置 API 密钥 → 开始使用
+```
+
+**按功能模块配置 API**（非按模型配置）：
+
+| 功能 | 说明 | 必需 | 推荐服务商 |
+|:---|:---|:---:|:---|
+| 💬 语言处理（LLM） | 对话、语义提取、评测 | ✅ | DeepSeek / OpenAI |
+| 👁️ 视觉处理（VLM） | 图片描述、表格提取 | ❌ | 智谱AI / OpenAI |
+| 📊 文本向量化（Embedding） | 语义搜索 | ✅ | 智谱AI / OpenAI |
+| 📄 PDF 解析（MinerU） | 结构化提取 | ❌ | MinerU CLI（已打包）+ Token |
+
+#### 3.7.2 路径处理
+
+所有代码使用**相对路径**或**运行时推断路径**，支持任意部署位置：
+
+```python
+# config/settings.py
+PROJECT_ROOT = Path(__file__).parent.parent  # 项目根目录自动推断
+
+# app.spec（PyInstaller）
+project_root = Path(SPECPATH)  # 内置变量指向 .spec 文件所在目录
+
+# 数据目录
+KNOWLEDGE_BASE_DIR = PROJECT_ROOT / "knowledge_base"
+```
+
+#### 3.7.3 向后兼容
+
+- 旧配置 `config/api_keys.ini` 自动迁移到新格式 `config/api_config.ini`
+- 环境变量（DEEPSEEK_API_KEY, ZHIPU_API_KEY）仍然有效
+
+---
+
 ## 4. 整体创新点
 
 ### 4.1 架构创新：双层知识图谱
@@ -941,11 +1201,15 @@ LearnAnything 是一个面向通用知识学习的 RAG 系统，通过**双层�
 - 图状态自适应测评（Coach Agent）
 - 图谱溯源讲解（Tutor Agent）
 - 混合检索（BM25 + 向量 + 图查询）
+- **评测结果可视化**（概览面板 + 能力条形图，LA-040-P1-VIS）
+- **多 Agent 群聊架构**（Trae 式分栏 + 对话上下文 + 个性化 Prompt，LA-044）
+- **功能模块 API 配置系统**（按功能而非模型配置，LA-DEPLOY-FEAT）
 
 **待完善的方向**：
+- 进步曲线 + 错题本（Phase 2，需新增 evaluation_history / wrong_answers 表）
+- Bloom 认知分类法雷达图（Phase 3，需题库认知层次标注）
 - 段落排序优化（递归子树布局）
 - IRT 难度校准（需要积累答题数据）
-- 能力画像可视化
 - 学科插件化
 - 多模态支持（视频/音频）
 
