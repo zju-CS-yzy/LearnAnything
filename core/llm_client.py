@@ -21,6 +21,50 @@ import requests
 from config.settings import get_llm_config, get_llm_fallback_config
 
 
+# ========== LLM-ROBUST: Key 池管理 ==========
+class _KeyPool:
+    """API Key 池 — 支持单 Key 或多 Key 轮换"""
+
+    def __init__(self, api_key_str: str):
+        # 支持逗号分隔的多 Key，如 "key1,key2,key3"
+        self.keys = [k.strip() for k in api_key_str.split(",") if k.strip()]
+        self._current = 0
+        self._failed_keys: set = set()
+
+    @property
+    def current_key(self) -> str:
+        if not self.keys:
+            return ""
+        return self.keys[self._current % len(self.keys)]
+
+    def next_key(self) -> str:
+        """切换到下一个可用 Key，返回空串表示所有 Key 都失败"""
+        for _ in range(len(self.keys)):
+            self._current = (self._current + 1) % len(self.keys)
+            key = self.current_key
+            if key not in self._failed_keys:
+                return key
+        return ""
+
+    def mark_failed(self, key: str):
+        """标记某个 Key 失败（如 429 限流、401 认证失败）"""
+        self._failed_keys.add(key)
+
+    def reset(self):
+        """重置所有 Key 的失败状态"""
+        self._failed_keys.clear()
+
+    def __bool__(self) -> bool:
+        return len(self.keys) > 0
+
+    def __len__(self) -> int:
+        return len(self.keys)
+
+    def __repr__(self) -> str:
+        active = len(self.keys) - len(self._failed_keys)
+        return f"_KeyPool(keys={len(self.keys)}, active={active}, current_idx={self._current})"
+
+
 class LLMClient:
     """LLM 客户端 — 语言处理功能
 
@@ -91,10 +135,23 @@ class LLMClient:
         self.max_retries = max_retries
         self._available = None
 
+        # LLM-ROBUST: Key 池 + 连接池
+        self._key_pool = _KeyPool(self.api_key)
+        self._session = requests.Session()
+        # 配置连接池：最多 10 个连接，keep-alive
+        adapter = requests.adapters.HTTPAdapter(
+            pool_connections=5,
+            pool_maxsize=10,
+            max_retries=0,  # 我们自己管理重试逻辑
+        )
+        self._session.mount("http://", adapter)
+        self._session.mount("https://", adapter)
+
         # LA-ROBUST: 调试日志，帮助排查多 Provider 切换问题
         import hashlib
         key_hash = hashlib.md5(self.api_key.encode()).hexdigest()[:6] if self.api_key else "(empty)"
-        print(f"[LLMClient] init mode={_mode}, base_url={self.base_url}, model={self.model}, key_hash={key_hash}")
+        pool_info = f"keys={len(self._key_pool)}" if self._key_pool else "no-keys"
+        print(f"[LLMClient] init mode={_mode}, base_url={self.base_url}, model={self.model}, key_hash={key_hash}, {pool_info}")
 
     @classmethod
     def from_feature_config(cls, feature_config, timeout: int = 60, max_retries: int = 2):
@@ -180,15 +237,36 @@ class LLMClient:
         return cls(timeout=timeout, max_retries=max_retries)
 
     def _check_available(self) -> bool:
-        """检查 LLM 是否可用（有 API Key 即可）"""
+        """检查 LLM 是否可用（有可用 API Key 即可）"""
         if self._available is not None:
             return self._available
-        self._available = bool(self.api_key)
+        self._available = bool(self._key_pool)
         return self._available
 
     @property
     def available(self) -> bool:
         return self._check_available()
+
+    def _get_headers(self) -> Dict[str, str]:
+        """构建请求头，使用当前 Key"""
+        return {
+            "Authorization": f"Bearer {self._key_pool.current_key}",
+            "Content-Type": "application/json",
+        }
+
+    def _is_key_error(self, status: int) -> bool:
+        """判断 HTTP 错误是否由 Key 问题导致（需要换 Key）"""
+        return status in (401, 429)  # 401=认证失败, 429=限流
+
+    def _try_next_key(self) -> bool:
+        """尝试切换到下一个 Key，返回是否成功"""
+        old_key = self._key_pool.current_key
+        self._key_pool.mark_failed(old_key)
+        next_key = self._key_pool.next_key()
+        if next_key:
+            print(f"[LLMClient] Key 轮换: {old_key[:6]}... -> {next_key[:6]}...")
+            return True
+        return False
 
     def chat(
         self,
@@ -248,10 +326,7 @@ class LLMClient:
             print(f"[LLMClient] DeepSeek V4 模型: {self.model}, 关闭 thinking 模式")
             payload["thinking"] = {"type": "disabled"}
 
-        headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json",
-        }
+        headers = self._get_headers()
 
         url = f"{self.base_url}/chat/completions"
 
@@ -259,7 +334,8 @@ class LLMClient:
         actual_timeout = timeout or self.timeout
         for attempt in range(self.max_retries + 1):
             try:
-                response = requests.post(
+                # LLM-ROBUST: 使用 Session 连接池
+                response = self._session.post(
                     url,
                     headers=headers,
                     json=payload,
@@ -285,23 +361,7 @@ class LLMClient:
 
                 return content.strip()
 
-            except requests.exceptions.HTTPError as e:
-                # LA-ROBUST: 增强 400 错误日志，打印响应体帮助诊断
-                status = e.response.status_code
-                try:
-                    resp_body = e.response.text[:500]
-                except:
-                    resp_body = "(无法读取响应体)"
-                print(f"[LLMClient] HTTP {status} 错误，响应: {resp_body}")
-                
-                # 如果是 429（限流）或 5xx，重试
-                if status in (429, 502, 503, 504) and attempt < self.max_retries:
-                    wait = 2 ** attempt
-                    time.sleep(wait)
-                    continue
-                last_exception = e
-                break
-            except (requests.exceptions.SSLError, requests.exceptions.ConnectionError) as e:
+            except requests.exceptions.HTTPError as e:                # LLM-ROBUST: enhanced error logging + key rotation                status = e.response.status_code                try:                    resp_body = e.response.text[:500]                except:                    resp_body = "(unable to read body)"                print(f"[LLMClient] HTTP {status} error: {resp_body}")                # 401/429: key issue, rotate key                if self._is_key_error(status):                    if self._try_next_key():                        headers = self._get_headers()                        continue                    else:                        print(f"[LLMClient] All keys failed")                        last_exception = e                        break                # 429/5xx: service issue, exponential backoff                if status in (429, 502, 503, 504) and attempt < self.max_retries:                    wait = 2 ** attempt                    time.sleep(wait)                    continue                last_exception = e                break            except (requests.exceptions.SSLError, requests.exceptions.ConnectionError) as e:
                 # LA-027 FIX: SSL/连接错误使用指数退避重试（网络不稳定时）
                 last_exception = e
                 if attempt < self.max_retries:
@@ -357,14 +417,14 @@ class LLMClient:
         }
 
         headers = {
-            "Authorization": f"Bearer {self.api_key}",
+            "Authorization": f"Bearer {self._key_pool.current_key}",
             "Content-Type": "application/json",
         }
 
         url = f"{self.base_url}/chat/completions"
 
         try:
-            response = requests.post(
+            response = self._session.post(
                 url,
                 headers=headers,
                 json=payload,
