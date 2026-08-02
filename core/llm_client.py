@@ -353,7 +353,15 @@ class LLMClient:
                 msg = choices[0].get("message", {})
                 content = msg.get("content") or ""
                 
-                # 调试日志：当 content 为空时打印完整响应结构
+                # LLM-ROBUST: 当 content 为空时，尝试从 reasoning_content 提取
+                # Kimi K2.6 等模型可能将回答放在 reasoning_content 中
+                if not content and "reasoning_content" in msg:
+                    reasoning = msg.get("reasoning_content") or ""
+                    if reasoning:
+                        print(f"[LLMClient] content 为空，从 reasoning_content 提取 ({len(reasoning)} 字符)")
+                        content = reasoning
+                
+                # 调试日志：当 content 仍为空时打印完整响应结构
                 if not content:
                     print(f"[LLMClient] content 为空，message keys: {list(msg.keys())}")
                     print(f"[LLMClient] 完整响应预览: {str(data)[:500]}")

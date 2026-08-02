@@ -182,7 +182,7 @@ class TutorAgent(BaseAgent):
                 messages=messages,
                 system_prompt=system_prompt,
                 temperature=0.5,
-                max_tokens=1500,
+                max_tokens=4000,  # LLM-ROBUST: 从 1500 增加到 4000，避免回答被截断
             )
             return answer
         except Exception as e:

@@ -318,12 +318,16 @@ async function sendMessage(presetText = null) {
           }
         }
         // LA-047: 保存引用来源
-        if (data.sources && data.sources.length) {
-          aiMsg.sources = data.sources
+        // 兼容两种结构: data.sources (旧模式) 和 data.metadata.sources (P0图谱模式)
+        const sources = data.sources || data.metadata?.sources || []
+        if (sources.length) {
+          aiMsg.sources = sources
         }
         // LA-049: 保存媒体资源
-        if (data.media && data.media.length) {
-          aiMsg.media = data.media
+        // 兼容两种结构: data.media (旧模式) 和 data.metadata.media (P0图谱模式)
+        const media = data.media || data.metadata?.media || []
+        if (media.length) {
+          aiMsg.media = media
         }
         // LA-044: 保存当前话题
         if (data.current_topic) {
