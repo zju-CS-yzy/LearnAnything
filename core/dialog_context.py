@@ -538,7 +538,7 @@ class DialogContextManager:
                 print(f"[DialogContextManager] >>> 跨学科切换检测 <<<: {active_subject} -> {subject_id}")
                 print(f"[DialogContextManager] 暂停旧会话: session={active_session['session_id'][:8]}..., subject={active_subject}")
                 self._suspend_session(active_session["session_id"])
-                # 创建新会话（新学科）
+                # 创建新会话（新学科）—— LA-051-SESSION-FIX: 不传入旧的 session_id，生成新的
                 new_session = self._create_session(user_id, subject_id)
                 print(f"[DialogContextManager] 创建新学科会话: session={new_session['session_id'][:8]}..., subject={subject_id}")
                 return new_session["session_id"], new_session
@@ -554,7 +554,6 @@ class DialogContextManager:
 
     def _create_session(self, user_id: str, subject_id: str = None, session_id: str = None) -> Dict:
         now = datetime.now().isoformat()
-        # LA-050-HISTORY-FIX: 支持传入自定义 session_id（保持前后端一致）
         sid = session_id or str(uuid.uuid4())
         session = {
             "session_id": sid,
@@ -572,12 +571,28 @@ class DialogContextManager:
         conn = sqlite3.connect(str(self.db_path))
         try:
             cursor = conn.cursor()
-            cursor.execute("""
-                INSERT INTO dialog_sessions
-                (session_id, user_id, subject_id, status, current_topic, user_theta,
-                 weak_areas, turn_count, created_at, updated_at, context_summary)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, tuple(session.values()))
+            # LA-051-SESSION-FIX: 如果 session_id 已存在，更新状态而非插入
+            cursor.execute("SELECT session_id FROM dialog_sessions WHERE session_id = ?", (sid,))
+            if cursor.fetchone():
+                print(f"[DialogContextManager] Session {sid[:8]}... already exists, updating to active")
+                cursor.execute("""
+                    UPDATE dialog_sessions
+                    SET status = 'active', updated_at = ?, subject_id = ?, user_id = ?
+                    WHERE session_id = ?
+                """, (now, subject_id or "", user_id, sid))
+                # 重置 turn_count 等字段
+                cursor.execute("""
+                    UPDATE dialog_sessions
+                    SET turn_count = 0, current_topic = NULL, context_summary = NULL
+                    WHERE session_id = ?
+                """, (sid,))
+            else:
+                cursor.execute("""
+                    INSERT INTO dialog_sessions
+                    (session_id, user_id, subject_id, status, current_topic, user_theta,
+                     weak_areas, turn_count, created_at, updated_at, context_summary)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, tuple(session.values()))
             conn.commit()
         finally:
             conn.close()
