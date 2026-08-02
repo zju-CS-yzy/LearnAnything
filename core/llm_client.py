@@ -18,7 +18,7 @@ from typing import List, Dict, Any, Optional
 
 import requests
 
-from config.settings import get_llm_config
+from config.settings import get_llm_config, get_llm_fallback_config
 
 
 class LLMClient:
@@ -438,3 +438,207 @@ class LLMClient:
             return _json.loads(cleaned)
         except _json.JSONDecodeError as e:
             raise RuntimeError(f"LLM returned invalid JSON: {e}\nContent: {cleaned[:500]}")
+
+
+# ========== LLM-ROBUST: FallbackLLMClient ==========
+
+class FallbackLLMClient:
+    """
+    LLM-ROBUST: 带自动故障转移的 LLM 客户端。
+
+    包装两个 LLMClient（主 + 备用），当主 LLM 发生可恢复错误时，
+    自动切换到备用 LLM 重试。
+
+    使用方式:
+        from core.llm_client import FallbackLLMClient
+        client = FallbackLLMClient()
+        response = client.chat(messages)  # 主失败时自动切备用
+    """
+
+    def __init__(
+        self,
+        primary: Optional[LLMClient] = None,
+        fallback: Optional[LLMClient] = None,
+        timeout: int = 60,
+        max_retries: int = 2,
+    ):
+        """
+        Args:
+            primary: 主 LLMClient，None 时从全局配置自动创建
+            fallback: 备用 LLMClient，None 时从全局 fallback 配置自动创建
+            timeout: 请求超时（秒）
+            max_retries: 每个 Provider 的最大重试次数
+        """
+        # 主 LLM
+        if primary is not None:
+            self.primary = primary
+        else:
+            cfg = get_llm_config()
+            self.primary = LLMClient.from_feature_config(cfg, timeout=timeout, max_retries=max_retries)
+
+        # 备用 LLM
+        if fallback is not None:
+            self.fallback = fallback
+        else:
+            cfg_fb = get_llm_fallback_config()
+            if cfg_fb.api_key:
+                self.fallback = LLMClient.from_feature_config(cfg_fb, timeout=timeout, max_retries=max_retries)
+            else:
+                self.fallback = None
+
+        self.fallback_enabled = self.fallback is not None and self.fallback.available
+        self.timeout = timeout
+        self.max_retries = max_retries
+
+        # 统计信息
+        self._stats = {
+            "primary_success": 0,
+            "primary_fail": 0,
+            "fallback_success": 0,
+            "fallback_fail": 0,
+            "last_error": None,
+            "last_fallback_time": None,
+        }
+
+        fb_info = f"{self.fallback.model}@{self.fallback.base_url}" if self.fallback_enabled else "disabled"
+        print(f"[FallbackLLMClient] primary={self.primary.model}, fallback={fb_info}")
+
+    def chat(
+        self,
+        messages: List[Dict[str, str]],
+        temperature: float = 0.3,
+        max_tokens: int = 800,
+        system_prompt: Optional[str] = None,
+        timeout: Optional[int] = None,
+    ) -> str:
+        """发送对话请求，主 LLM 失败时自动切换到备用 LLM。"""
+        actual_timeout = timeout or self.timeout
+
+        # 1. 尝试主 LLM
+        try:
+            result = self.primary.chat(
+                messages=messages, temperature=temperature,
+                max_tokens=max_tokens, system_prompt=system_prompt,
+                timeout=actual_timeout,
+            )
+            self._stats["primary_success"] += 1
+            return result
+        except (requests.exceptions.Timeout, requests.exceptions.ConnectionError,
+                requests.exceptions.HTTPError, requests.exceptions.SSLError,
+                requests.exceptions.RequestException, RuntimeError) as e:
+            self._stats["primary_fail"] += 1
+            self._stats["last_error"] = str(e)
+            print(f"[FallbackLLMClient] Primary failed: {type(e).__name__}: {str(e)[:200]}")
+
+            # 2. 主失败，尝试备用 LLM
+            if self.fallback_enabled:
+                print(f"[FallbackLLMClient] -> fallback {self.fallback.model}")
+                self._stats["last_fallback_time"] = time.time()
+                try:
+                    result = self.fallback.chat(
+                        messages=messages, temperature=temperature,
+                        max_tokens=max_tokens, system_prompt=system_prompt,
+                        timeout=actual_timeout,
+                    )
+                    self._stats["fallback_success"] += 1
+                    print(f"[FallbackLLMClient] Fallback succeeded")
+                    return result
+                except Exception as e2:
+                    self._stats["fallback_fail"] += 1
+                    raise RuntimeError(
+                        f"Both primary and fallback LLM failed.\n"
+                        f"Primary ({self.primary.model}): {e}\n"
+                        f"Fallback ({self.fallback.model}): {e2}"
+                    )
+            else:
+                raise
+
+    def chat_stream(
+        self,
+        messages: List[Dict[str, str]],
+        temperature: float = 0.3,
+        max_tokens: int = 800,
+        system_prompt: Optional[str] = None,
+    ):
+        """流式发送对话请求，支持故障转移。"""
+        return self._chat_stream_with_fallback(
+            messages=messages, temperature=temperature,
+            max_tokens=max_tokens, system_prompt=system_prompt,
+        )
+
+    def _chat_stream_with_fallback(
+        self, messages, temperature, max_tokens, system_prompt,
+    ):
+        """内部：流式调用的故障转移实现。"""
+        primary_failed = False
+
+        try:
+            for chunk in self.primary.chat_stream(
+                messages=messages, temperature=temperature,
+                max_tokens=max_tokens, system_prompt=system_prompt,
+            ):
+                yield chunk
+            self._stats["primary_success"] += 1
+            return
+        except (requests.exceptions.Timeout, requests.exceptions.ConnectionError,
+                requests.exceptions.HTTPError, requests.exceptions.SSLError,
+                requests.exceptions.RequestException, RuntimeError) as e:
+            self._stats["primary_fail"] += 1
+            self._stats["last_error"] = str(e)
+            print(f"[FallbackLLMClient] Primary stream failed: {type(e).__name__}: {str(e)[:200]}")
+            primary_failed = True
+
+        if primary_failed and self.fallback_enabled:
+            print(f"[FallbackLLMClient] -> fallback stream {self.fallback.model}")
+            self._stats["last_fallback_time"] = time.time()
+            try:
+                for chunk in self.fallback.chat_stream(
+                    messages=messages, temperature=temperature,
+                    max_tokens=max_tokens, system_prompt=system_prompt,
+                ):
+                    yield chunk
+                self._stats["fallback_success"] += 1
+                print(f"[FallbackLLMClient] Fallback stream succeeded")
+                return
+            except Exception as e2:
+                self._stats["fallback_fail"] += 1
+                raise RuntimeError(
+                    f"Both primary and fallback LLM stream failed.\n"
+                    f"Primary ({self.primary.model}): {e}\n"
+                    f"Fallback ({self.fallback.model}): {e2}"
+                )
+        elif primary_failed:
+            raise
+
+    def chat_json(self, messages, temperature=0.1, max_tokens=1200,
+                  system_prompt=None, timeout=None):
+        """发送请求并解析返回为 JSON，支持故障转移。"""
+        json_system = (
+            "你必须以 JSON 格式输出，不要包含任何 markdown 代码块标记或额外解释。"
+            "只输出纯 JSON 字符串，确保可以被 Python json.loads 解析。"
+        )
+        combined = f"{system_prompt or ''}\n\n{json_system}".strip()
+        content = self.chat(messages=messages, temperature=temperature,
+                           max_tokens=max_tokens, system_prompt=combined,
+                           timeout=timeout)
+        cleaned = content.strip()
+        if cleaned.startswith("```json"):
+            cleaned = cleaned[7:]
+        if cleaned.startswith("```"):
+            cleaned = cleaned[3:]
+        if cleaned.endswith("```"):
+            cleaned = cleaned[:-3]
+        cleaned = cleaned.strip()
+        import json as _json
+        try:
+            return _json.loads(cleaned)
+        except _json.JSONDecodeError as e:
+            raise RuntimeError(f"LLM returned invalid JSON: {e}\nContent: {cleaned[:500]}")
+
+    def get_stats(self) -> Dict[str, Any]:
+        """获取故障转移统计信息"""
+        return dict(self._stats)
+
+    def is_fallback_enabled(self) -> bool:
+        """备用 LLM 是否可用"""
+        return self.fallback_enabled
