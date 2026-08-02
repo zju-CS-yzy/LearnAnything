@@ -522,9 +522,11 @@ class TutorAgent(BaseAgent):
                 safe_ids.append(f"'{safe_cid}'")
 
             id_str = ", ".join(safe_ids)
+            # LLM-ROBUST-FIX: 使用 UNWIND 替代 IN，避免 KùzuDB 语法兼容性问题
             cypher = f"""
+                UNWIND [{id_str}] AS target_id
                 MATCH (c:Chunk)
-                WHERE c.chunk_id IN [{id_str}]
+                WHERE c.chunk_id = target_id
                 RETURN c.chunk_id, c.heading_path, c.page_number, c.source
             """
             result = conn.execute(cypher)

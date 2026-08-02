@@ -3968,6 +3968,23 @@ def serve_media(path: str, x_user_id: Optional[str] = Header(None, alias="X-User
         print(f"[API] LA-IMG: 200 返回文件: {full_path}")
         return FileResponse(full_path)
     
+    # LA-051-STRUCT-FIX: 在 *_images/ 和 *_thumbnails/ 子目录下查找
+    if '/' not in decoded_path.replace('\\', '/'):
+        for subdir in KNOWLEDGE_BASE_DIR.iterdir():
+            if not subdir.is_dir():
+                continue
+            if subdir.name.endswith('_images') or subdir.name.endswith('_thumbnails'):
+                candidate = subdir / normalized_path
+                if candidate.exists() and candidate.is_file():
+                    print(f'[API] LA-IMG: 200 subdir hit: {candidate}')
+                    return FileResponse(candidate)
+                if not any(normalized_path.lower().endswith(ext) for ext in ['.png', '.jpg', '.jpeg', '.gif', '.webp']):
+                    for ext in ['.png', '.jpg', '.jpeg']:
+                        candidate_ext = subdir / (normalized_path + ext)
+                        if candidate_ext.exists() and candidate_ext.is_file():
+                            print(f'[API] LA-IMG: 200 ext hit: {candidate_ext}')
+                            return FileResponse(candidate_ext)
+
     print(f"[API] LA-IMG: 404 文件不存在: {full_path}")
     raise HTTPException(status_code=404, detail=f"File not found: {path}")
 
