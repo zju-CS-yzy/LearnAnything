@@ -93,9 +93,14 @@
               <button class="btn btn-sm btn-secondary" @click.stop="removeFile(i)">✕</button>
             </div>
           </div>
+          <!-- LA-051-Task4: contributor 提示 -->
+          <div v-if="isContributorMode && selectedFiles.length > 0" class="contributor-hint">
+            ⚠️ 您是贡献者，文件将提交给学科拥有者审批，审批通过后自动导入。
+          </div>
         </div>
         <button class="btn btn-primary" :disabled="isLoading || selectedFiles.length === 0" @click="uploadFiles">
           <span v-if="isLoading" class="spinner"></span>
+          <span v-else-if="isContributorMode">提交审批</span>
           <span v-else>上传 {{ selectedFiles.length }} 个文件</span>
         </button>
       </div>
@@ -195,6 +200,12 @@ const subjectStats = ref({})
 const availableSubjects = computed(() => subjectState.subjects.value || [])
 const selectedSubject = ref(subjectState.currentSubject.value)
 
+// LA-051-Task4: 当前用户是否为 contributor（只能提交审批，不能直接导入）
+const isContributorMode = computed(() => {
+  const sub = subjectState.subjects.value.find(s => s.id === selectedSubject.value)
+  return sub?.can_contribute && !sub?.can_write
+})
+
 // 监听全局学科变化
 watch(() => subjectState.currentSubject.value, (val) => {
   if (val !== selectedSubject.value) {
@@ -263,23 +274,63 @@ async function uploadFiles() {
   isLoading.value = true
   importResult.value = null
 
-  const formData = new FormData()
-  formData.append('subject', selectedSubject.value)
-  selectedFiles.value.forEach(file => {
-    formData.append('files', file)
-  })
+  // LA-051-Task4: contributor 提交审批，owner/maintainer 直接导入
+  const isContributor = isContributorMode.value
 
   try {
-    const resp = await fetch(`${window.location.origin}/api/import/file`, {
-      method: 'POST',
-      body: formData,
-    })
-    const result = await resp.json()
-    importResult.value = { ...result, success: resp.ok }
-    if (resp.ok) {
-      selectedFiles.value = []
-      await loadStats()
-      await loadRawFiles()
+    // 必须带上认证 headers
+    const token = localStorage.getItem('la_auth_token') || ''
+    const saved = localStorage.getItem('la_current_user')
+    const user = saved ? JSON.parse(saved) : null
+    const userId = user?.user_id || 'default'
+    const headers = {
+      'X-User-ID': userId,
+      ...(token ? { 'Authorization': `Bearer ${token}` } : {}),
+    }
+
+    if (isContributor) {
+      // LA-051-Task4: contributor 提交到审批队列
+      // 目前只支持单文件提交（简化版）
+      const file = selectedFiles.value[0]
+      const formData = new FormData()
+      formData.append('file', file)
+      formData.append('description', ` contributor 上传: ${file.name}`)
+
+      const resp = await fetch(`${window.location.origin}/api/subjects/${selectedSubject.value}/changes/file`, {
+        method: 'POST',
+        body: formData,
+        headers,
+      })
+      const result = await resp.json()
+      importResult.value = {
+        success: resp.ok,
+        message: resp.ok
+          ? `✅ 文件已提交至审批队列\n\n变更ID: ${result.change_id}\n文件名: ${result.file_name}\n状态: 等待 owner/maintainer 审批`
+          : result.detail || '提交失败',
+      }
+      if (resp.ok) {
+        selectedFiles.value = []
+      }
+    } else {
+      // owner/maintainer: 直接导入（原有逻辑）
+      const formData = new FormData()
+      formData.append('subject', selectedSubject.value)
+      selectedFiles.value.forEach(file => {
+        formData.append('files', file)
+      })
+
+      const resp = await fetch(`${window.location.origin}/api/import/file`, {
+        method: 'POST',
+        body: formData,
+        headers,
+      })
+      const result = await resp.json()
+      importResult.value = { ...result, success: resp.ok }
+      if (resp.ok) {
+        selectedFiles.value = []
+        await loadStats()
+        await loadRawFiles()
+      }
     }
   } catch (e) {
     importResult.value = { success: false, message: e.message }
@@ -466,6 +517,18 @@ onMounted(() => {
   background: var(--bg-active);
   border-radius: var(--radius-sm);
   font-size: var(--font-size-sm);
+}
+
+/* LA-051-Task4: contributor 提示 */
+.contributor-hint {
+  margin-top: 10px;
+  padding: 10px 12px;
+  background: var(--bg-warning, #fff8e1);
+  border: 1px solid var(--warning, #ffc107);
+  border-radius: var(--radius-sm);
+  font-size: var(--font-size-sm);
+  color: var(--warning-text, #856404);
+  line-height: 1.5;
 }
 
 /* 原始资料 */

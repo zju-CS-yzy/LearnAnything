@@ -3,15 +3,50 @@ import { ref } from 'vue'
 // API 基础地址 — 从当前页面 origin 自动推断
 const API_BASE = window.location.origin
 
-// 通用 fetch 封装
+// LA-050-Phase5 + LA-052-A: 从 localStorage 读取当前用户ID
+function getXUserId() {
+  try {
+    const saved = localStorage.getItem('la_current_user')
+    if (saved) {
+      const user = JSON.parse(saved)
+      return user.user_id || 'default'
+    }
+  } catch (e) {
+    console.error('[useApi] 读取用户ID失败:', e)
+  }
+  return 'default'
+}
+
+// LA-052: 从 localStorage 读取认证 token
+function getAuthToken() {
+  try {
+    return localStorage.getItem('la_auth_token') || ''
+  } catch (e) {
+    return ''
+  }
+}
+
+// LA-050-Phase5 + LA-052: 获取带 X-User-ID 和 Authorization 的请求头
+function authHeaders(base = {}) {
+  const headers = {
+    'Content-Type': 'application/json',
+    'X-User-ID': getXUserId(),
+    ...base,
+  }
+  // LA-052: 如果已登录，附加 Authorization token
+  const token = getAuthToken()
+  if (token) {
+    headers['Authorization'] = `Bearer ${token}`
+  }
+  return headers
+}
+
+// 通用 fetch 封装 — 自动附加 X-User-ID
 async function fetchApi(path, options = {}) {
   const url = `${API_BASE}${path}`
   const resp = await fetch(url, {
-    headers: {
-      'Content-Type': 'application/json',
-      ...options.headers,
-    },
     ...options,
+    headers: authHeaders(options.headers),
   })
   if (!resp.ok) {
     const text = await resp.text()
@@ -41,19 +76,27 @@ export function useHealthCheck() {
 }
 
 // 智能问答（非流式）
-export async function apiAsk(query, subject = 'generic') {
+export async function apiAsk(query, subject = 'generic', user_id = null, user_theta = null) {
+  const effectiveUserId = user_id || getXUserId()
+  console.log('[useApi] apiAsk user_id:', effectiveUserId, 'user_theta:', user_theta)
   return fetchApi('/api/ask', {
     method: 'POST',
-    body: JSON.stringify({ query, subject }),
+    body: JSON.stringify({ query, subject, user_id: effectiveUserId, user_theta }),
   })
 }
 
 // 智能问答（流式 SSE）
-export async function* apiAskStream(query, subject = 'generic') {
+// LA-050-HISTORY-FIX: 传入 session_id，后端会返回实际的 session_id
+// LA-044: 传入 user_theta 实现个性化回答
+export async function* apiAskStream(query, subject = 'generic', user_id = null, session_id = null, user_theta = null) {
+  // LA-050-Phase5: 如果未传入 user_id，从 localStorage 读取
+  const effectiveUserId = user_id || getXUserId()
+  console.log('[useApi] apiAskStream user_id:', effectiveUserId, 'session_id:', session_id, 'user_theta:', user_theta)
+  
   const resp = await fetch(`${API_BASE}/api/ask/stream`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ query, subject }),
+    headers: authHeaders(),
+    body: JSON.stringify({ query, subject, user_id: effectiveUserId, session_id, user_theta }),
   })
 
   if (!resp.ok) {
@@ -205,4 +248,117 @@ export async function apiDetectSubject(query) {
 // 获取学科统计
 export async function apiSubjectStats(subject) {
   return fetchApi(`/api/knowledge-base/${subject}/stats`)
+}
+
+// ========== LA-040-P1-VIS: 评测结果可视化 API ==========
+
+// 获取能力条形图数据
+export async function apiVisualizationBars(user_id = 'anonymous', subject = 'generic', sort = 'mastery_asc', limit = 20, filter_status = 'all') {
+  const params = new URLSearchParams()
+  params.append('user_id', user_id)
+  params.append('subject', subject)
+  params.append('sort', sort)
+  params.append('limit', String(limit))
+  params.append('filter_status', filter_status)
+  return fetchApi(`/api/visualization/bars?${params.toString()}`)
+}
+
+// ========== LA-040-P2: 学习进度 API ==========
+
+// 获取进步曲线
+export async function apiProgressChart(user_id = 'anonymous', subject = 'generic', days = 30) {
+  const params = new URLSearchParams()
+  params.append('user_id', user_id)
+  params.append('subject', subject)
+  params.append('days', String(days))
+  return fetchApi(`/api/visualization/progress?${params.toString()}`)
+}
+
+// 获取错题本
+export async function apiWrongAnswers(user_id = 'anonymous', subject = 'generic', concept = null, mastered = null, sort = 'last_wrong_desc', limit = 50, offset = 0) {
+  const params = new URLSearchParams()
+  params.append('user_id', user_id)
+  params.append('subject', subject)
+  if (concept) params.append('concept', concept)
+  if (mastered !== null) params.append('mastered', String(mastered))
+  params.append('sort', sort)
+  params.append('limit', String(limit))
+  params.append('offset', String(offset))
+  return fetchApi(`/api/visualization/wrong-answers?${params.toString()}`)
+}
+
+// 更新错题状态
+export async function apiUpdateWrongAnswer(wrong_id, updates) {
+  return fetchApi(`/api/visualization/wrong-answers/${wrong_id}`, {
+    method: 'POST',
+    body: JSON.stringify(updates),
+  })
+}
+
+// 获取评测历史
+export async function apiEvalHistory(user_id = 'anonymous', subject = 'generic', limit = 50, offset = 0) {
+  const params = new URLSearchParams()
+  params.append('user_id', user_id)
+  params.append('subject', subject)
+  params.append('limit', String(limit))
+  params.append('offset', String(offset))
+  return fetchApi(`/api/evaluation/history?${params.toString()}`)
+}
+
+// 获取 Bloom 认知层次统计
+export async function apiBloomStats(subject = 'generic') {
+  return fetchApi(`/api/quiz-bank/bloom-stats?subject=${subject}`)
+}
+
+// LA-040-P3: 获取 Bloom 认知雷达图数据
+export async function apiBloomRadar(userId = 'anonymous', subject = 'generic') {
+  return fetchApi(`/api/visualization/bloom-radar?user_id=${userId}&subject=${subject}`)
+}
+
+// LA-040-P3: 获取学习建议
+export async function apiRecommendations(userId = 'anonymous', subject = 'generic') {
+  return fetchApi(`/api/visualization/recommendations?user_id=${userId}&subject=${subject}`)
+}
+
+// ========== LA-051: 权限管理 API ==========
+
+// 获取学科权限列表
+export async function apiListPermissions(subjectId) {
+  return fetchApi(`/api/subjects/${subjectId}/permissions`)
+}
+
+// 授予权限
+export async function apiGrantPermission(subjectId, userId, role) {
+  return fetchApi(`/api/subjects/${subjectId}/permissions`, {
+    method: 'POST',
+    body: JSON.stringify({ user_id: userId, role }),
+  })
+}
+
+// 撤销权限
+export async function apiRevokePermission(subjectId, userId) {
+  return fetchApi(`/api/subjects/${subjectId}/permissions/${userId}`, {
+    method: 'DELETE',
+  })
+}
+
+// 提交变更（contributor）
+export async function apiSubmitChange(subjectId, changeType, description) {
+  return fetchApi(`/api/subjects/${subjectId}/changes`, {
+    method: 'POST',
+    body: JSON.stringify({ change_type: changeType, description }),
+  })
+}
+
+// 查看待审批变更
+export async function apiListPendingChanges(subjectId) {
+  return fetchApi(`/api/subjects/${subjectId}/changes/pending`)
+}
+
+// 审批变更
+export async function apiReviewChange(changeId, approve, note = '') {
+  return fetchApi(`/api/subjects/changes/${changeId}/review`, {
+    method: 'POST',
+    body: JSON.stringify({ approve, note }),
+  })
 }

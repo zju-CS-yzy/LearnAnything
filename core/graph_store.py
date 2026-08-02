@@ -175,17 +175,18 @@ class GraphStore:
 
 
 
-    def __init__(self, collection_name: str):
-
+    def __init__(self, collection_name: str, db_path: Optional[str] = None):
         """
-
         Args:
-
-            collection_name: 学科集合名（??"ai_llm_v2"??        """
-
+            collection_name: 学科集合名（如"ai_llm_v2"）
+            db_path: 可选自定义数据库路径（LA-050-Phase3: 用户隔离）
+        """
         self.collection_name = collection_name
-
-        self.db_path = GRAPH_DB_DIR / f"{collection_name}_graph"
+        # LA-050-Phase3: 支持自定义 db_path（用户隔离）
+        if db_path:
+            self.db_path = Path(db_path)
+        else:
+            self.db_path = GRAPH_DB_DIR / f"{collection_name}_graph"
         self.db_path_str = str(self.db_path)  # LA-035-P12: 统一使用字符串缓存 key
 
         self._db = None
@@ -229,7 +230,10 @@ class GraphStore:
 
     def _execute(self, conn, cypher):
         """
-        Thread-safe Cypher query execution.
+        线程安全地执行 Cypher 查询。
+
+        KùzuDB 的 Python Connection 非线程安全，在 FastAPI 多线程环境下
+        并发调用会导致进程崩溃。通过类锁保护所有查询操作。
         """
         with GraphStore._conn_lock:
             return conn.execute(cypher)
@@ -615,7 +619,8 @@ class GraphStore:
     def _sanitize_media_refs(self, media_refs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """
         LA-035-P27-fix: 清理 media_refs 中的路径格式
-        - 使用 relative_path 替代 path（避免 Windows 绝对路径）
+        LA-054-FIX: 修复 relative_path 覆盖 path 导致图片获取失败的问题
+        - 使用 relative_path 替代 path（避免 Windows 绝对路径），但仅当 relative_path 是有效路径时
         - 将反斜杠替换为正斜杠
         - 返回安全的 media_refs 列表
         """
@@ -629,9 +634,18 @@ class GraphStore:
             
             ref_copy = dict(ref)
             
-            # 优先使用 relative_path，替代 path 字段
-            if ref_copy.get("relative_path"):
-                ref_copy["path"] = ref_copy["relative_path"]
+            # LA-054-FIX: relative_path 只有在是有效路径时才替代 path
+            # 有效路径：包含 _v1_images/ 或 _v1_thumbnails/
+            rel_path = ref_copy.get("relative_path", "")
+            path_val = ref_copy.get("path", "")
+            if rel_path and ('_v1_images/' in rel_path or '_v1_thumbnails/' in rel_path):
+                # relative_path 是有效相对路径，用它替代 path
+                ref_copy["path"] = rel_path
+            elif rel_path and ':' in path_val and '/' in rel_path:
+                # path 是 Windows 绝对路径，relative_path 是相对路径（含 /）
+                # 用 relative_path 替代（避免 Windows 路径跨平台问题）
+                ref_copy["path"] = rel_path
+            # 否则保留 path 原值（防止 MinerU 原始文件名如 "RAG运行流程与架构.png" 覆盖实际路径）
             
             # 清理所有路径字段中的反斜杠
             for key in ["path", "thumbnail_path", "relative_path"]:
@@ -702,6 +716,16 @@ class GraphStore:
             # LA-035: 图片字段
             raw_image_path = meta.get("image_path", "")
             raw_thumbnail_path = meta.get("thumbnail_path", "")
+            # LA-035-P42-FIX: image_pseudo chunk 的 image_path 存储在 media_refs[0].path 中
+            # 当 image_path 为空但 media_refs 有时，从中提取
+            if not raw_image_path and chunk_type in ("image_pseudo", "image"):
+                media_refs_temp = meta.get("media_refs", [])
+                if media_refs_temp and isinstance(media_refs_temp, list) and len(media_refs_temp) > 0:
+                    first_ref = media_refs_temp[0]
+                    if isinstance(first_ref, dict):
+                        raw_image_path = first_ref.get("path", "") or first_ref.get("image_path", "")
+                        raw_thumbnail_path = first_ref.get("thumbnail_path", "") or first_ref.get("thumbnail", "")
+                        print(f"[GraphStore] LA-035-P42-FIX: 从 media_refs 提取 image_path for {chunk['id']}: {raw_image_path}")
             # LA-035-P26: 将 Windows 绝对路径转换为相对路径（保留 学科_v1_images/文件名 部分）
             import re as _re
             img_match = _re.search(r'([^\\/]+_v1_images[\\/][^\\/]+)$', raw_image_path)
@@ -1027,8 +1051,9 @@ class GraphStore:
         return pagerank
 
     def _get_centrality_cache_path(self):
-        from pathlib import Path as _Path
-        return _Path(r"D:\MyCS\AI\Project\LearnAnything\knowledge_base") / f"{self.collection_name}_centrality_cache.json"
+        """获取 PageRank 缓存文件路径（LA-DEPLOY: 使用 KNOWLEDGE_BASE_DIR 替代硬编码路径）"""
+        from config.settings import KNOWLEDGE_BASE_DIR
+        return KNOWLEDGE_BASE_DIR / f"{self.collection_name}_centrality_cache.json"
 
     def _get_centrality_cache(self) -> Dict[str, float]:
         import json

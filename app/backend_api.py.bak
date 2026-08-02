@@ -508,104 +508,6 @@ def health_check():
     )
 
 
-# ========== LLM-ROBUST: 配置管理 API ==========
-
-class LLMConfigItem(BaseModel):
-    """单个 LLM 配置项"""
-    provider: str
-    api_key: str
-    base_url: str
-    model: str
-    enabled: bool = True
-    custom_model: str = ""
-
-class ConfigResponse(BaseModel):
-    """配置响应"""
-    llm: LLMConfigItem
-    llm_fallback: LLMConfigItem
-    vlm: LLMConfigItem
-    embedding: LLMConfigItem
-    mineru: LLMConfigItem
-
-@app.get("/api/config", response_model=ConfigResponse)
-def get_config():
-    """
-    LLM-ROBUST: 获取应用配置（LLM/VLM/Embedding/MinerU）。
-    
-    返回当前加载的 api_config.ini 配置，包含主 LLM 和备用 LLM(fallback)。
-    API Key 返回时脱敏处理（只显示前4位和后4位）。
-    """
-    from config.settings import get_full_config
-    cfg = get_full_config()
-    
-    def _mask_key(key: str) -> str:
-        """脱敏 API Key"""
-        if len(key) <= 12:
-            return "***"
-        return key[:4] + "..." + key[-4:]
-    
-    def _to_item(fc) -> LLMConfigItem:
-        return LLMConfigItem(
-            provider=fc.provider,
-            api_key=_mask_key(fc.api_key),
-            base_url=fc.base_url,
-            model=fc.model,
-            enabled=fc.enabled,
-            custom_model=fc.custom_model,
-        )
-    
-    return ConfigResponse(
-        llm=_to_item(cfg.llm),
-        llm_fallback=_to_item(cfg.llm_fallback),
-        vlm=_to_item(cfg.vlm),
-        embedding=_to_item(cfg.embedding),
-        mineru=_to_item(cfg.mineru),
-    )
-
-
-class ConfigUpdateRequest(BaseModel):
-    """配置更新请求"""
-    llm: Optional[LLMConfigItem] = None
-    llm_fallback: Optional[LLMConfigItem] = None
-    vlm: Optional[LLMConfigItem] = None
-    embedding: Optional[LLMConfigItem] = None
-    mineru: Optional[LLMConfigItem] = None
-
-@app.put("/api/config")
-def update_config(request: ConfigUpdateRequest):
-    """
-    LLM-ROBUST: 更新应用配置。
-    
-    只更新传入的字段，未传入的保持原值。
-    API Key 若传入 "***" 或空字符串，表示不修改原值。
-    """
-    from config.settings import get_full_config, save_api_config, FeatureConfig
-    
-    cfg = get_full_config()
-    
-    def _merge_item(current: FeatureConfig, incoming: Optional[LLMConfigItem]) -> FeatureConfig:
-        if not incoming:
-            return current
-        return FeatureConfig(
-            provider=incoming.provider if incoming.provider else current.provider,
-            # API Key: 如果传入的是脱敏值或空，保持原值
-            api_key=current.api_key if (not incoming.api_key or incoming.api_key == "***" or "..." in incoming.api_key) else incoming.api_key,
-            base_url=incoming.base_url if incoming.base_url else current.base_url,
-            model=incoming.model if incoming.model else current.model,
-            enabled=incoming.enabled,
-            custom_model=incoming.custom_model if incoming.custom_model else current.custom_model,
-        )
-    
-    cfg.llm = _merge_item(cfg.llm, request.llm)
-    cfg.llm_fallback = _merge_item(cfg.llm_fallback, request.llm_fallback)
-    cfg.vlm = _merge_item(cfg.vlm, request.vlm)
-    cfg.embedding = _merge_item(cfg.embedding, request.embedding)
-    cfg.mineru = _merge_item(cfg.mineru, request.mineru)
-    
-    save_api_config(cfg)
-    return {"success": True, "message": "配置已保存"}
-
-
 # ========== LA-052: 认证 API ==========
 
 @app.post("/api/auth/register", response_model=AuthResponse)
@@ -703,33 +605,18 @@ def auth_me(authorization: Optional[str] = Header(None)):
 
 
 @app.post("/api/ask", response_model=AskResponse)
-def ask_question(
-    request: AskRequest,
-    x_user_id: Optional[str] = Header(None, alias="X-User-ID"),
-    authorization: Optional[str] = Header(None),
-):
+def ask_question(request: AskRequest):
     """
     智能问答接口（非流式）。
     LA-044: 当 user_theta 未传入时，自动从 UserStateStore 读取用户的当前 theta。
-    LA-051: 支持权限感知的跨用户数据访问。
     """
-    # LA-051: 获取真实用户身份
-    effective_user_id = get_current_user_id(x_user_id, authorization)
-    # LA-051-SESSION: header 无有效身份时，回退到请求体中的 user_id
-    if effective_user_id in ("anonymous", "default") and request.user_id and request.user_id not in ("anonymous", "default"):
-        effective_user_id = request.user_id
-    
-    # LA-051: 权限感知的 store 获取
-    subject = request.subject
-    graph_store = _get_accessible_graph_store(subject, effective_user_id)
-    vector_store = _get_accessible_vector_store(subject, effective_user_id)
-    
     # LA-044-FIX: 如果请求中未传 user_theta，从 UserStateStore 读取
+    effective_user_id = request.user_id or "default"
     user_theta = request.user_theta
     if user_theta is None and effective_user_id not in ("anonymous", "default"):
         try:
             store = _get_isolated_state_store(effective_user_id)
-            subject_id = f"{subject}_v1"
+            subject_id = f"{request.subject}_v1"
             state = store.get_full_user_state(effective_user_id, subject_id)
             user_theta = state.get("profile", {}).get("global_theta")
             print(f"[LA-044-FIX] /api/ask: 从 UserStateStore 读取 theta={user_theta} | user={effective_user_id}, subject={subject_id}")
@@ -737,25 +624,24 @@ def ask_question(
             print(f"[LA-044-FIX] /api/ask: 读取 UserStateStore 失败: {e}")
             user_theta = None
 
-    print(f"[API] /api/ask called: query={request.query}, subject={subject}, user={effective_user_id}, user_theta={user_theta}")
+    print(f"[API] /api/ask called: query={request.query}, subject={request.subject}, user_theta={user_theta}")
     coordinator = Coordinator(
-        collection_name=f"{subject}_v1",
+        collection_name=f"{request.subject}_v1",
         top_k=5,
         user_theta=user_theta,
-        graph_store=graph_store,
-        vector_store=vector_store,
     )
     # LA-050-HISTORY-FIX: 注入用户隔离的 DialogContextManager
-    if effective_user_id not in ("anonymous", "default"):
+    effective_user_id = request.user_id or "default"
+    if effective_user_id != "default":
         from core.user_context import UserContext
         ctx = UserContext(effective_user_id)
         coordinator._dialog_manager = ctx.dialog_manager
         print(f"[LA-050-HISTORY-FIX] ask_question: 注入用户隔离 DialogContextManager | user={effective_user_id}, db={ctx.dialog_manager.db_path}")
     result = coordinator.handle(
         query=request.query,
-        user_id=effective_user_id,
+        user_id=request.user_id,
         session_id=request.session_id,
-        user_theta=user_theta,
+        user_theta=request.user_theta,
     )
     print(f"[API] /api/ask returning answer length={len(result.get('text', ''))}")
 
@@ -784,11 +670,7 @@ def ask_question(
 
 
 @app.post("/api/ask/stream")
-def ask_stream(
-    request: AskRequest,
-    x_user_id: Optional[str] = Header(None, alias="X-User-ID"),
-    authorization: Optional[str] = Header(None),
-):
+def ask_stream(request: AskRequest):
     """
     智能问答流式接口（SSE）。
 
@@ -806,8 +688,7 @@ def ask_stream(
     """
     async def event_generator():
         # LA-044-FIX: 如果请求中未传 user_theta，从 UserStateStore 读取
-        # LA-051-SESSION: 从 header 获取真实身份，不依赖请求体中的 user_id
-        effective_user_id = get_current_user_id(x_user_id, authorization)
+        effective_user_id = request.user_id or "default"
         user_theta = request.user_theta
         if user_theta is None and effective_user_id not in ("anonymous", "default"):
             try:
@@ -821,29 +702,22 @@ def ask_stream(
                 user_theta = None
 
         # 1. 同步检索和路由（coordinator.handle 内部 TutorAgent 会调用一次 LLM）
-        # LA-051: 权限感知的 store 获取
-        subject = request.subject
-        graph_store = _get_accessible_graph_store(subject, effective_user_id)
-        vector_store = _get_accessible_vector_store(subject, effective_user_id)
-        
         coordinator = Coordinator(
-            collection_name=f"{subject}_v1",
+            collection_name=f"{request.subject}_v1",
             top_k=5,
             user_theta=user_theta,
-            graph_store=graph_store,
-            vector_store=vector_store,
         )
         # LA-050-HISTORY-FIX: 注入用户隔离的 DialogContextManager
         # 确保对话消息保存到用户隔离数据库，而非共享数据库
-        # LA-051-SESSION: 使用已验证的 effective_user_id（已在上方从 header 获取）
-        if effective_user_id not in ("anonymous", "default"):
+        effective_user_id = request.user_id or "default"
+        if effective_user_id != "default":
             from core.user_context import UserContext
             ctx = UserContext(effective_user_id)
             coordinator._dialog_manager = ctx.dialog_manager
             print(f"[LA-050-HISTORY-FIX] ask_stream: 注入用户隔离 DialogContextManager | user={effective_user_id}, db={ctx.dialog_manager.db_path}")
         result = coordinator.handle(
             query=request.query,
-            user_id=effective_user_id,
+            user_id=request.user_id,
             session_id=request.session_id,
             user_theta=request.user_theta,
         )
@@ -922,11 +796,7 @@ def ask_stream(
 
 
 @app.post("/api/quiz", response_model=QuizResponse)
-def generate_quiz(
-    request: QuizRequest,
-    x_user_id: Optional[str] = Header(None, alias="X-User-ID"),
-    authorization: Optional[str] = Header(None),
-):
+def generate_quiz(request: QuizRequest):
     """
     Quiz API (P0-QUIZ-fix: use Coordinator + shared GraphStore).
 
@@ -942,10 +812,8 @@ def generate_quiz(
         graph_store=graph_store,  # shared GraphStore, avoids duplicate connections
     )
     # LA-050-HISTORY-FIX: 注入用户隔离的 DialogContextManager
-    # LA-050-HISTORY-FIX: 注入用户隔离的 DialogContextManager
-    # LA-051-SESSION: 从 header 获取真实身份
-    effective_user_id = get_current_user_id(x_user_id, authorization)
-    if effective_user_id not in ("anonymous", "default"):
+    effective_user_id = request.user_id or "default"
+    if effective_user_id != "default":
         from core.user_context import UserContext
         ctx = UserContext(effective_user_id)
         coordinator._dialog_manager = ctx.dialog_manager
@@ -953,7 +821,7 @@ def generate_quiz(
 
     result = coordinator.handle(
         query=f"give me {request.count} questions on {request.topic}",
-        user_id=effective_user_id,
+        user_id=request.user_id,
     )
 
     # Coordinator returns {"result": {"questions": [...], ...}}
@@ -984,11 +852,7 @@ def generate_quiz(
 
 
 @app.post("/api/evaluate/start", response_model=EvaluateStartResponse)
-def start_evaluation(
-    request: EvaluateStartRequest,
-    x_user_id: Optional[str] = Header(None, alias="X-User-ID"),
-    authorization: Optional[str] = Header(None),
-):
+def start_evaluation(request: EvaluateStartRequest):
     """
     开始评测 — 生成题目或从题库抽题并创建会话。
 
@@ -996,9 +860,6 @@ def start_evaluation(
     返回 session_id 和题目列表，前端保存 session_id 供后续提交答案。
     """
     session_id = str(uuid.uuid4())
-
-    # LA-051-SESSION: 在函数开头统一获取真实用户身份
-    effective_user_id = get_current_user_id(x_user_id, authorization)
 
     questions = []
     instructions = ""
@@ -1038,16 +899,15 @@ def start_evaluation(
                 graph_store=graph_store,
             )
             # LA-050-HISTORY-FIX: 注入用户隔离的 DialogContextManager
-            # LA-050-HISTORY-FIX: 注入用户隔离 DialogContextManager
-            # LA-051-SESSION: 使用函数开头统一获取的 effective_user_id
-            if effective_user_id not in ("anonymous", "default"):
+            effective_user_id = request.user_id or "default"
+            if effective_user_id != "default":
                 from core.user_context import UserContext
                 ctx = UserContext(effective_user_id)
                 coordinator._dialog_manager = ctx.dialog_manager
                 print(f"[LA-050-HISTORY-FIX] evaluate_start(mixed): 注入用户隔离 DialogContextManager | user={effective_user_id}")
             result = coordinator.handle(
                 query=f"evaluate my {request.topic} level",
-                user_id=effective_user_id,
+                user_id=request.user_id,
             )
             agent_result = result.get("result", {})
             gen_questions = agent_result.get("questions", [])
@@ -1069,16 +929,15 @@ def start_evaluation(
             graph_store=graph_store,
         )
         # LA-050-HISTORY-FIX: 注入用户隔离的 DialogContextManager
-        # LA-050-HISTORY-FIX: 注入用户隔离 DialogContextManager
-        # LA-051-SESSION: 使用函数开头统一获取的 effective_user_id
-        if effective_user_id not in ("anonymous", "default"):
+        effective_user_id = request.user_id or "default"
+        if effective_user_id != "default":
             from core.user_context import UserContext
             ctx = UserContext(effective_user_id)
             coordinator._dialog_manager = ctx.dialog_manager
             print(f"[LA-050-HISTORY-FIX] evaluate_start(generate): 注入用户隔离 DialogContextManager | user={effective_user_id}")
         result = coordinator.handle(
             query=f"evaluate my {request.topic} level",
-            user_id=effective_user_id,
+            user_id=request.user_id,
         )
         agent_result = result.get("result", {})
 
@@ -1335,8 +1194,7 @@ def get_evaluation_history(
     subject: str = "generic",
     limit: int = 50,
     offset: int = 0,
-    x_user_id: Optional[str] = Header(None, alias="X-User-ID"),
-    authorization: Optional[str] = Header(None),
+    x_user_id: Optional[str] = Header(None, alias="X-User-ID")
 ):
     """
     LA-040-P2: 获取用户的评测历史列表。
@@ -1428,14 +1286,13 @@ def get_evaluation_history(
 @app.post("/api/import/text", response_model=ImportResponse)
 def import_text(
     request: ImportRequest,
-    x_user_id: Optional[str] = Header(None, alias="X-User-ID"),
-    authorization: Optional[str] = Header(None),
+    x_user_id: Optional[str] = Header(None, alias="X-User-ID")
 ):
     """
     导入文本材料到知识库。
     LA-050-Phase5: 支持 X-User-ID Header，使用用户隔离的知识库。
     """
-    effective_user_id = get_current_user_id(x_user_id, authorization)
+    effective_user_id = x_user_id or "default"
 
     # LA-050-Phase5: 使用用户隔离的知识库
     if effective_user_id != "default":
@@ -1693,14 +1550,13 @@ def analyze_subject_materials(
 @app.get("/api/knowledge-base/{subject}/stats")
 def knowledge_base_stats(
     subject: str,
-    x_user_id: Optional[str] = Header(None, alias="X-User-ID"),
-    authorization: Optional[str] = Header(None),
+    x_user_id: Optional[str] = Header(None, alias="X-User-ID")
 ):
     """
     获取知识库统计信息。
     LA-051-P1-FIX: 使用 _get_accessible_vector_store 支持跨用户数据访问。
     """
-    effective_user_id = get_current_user_id(x_user_id, authorization)
+    effective_user_id = x_user_id or "default"
 
     try:
         # LA-051-P1-FIX: 使用权限感知的 VectorStore
@@ -1730,14 +1586,13 @@ def knowledge_base_chunks(
     subject: str,
     limit: int = 50,
     offset: int = 0,
-    x_user_id: Optional[str] = Header(None, alias="X-User-ID"),
-    authorization: Optional[str] = Header(None),
+    x_user_id: Optional[str] = Header(None, alias="X-User-ID")
 ):
     """
     获取知识库中的知识片段列表（用于可视化）。
     LA-051-P1-FIX: 使用 _get_accessible_vector_store 支持跨用户数据访问。
     """
-    effective_user_id = get_current_user_id(x_user_id, authorization)
+    effective_user_id = x_user_id or "default"
 
     try:
         # LA-051-P1-FIX: 使用权限感知的 VectorStore
@@ -2497,8 +2352,8 @@ def api_review_change(
     effective_user_id = get_current_user_id(x_user_id, authorization)
     pm = PermissionManager()
 
-    # LA-051: 先获取变更记录以确定学科（需要 file_data，使用 get_change_with_data）
-    change = pm.get_change_with_data(change_id)
+    # LA-051: 先获取变更记录以确定学科
+    change = pm.get_change(change_id)
     if not change:
         raise HTTPException(status_code=404, detail=f"变更不存在: {change_id}")
     
@@ -2548,12 +2403,7 @@ def api_detect_subject(query: str = Form(...)):
 # ========== 知识图谱 API ==========
 
 @app.post("/api/knowledge-graph/{subject}/build")
-def build_knowledge_graph(
-    subject: str,
-    body: Dict[str, Any] = None,
-    x_user_id: Optional[str] = Header(None, alias="X-User-ID"),
-    authorization: Optional[str] = Header(None),
-):
+def build_knowledge_graph(subject: str, body: Dict[str, Any] = None):
     """
     构建知识图谱 — 从向量库读取 chunk，生成图数据库结构。
 
@@ -2566,22 +2416,18 @@ def build_knowledge_graph(
     body = body or {}
     paradigm = body.get("paradigm", "theory")
     force_rebuild = body.get("force_rebuild", False)
-    llm_provider = body.get("llm_provider")  # LA-ROBUST: 支持切换 LLM 提供商
 
     try:
         # LA-050-Phase5: 使用用户隔离的 GraphBuilder
-        effective_user_id = get_current_user_id(x_user_id, authorization)
-        print(f"[LA-051-DEBUG] build: user_id={x_user_id}, auth_present={authorization is not None}, effective={effective_user_id}")
-        if effective_user_id not in ("anonymous", "default"):
+        effective_user_id = "anonymous"  # TODO: 添加 x_user_id 参数
+        if effective_user_id != "default":
             ctx = _get_user_context_from_header(effective_user_id)
             vector_store = ctx.get_user_vector_store(subject)
             graph_store = ctx.get_user_graph_store(subject)
             builder = GraphBuilder(f"{subject}_v1", paradigm=paradigm,
-                                   vector_store=vector_store, graph_store=graph_store,
-                                   llm_provider=llm_provider)
+                                   vector_store=vector_store, graph_store=graph_store)
         else:
-            builder = GraphBuilder(f"{subject}_v1", paradigm=paradigm,
-                                   llm_provider=llm_provider)
+            builder = GraphBuilder(f"{subject}_v1", paradigm=paradigm)
         result = builder.build_all(force_rebuild=force_rebuild)
 
         # Phase 2: 如果传入了 paradigm（非默认 theory 或明确请求），自动执行语义层
@@ -2836,8 +2682,7 @@ def get_subgraph(
 def get_image(
     subject: str,
     filename: str,
-    x_user_id: Optional[str] = Header(None, alias="X-User-ID"),
-    authorization: Optional[str] = Header(None),
+    x_user_id: Optional[str] = Header(None, alias="X-User-ID")
 ):
     """
     提供学科知识库中的图片文件访问。
@@ -2846,7 +2691,7 @@ def get_image(
     路径: /api/images/<subject>/<filename>
     """
     from config.settings import get_subject_images_dir, get_subject_thumbnails_dir
-    effective_user_id = get_current_user_id(x_user_id, authorization)
+    effective_user_id = x_user_id or "default"
     
     # 安全检查：防止目录遍历
     safe_filename = Path(filename).name
@@ -2885,10 +2730,9 @@ async def extract_chunk_concepts(
     subject: str,
     chunk_id: str,
     body: Dict[str, Any] = None,
-    x_user_id: Optional[str] = Header(None, alias="X-User-ID"),
-    authorization: Optional[str] = Header(None),
+    x_user_id: Optional[str] = Header(None, alias="X-User-ID")
 ):
-    effective_user_id = get_current_user_id(x_user_id, authorization)
+    effective_user_id = x_user_id or "default"
     """
     对指定 chunk 进行语义提取，分析其内部概念结构。
 
@@ -3533,16 +3377,9 @@ def list_dialog_sessions(
     """
     获取用户的活跃对话会话列表。
     LA-050-Phase4-FIX + LA-052-ISOLATION-FIX: 使用统一身份验证，确保 token 优先。
-    LA-051: 当 header 身份验证失败时，回退到 query 参数 user_id（前端显式传递）。
     """
     # LA-052-ISOLATION-FIX: 使用统一身份验证，token 优先
     effective_user_id = get_current_user_id(x_user_id, authorization)
-    
-    # LA-051: 如果 header 验证回退到 default/anonymous，但前端显式传了 user_id，则使用前端传的值
-    # 这确保登录用户（前端知道 user_id）能正确查看自己的会话，而不是看到 default 用户的共享会话
-    if effective_user_id in ("anonymous", "default") and user_id and user_id not in ("anonymous", "default"):
-        effective_user_id = user_id
-        print(f"[LA-051] list_dialog_sessions: header 无有效身份，使用 query user_id={user_id}")
 
     try:
         # LA-050-Phase4-FIX: 使用用户隔离的 DialogContextManager
@@ -3592,11 +3429,7 @@ def create_dialog_session(
     LA-050-Phase4-FIX + LA-052-ISOLATION-FIX: 使用统一身份验证。
     """
     # LA-052-ISOLATION-FIX: 使用统一身份验证，token 优先
-    # LA-051-SESSION: 当 header 身份验证失败时，回退到请求体中的 user_id
     effective_user_id = get_current_user_id(x_user_id, authorization)
-    if effective_user_id in ("anonymous", "default") and request.user_id and request.user_id not in ("anonymous", "default"):
-        effective_user_id = request.user_id
-        print(f"[LA-051-SESSION] create_dialog_session: header 无有效身份，使用 body user_id={request.user_id}")
 
     try:
         # LA-050-Phase4-FIX: 使用用户隔离的 DialogContextManager
@@ -3630,7 +3463,6 @@ def create_dialog_session(
 @app.get("/api/dialog/sessions/{session_id}/messages")
 def get_session_messages(
     session_id: str,
-    user_id: Optional[str] = None,  # LA-051-SESSION: query 参数回退
     x_user_id: Optional[str] = Header(None, alias="X-User-ID"),
     authorization: Optional[str] = Header(None),
 ):
@@ -3639,11 +3471,7 @@ def get_session_messages(
     LA-050-Phase4-FIX + LA-052-ISOLATION-FIX: 使用统一身份验证。
     """
     # LA-052-ISOLATION-FIX: 使用统一身份验证，token 优先
-    # LA-051-SESSION: 当 header 身份验证失败时，回退到 query 参数 user_id
     effective_user_id = get_current_user_id(x_user_id, authorization)
-    if effective_user_id in ("anonymous", "default") and user_id and user_id not in ("anonymous", "default"):
-        effective_user_id = user_id
-        print(f"[LA-051-SESSION] get_session_messages: header 无有效身份，使用 query user_id={user_id}")
 
     try:
         # LA-050-Phase4-FIX: 使用用户隔离的 DialogContextManager
@@ -3707,7 +3535,6 @@ def get_session_messages(
 @app.delete("/api/dialog/sessions/{session_id}")
 def delete_dialog_session(
     session_id: str,
-    user_id: Optional[str] = None,  # LA-051-SESSION: query 参数回退
     x_user_id: Optional[str] = Header(None, alias="X-User-ID"),
     authorization: Optional[str] = Header(None),
 ):
@@ -3716,11 +3543,7 @@ def delete_dialog_session(
     LA-050-Phase4-FIX + LA-052-ISOLATION-FIX: 使用统一身份验证。
     """
     # LA-052-ISOLATION-FIX: 使用统一身份验证，token 优先
-    # LA-051-SESSION: 当 header 身份验证失败时，回退到 query 参数 user_id
     effective_user_id = get_current_user_id(x_user_id, authorization)
-    if effective_user_id in ("anonymous", "default") and user_id and user_id not in ("anonymous", "default"):
-        effective_user_id = user_id
-        print(f"[LA-051-SESSION] delete_dialog_session: header 无有效身份，使用 query user_id={user_id}")
 
     try:
         # LA-050-Phase4-FIX: 使用用户隔离的 DialogContextManager
@@ -3771,7 +3594,7 @@ def delete_dialog_session(
 # ========== LA-035: 媒体文件静态服务 ==========
 
 @app.get("/api/media/{path:path}")
-def serve_media(path: str, x_user_id: Optional[str] = Header(None, alias="X-User-ID"), authorization: Optional[str] = Header(None)):
+def serve_media(path: str, x_user_id: Optional[str] = Header(None, alias="X-User-ID")):
     """
     提供知识库中的图片等媒体文件的静态访问。
     LA-050-Phase5: 支持 X-User-ID Header，优先查找用户私有目录。
@@ -3783,7 +3606,7 @@ def serve_media(path: str, x_user_id: Optional[str] = Header(None, alias="X-User
     import os
     from config.settings import KNOWLEDGE_BASE_DIR
     
-    effective_user_id = get_current_user_id(x_user_id, authorization)
+    effective_user_id = x_user_id or "default"
     
     # 解码 URL 编码
     decoded_path = unquote(path)
@@ -3991,11 +3814,11 @@ def _get_accessible_vector_store(subject_id: str, user_id: str):
         raise HTTPException(status_code=403, detail="无权访问该学科")
     
     # 2. 判断使用哪个用户的数据目录
-    # LA-051-P1-FIX: 只有 owner 使用自己的目录。
-    # Maintainer/Contributor/Reader 都访问 owner 的数据（权限控制是逻辑层面的，数据物理位置统一在 owner 目录）。
-    if user_id == owner_id:
+    if pm.can_write(user_id, subject_id, owner_id):
+        # owner/maintainer: 使用自己的数据目录
         data_user_id = user_id
     else:
+        # reader/contributor: 使用 owner 的数据目录
         data_user_id = owner_id
     
     # 3. 构建路径并返回 VectorStore
@@ -4043,11 +3866,11 @@ def _get_accessible_graph_store(subject_id: str, user_id: str):
         raise HTTPException(status_code=403, detail="无权访问该学科")
     
     # 2. 判断使用哪个用户的数据目录
-    # LA-051-P1-FIX: 只有 owner 使用自己的目录。
-    # Maintainer/Contributor/Reader 都访问 owner 的数据（权限控制是逻辑层面的，数据物理位置统一在 owner 目录）。
-    if user_id == owner_id:
+    if pm.can_write(user_id, subject_id, owner_id):
+        # owner/maintainer: 使用自己的数据目录
         data_user_id = user_id
     else:
+        # reader/contributor: 使用 owner 的数据目录
         data_user_id = owner_id
     
     # 3. 构建路径并返回 GraphStore
@@ -4561,8 +4384,7 @@ def get_wrong_answers(
     sort: str = "last_wrong_desc",
     limit: int = 50,
     offset: int = 0,
-    x_user_id: Optional[str] = Header(None, alias="X-User-ID"),
-    authorization: Optional[str] = Header(None),
+    x_user_id: Optional[str] = Header(None, alias="X-User-ID")
 ):
     """
     LA-040-P2: 获取错题本数据。
@@ -4667,14 +4489,13 @@ def get_wrong_answers(
 def update_wrong_answer(
     wrong_id: str,
     request: UpdateWrongAnswerRequest,
-    x_user_id: Optional[str] = Header(None, alias="X-User-ID"),
-    authorization: Optional[str] = Header(None),
+    x_user_id: Optional[str] = Header(None, alias="X-User-ID")
 ):
     """
     LA-040-P2: 更新错题状态（标记已掌握 / 加入复习）。
     LA-050-Phase4-FIX: 支持 X-User-ID Header，使用隔离路径，按 user_id 过滤。
     """
-    effective_user_id = get_current_user_id(x_user_id, authorization)
+    effective_user_id = x_user_id or "default"
 
     # LA-050-Phase4-FIX: 使用用户隔离的 state_store 路径
     store = _get_isolated_state_store(effective_user_id)

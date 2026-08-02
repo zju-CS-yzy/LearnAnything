@@ -30,6 +30,45 @@
         </div>
       </div>
 
+      <!-- LA-051: 权限信息卡片 -->
+      <div class="perm-section card" v-if="subjectInfo">
+        <div class="perm-header">
+          <div class="perm-title">📋 权限信息</div>
+          <button v-if="canManage" class="btn btn-sm btn-primary" @click="openPermissionModal">
+            管理
+          </button>
+        </div>
+        <div class="perm-grid">
+          <div class="perm-item">
+            <span class="perm-label">您的角色</span>
+            <span :class="['perm-value', `role-${subjectInfo.role || 'reader'}`]">
+              {{ roleLabel(subjectInfo.role) }}
+            </span>
+          </div>
+          <div class="perm-item">
+            <span class="perm-label">可见性</span>
+            <span class="perm-value">
+              <span v-if="subjectInfo.visibility === 'private'">🔒 私有</span>
+              <span v-else-if="subjectInfo.visibility === 'group'">👥 组内</span>
+              <span v-else>🌐 公开</span>
+            </span>
+          </div>
+          <div class="perm-item" v-if="subjectInfo.owner_id">
+            <span class="perm-label">拥有者</span>
+            <span class="perm-value">{{ subjectInfo.owner_id }}</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- 权限管理弹窗 -->
+      <PermissionModal
+        :visible="showPermissionModal"
+        :subject-id="currentSubject"
+        :subject-name="currentSubjectName"
+        :role="subjectInfo?.role || ''"
+        @close="showPermissionModal = false"
+      />
+
       <!-- 知识片段列表 -->
       <div class="chunks-section card">
         <div class="section-header">
@@ -133,6 +172,7 @@
 
 <script setup>
 import { ref, computed, inject, onMounted, watch } from 'vue'
+import PermissionModal from './PermissionModal.vue'
 
 // 全局学科状态
 const subjectState = inject('subjectState')
@@ -141,6 +181,31 @@ const currentSubjectName = computed(() => {
   const sub = subjectState.subjects.value.find(s => s.id === currentSubject.value)
   return sub?.name || currentSubject.value
 })
+
+// LA-051: 当前学科权限信息
+const subjectInfo = computed(() => {
+  const sub = subjectState.subjects.value.find(s => s.id === currentSubject.value)
+  return sub || null
+})
+const showPermissionModal = ref(false)
+const canManage = computed(() => {
+  const role = subjectInfo.value?.role
+  return role === 'owner' || role === 'maintainer'
+})
+
+function openPermissionModal() {
+  showPermissionModal.value = true
+}
+
+function roleLabel(role) {
+  const map = {
+    owner: '拥有者',
+    maintainer: '维护者',
+    contributor: '贡献者',
+    reader: '读者',
+  }
+  return map[role] || role || '读者'
+}
 
 const chunks = ref([])
 const totalChunks = ref(0)
@@ -187,8 +252,20 @@ function showSourceDetail(chunk) {
 async function loadChunks() {
   isLoading.value = true
   try {
+    // LA-051: 必须带上认证 headers
+    const token = localStorage.getItem('la_auth_token') || ''
+    const saved = localStorage.getItem('la_current_user')
+    const user = saved ? JSON.parse(saved) : null
+    const userId = user?.user_id || 'default'
+
     const resp = await fetch(
-      `${window.location.origin}/api/knowledge-base/${currentSubject.value}/chunks?limit=${limit.value}&offset=${offset.value}`
+      `${window.location.origin}/api/knowledge-base/${currentSubject.value}/chunks?limit=${limit.value}&offset=${offset.value}`,
+      {
+        headers: {
+          'X-User-ID': userId,
+          ...(token ? { 'Authorization': `Bearer ${token}` } : {}),
+        },
+      }
     )
     if (resp.ok) {
       const data = await resp.json()
@@ -204,8 +281,20 @@ async function loadChunks() {
 
 async function loadStats() {
   try {
+    // LA-051: 必须带上认证 headers
+    const token = localStorage.getItem('la_auth_token') || ''
+    const saved = localStorage.getItem('la_current_user')
+    const user = saved ? JSON.parse(saved) : null
+    const userId = user?.user_id || 'default'
+
     const resp = await fetch(
-      `${window.location.origin}/api/knowledge-base/${currentSubject.value}/stats`
+      `${window.location.origin}/api/knowledge-base/${currentSubject.value}/stats`,
+      {
+        headers: {
+          'X-User-ID': userId,
+          ...(token ? { 'Authorization': `Bearer ${token}` } : {}),
+        },
+      }
     )
     if (resp.ok) {
       const data = await resp.json()
@@ -524,4 +613,58 @@ onMounted(() => {
 @keyframes spin {
   to { transform: rotate(360deg); }
 }
+
+/* LA-051: 权限信息卡片样式 */
+.perm-section {
+  margin-bottom: 16px;
+  max-width: 900px;
+  margin-left: auto;
+  margin-right: auto;
+}
+
+.perm-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 12px;
+}
+
+.perm-title {
+  font-size: var(--font-size-sm);
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.perm-grid {
+  display: flex;
+  justify-content: center;  /* 居中排列 */
+  gap: 32px;                /* 增大间距 */
+  flex-wrap: wrap;          /* 窄屏幕换行 */
+}
+
+.perm-item {
+  display: flex;
+  flex-direction: column;
+  align-items: center;      /* 子元素居中 */
+  gap: 4px;
+  min-width: 80px;          /* 防止过窄 */
+}
+
+.perm-label {
+  font-size: var(--font-size-xs);
+  color: var(--text-muted);
+  text-align: center;
+}
+
+.perm-value {
+  font-size: var(--font-size-sm);
+  font-weight: 500;
+  color: var(--text-primary);
+  text-align: center;
+}
+
+.role-owner { color: #92400e; }
+.role-maintainer { color: #1e40af; }
+.role-contributor { color: #065f46; }
+.role-reader { color: #4b5563; }
 </style>

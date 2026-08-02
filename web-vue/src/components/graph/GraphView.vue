@@ -172,6 +172,18 @@ import GraphNodeTooltip from './GraphNodeTooltip.vue'
 cytoscape.use(cola)
 cytoscape.use(dagre)
 
+// LA-051-P2-FIX: 认证 headers 辅助函数
+function getAuthHeaders() {
+  const saved = localStorage.getItem('la_current_user')
+  const user = saved ? JSON.parse(saved) : null
+  const userId = user?.user_id || 'default'
+  const token = localStorage.getItem('la_auth_token') || ''
+  return {
+    'X-User-ID': userId,
+    ...(token ? { 'Authorization': `Bearer ${token}` } : {}),
+  }
+}
+
 // ========== 全局学科状态 ==========
 const subjectState = inject('subjectState')
 const currentSubject = computed(() => subjectState.currentSubject.value)
@@ -287,9 +299,27 @@ function initCy() {
     const node = e.target
     const nodeType = node.data('type') || ''
     // 对 chunk 节点（child/parent/markdown/heading/paragraph/document）和概念节点都显示 tooltip
-    // 图片节点用特殊处理
-    if (nodeType === 'image' || nodeType === 'image_pseudo') {
-      // 图片节点 tooltip 保持原有逻辑
+    // 图片节点用特殊处理：将 imageUrl 转换为 media_refs 供 tooltip 显示
+    let mediaRefs = node.data('media_refs') || []
+    if ((nodeType === 'image' || nodeType === 'image_pseudo') && mediaRefs.length === 0) {
+      // 优先使用已转换的 imageUrl（/api/images/... 格式），其次使用原始路径
+      const imgUrl = node.data('imageUrl') || ''
+      const imgPath = node.data('image_path') || node.data('thumbnail_path') || ''
+      if (imgUrl) {
+        mediaRefs = [{
+          type: 'image',
+          path: imgUrl,
+          thumbnail_path: imgUrl,
+          caption: node.data('label') || '图片',
+        }]
+      } else if (imgPath) {
+        mediaRefs = [{
+          type: 'image',
+          path: imgPath,
+          thumbnail_path: node.data('thumbnail_path') || imgPath,
+          caption: node.data('label') || '图片',
+        }]
+      }
     }
 
     if (tooltipTimer) clearTimeout(tooltipTimer)
@@ -309,7 +339,7 @@ function initCy() {
       description: node.data('description') || '',
       text: node.data('text') || '',  // P39-FIX: 传递 text 供 tooltip 显示
       source_chunks: node.data('source_chunks') || [],
-      media_refs: node.data('media_refs') || [],
+      media_refs: mediaRefs,
     }
     console.log('[GraphView] tooltipNode set, text length=', (tooltipNode.value.text || '').length, 'type=', nodeType)
     tooltipVisible.value = true
@@ -451,8 +481,10 @@ function getChunkImageUrl(imagePath) {
 async function loadChunkNodes() {
   try {
     // P30-FIX: limit 从 500 增大到 5000，避免大文档 chunk 节点被截断
+    // LA-051-P2-FIX: 添加认证 headers
     const resp = await fetch(
-      `${window.location.origin}/api/knowledge-graph/${currentSubject.value}/nodes?limit=5000`
+      `${window.location.origin}/api/knowledge-graph/${currentSubject.value}/nodes?limit=5000`,
+      { headers: getAuthHeaders() }
     )
     if (!resp.ok) {
       console.warn('[GraphView] Nodes API failed:', resp.status)
@@ -462,11 +494,17 @@ async function loadChunkNodes() {
     const chunkNodes = (data.nodes || []).map(n => {
       const label = generateNodeLabel(n.text, n.heading_path, n.id)
       const chunkType = n.chunk_type || 'child'
-      const { cardLabel, cardHeight, nodeWidth } = buildChunkCard(label, chunkType, n.text)
+      let { cardLabel, cardHeight, nodeWidth } = buildChunkCard(label, chunkType, n.text)
       // P41-FIX: 为图片 chunk 计算预览 URL
       const imageUrl = (chunkType === 'image' || chunkType === 'image_pseudo')
         ? getChunkImageUrl(n.image_path || n.thumbnail_path)
         : ''
+      // LA-035-P43: 图片节点高度根据实际比例自适应
+      if ((chunkType === 'image' || chunkType === 'image_pseudo') && n.width && n.height) {
+        const aspectRatio = n.height / n.width
+        const imgHeight = Math.round(nodeWidth * aspectRatio)
+        cardHeight = Math.max(60, Math.min(300, imgHeight))  // 最小 60px，最大 300px
+      }
       // Cytoscape background-image 需要 'none' 而非空字符串作为无效值
       const bgImage = imageUrl || 'none'
       return {
@@ -505,7 +543,8 @@ async function loadEdges() {
     // P30-FIX: limit 从 200 增大到 5000，避免 BELONGS_TO 边被截断
     const url = `${window.location.origin}/api/knowledge-graph/${currentSubject.value}/edges?limit=5000`
     console.log('[GraphView] loadEdges URL:', url)
-    const resp = await fetch(url)
+    // LA-051-P2-FIX: 添加认证 headers
+    const resp = await fetch(url, { headers: getAuthHeaders() })
     if (!resp.ok) {
       console.warn('[GraphView] Edges API failed:', resp.status)
       return
@@ -552,7 +591,8 @@ async function loadEdges() {
 async function loadConceptNodes() {
   try {
     const url = `${window.location.origin}/api/knowledge-graph/${currentSubject.value}/concepts?limit=2000`
-    const resp = await fetch(url)
+    // LA-051-P2-FIX: 添加认证 headers
+    const resp = await fetch(url, { headers: getAuthHeaders() })
     if (!resp.ok) {
       console.warn('[GraphView] 概念节点 API 失败:', resp.status)
       return
@@ -718,7 +758,8 @@ async function loadConceptNodes() {
 async function loadSemanticEdges() {
   try {
     const url = `${window.location.origin}/api/knowledge-graph/${currentSubject.value}/concept-links?limit=2000`
-    const resp = await fetch(url)
+    // LA-051-P2-FIX: 添加认证 headers
+    const resp = await fetch(url, { headers: getAuthHeaders() })
     if (!resp.ok) {
       console.warn('[GraphView] 语义连接 API 失败:', resp.status)
       return
@@ -744,8 +785,10 @@ async function loadSemanticEdges() {
 
 async function expandNode(nodeId) {
   try {
+    // LA-051-P2-FIX: 添加认证 headers
     const resp = await fetch(
-      `${window.location.origin}/api/knowledge-graph/${currentSubject.value}/subgraph/${nodeId}?depth=1`
+      `${window.location.origin}/api/knowledge-graph/${currentSubject.value}/subgraph/${nodeId}?depth=1`,
+      { headers: getAuthHeaders() }
     )
     if (!resp.ok) return
     const data = await resp.json()
@@ -941,8 +984,10 @@ async function loadConcepts(chunkId) {
   selectedNodeConcepts.value = []
   conceptsLoading.value = true
   try {
+    // LA-051-P2-FIX: 添加认证 headers
     const resp = await fetch(
-      `${window.location.origin}/api/knowledge-graph/${currentSubject.value}/chunk/${chunkId}/concepts`
+      `${window.location.origin}/api/knowledge-graph/${currentSubject.value}/chunk/${chunkId}/concepts`,
+      { headers: getAuthHeaders() }
     )
     if (resp.ok) {
       const data = await resp.json()
@@ -958,8 +1003,10 @@ async function loadConcepts(chunkId) {
 async function loadConceptNodeLinks(nodeId) {
   conceptNodeLinks.value = []
   try {
+    // LA-051-P2-FIX: 添加认证 headers
     const resp = await fetch(
-      `${window.location.origin}/api/knowledge-graph/${currentSubject.value}/subgraph/${nodeId}?depth=1`
+      `${window.location.origin}/api/knowledge-graph/${currentSubject.value}/subgraph/${nodeId}?depth=1`,
+      { headers: getAuthHeaders() }
     )
     if (!resp.ok) return
     const data = await resp.json()
@@ -984,11 +1031,15 @@ async function extractConcepts() {
   const chunkId = selectedNode.value.id
   isExtracting.value = true
   try {
+    // LA-051-P2-FIX: 添加认证 headers
     const resp = await fetch(
       `${window.location.origin}/api/knowledge-graph/${currentSubject.value}/extract/${chunkId}`,
       {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          ...getAuthHeaders(),
+        },
         body: JSON.stringify({ paradigm: selectedParadigm.value }),
       }
     )
@@ -1016,15 +1067,20 @@ async function confirmBuild(options) {
   buildProgress.value = '正在构建结构层...'
 
   try {
+    // LA-051-P2-FIX: 添加认证 headers
     const resp = await fetch(
       `${window.location.origin}/api/knowledge-graph/${currentSubject.value}/build`,
       {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          ...getAuthHeaders(),
+        },
         body: JSON.stringify({
           paradigm: options.paradigm,
           force_rebuild: options.forceRebuild,
           with_semantic: options.withSemantic,
+          llm_provider: options.llmProvider === 'auto' ? null : options.llmProvider,
         }),
       }
     )

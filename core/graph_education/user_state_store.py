@@ -19,17 +19,20 @@ from pathlib import Path
 from core.graph_education.types import UserKnowledgeState
 
 
+from config.settings import KNOWLEDGE_BASE_DIR
+
+
 class UserStateStore:
     """用户知识状态持久化存储"""
 
-    DB_PATH = Path(r"D:\MyCS\AI\Project\LearnAnything\knowledge_base\user_states.db")
+    DB_PATH = KNOWLEDGE_BASE_DIR / "user_states.db"
 
     def __init__(self, db_path: Optional[str] = None):
         self.db_path = Path(db_path) if db_path else self.DB_PATH
         self._init_db()
 
     def _init_db(self):
-        """初始化数据库和表（含 LA-044-#3 新增 user_subject_profiles 表）"""
+        """初始化数据库和表（含 LA-044-#3 新增 user_subject_profiles 表，LA-050-Phase4 新增 evaluation_history / wrong_answers 表）"""
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(str(self.db_path))
         try:
@@ -71,6 +74,46 @@ class UserStateStore:
                     UNIQUE(user_id, subject_id)
                 )
             """)
+            # LA-050-Phase4 新增：评测历史表（从 DialogContextManager 迁移，支持用户隔离）
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS evaluation_history (
+                    history_id TEXT PRIMARY KEY,
+                    user_id TEXT NOT NULL,
+                    subject_id TEXT NOT NULL,
+                    eval_session_id TEXT,
+                    topic TEXT,
+                    theta REAL,
+                    total_score INTEGER DEFAULT 0,
+                    max_score INTEGER DEFAULT 0,
+                    correct_count INTEGER DEFAULT 0,
+                    total_questions INTEGER DEFAULT 0,
+                    accuracy REAL DEFAULT 0.0,
+                    weak_areas TEXT,
+                    strong_areas TEXT,
+                    evaluated_at TEXT
+                )
+            """)
+            # LA-050-Phase4 新增：错题本表（从 DialogContextManager 迁移，支持用户隔离）
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS wrong_answers (
+                    wrong_id TEXT PRIMARY KEY,
+                    user_id TEXT NOT NULL,
+                    subject_id TEXT NOT NULL,
+                    question_id TEXT,
+                    question_text TEXT,
+                    question_type TEXT,
+                    user_answer TEXT,
+                    correct_answer TEXT,
+                    explanation TEXT,
+                    concept_name TEXT,
+                    bloom_level TEXT,
+                    wrong_count INTEGER DEFAULT 1,
+                    is_mastered INTEGER DEFAULT 0,
+                    is_in_review INTEGER DEFAULT 0,
+                    first_wrong_at TEXT,
+                    last_wrong_at TEXT
+                )
+            """)
             # 索引加速查询
             cursor.execute("""
                 CREATE INDEX IF NOT EXISTS idx_user_subject 
@@ -83,6 +126,14 @@ class UserStateStore:
             cursor.execute("""
                 CREATE INDEX IF NOT EXISTS idx_user_subject_profile 
                 ON user_subject_profiles(user_id, subject_id)
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_eval_user_subject 
+                ON evaluation_history(user_id, subject_id)
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_wrong_user_subject 
+                ON wrong_answers(user_id, subject_id)
             """)
             conn.commit()
             print(f"[UserStateStore] 数据库初始化完成: {self.db_path}")

@@ -107,7 +107,7 @@ foreach ($dir in $CoreDirs) {
     }
 
     # 执行 robocopy
-    $proc = Start-Process -FilePath "robocopy" -ArgumentList $robocopyArgs -Wait -PassThru -WindowStyle Hidden -NoNewWindow
+    $proc = Start-Process -FilePath "robocopy" -ArgumentList $robocopyArgs -Wait -PassThru -WindowStyle Hidden
 
     # robocopy 退出码: 0-7 表示成功（0=无变化, 1-7=有文件被复制/跳过等）
     if ($proc.ExitCode -le 7) {

@@ -229,6 +229,7 @@ class CoachAgent(BaseAgent):
                 "is_correct": result["is_correct"],
                 "feedback": result["feedback"],
                 "explanation": q.get("explanation", ""),
+                "bloom_level": q.get("bloom_level"),  # LA-040-P3: 传递 Bloom 层次
             }
             details.append(detail)
             total_score += result["score"]
@@ -323,7 +324,7 @@ class CoachAgent(BaseAgent):
             }
             
             # P0-INT-4: 保存用户知识状态到 SQLite
-            self._save_user_states("anonymous", self.subject, details, theta)
+            self._save_user_states("default", self.subject, details, theta)
             
             # P0-INT-6: 发布 ability_updated 事件（通知 QuizAgent 调整难度）
             if self._message_bus:

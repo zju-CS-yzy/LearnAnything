@@ -1,11 +1,24 @@
 /**
  * ParadigmConfig.js — 范式配置管理
  * LA-052: 从后端 API 获取范式配置，消除前端对关系类型的硬编码
+ * LA-051-P2-FIX: 添加认证 headers
  */
 
 let cachedConfig = null
 let currentSubject = null
 let loadPromise = null
+
+// LA-051-P2-FIX: 获取认证 headers
+function getAuthHeaders() {
+  const saved = localStorage.getItem('la_current_user')
+  const user = saved ? JSON.parse(saved) : null
+  const userId = user?.user_id || 'default'
+  const token = localStorage.getItem('la_auth_token') || ''
+  return {
+    'X-User-ID': userId,
+    ...(token ? { 'Authorization': `Bearer ${token}` } : {}),
+  }
+}
 
 /**
  * 加载当前学科的范式配置
@@ -16,13 +29,16 @@ export async function loadParadigmConfig(subject) {
   if (cachedConfig && currentSubject === subject) {
     return cachedConfig
   }
-  
+
   // 防止重复并发请求
   if (loadPromise && currentSubject === subject) {
     return loadPromise
   }
-  
-  loadPromise = fetch(`${window.location.origin}/api/knowledge-graph/${subject}/paradigm`)
+
+  // LA-051-P2-FIX: 添加认证 headers
+  loadPromise = fetch(`${window.location.origin}/api/knowledge-graph/${subject}/paradigm`, {
+    headers: getAuthHeaders(),
+  })
     .then(async (resp) => {
       if (!resp.ok) {
         console.warn('[ParadigmConfig] 加载失败，使用 fallback:', resp.status)
@@ -42,7 +58,7 @@ export async function loadParadigmConfig(subject) {
     .finally(() => {
       loadPromise = null
     })
-  
+
   return loadPromise
 }
 

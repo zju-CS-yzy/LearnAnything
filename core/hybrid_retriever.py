@@ -50,7 +50,7 @@ class HybridRetriever:
         results = retriever.query("化学键", n_results=5)
     """
 
-    def __init__(self, collection_name: str, top_k_bm25: int = 100, top_k_vector: int = 100, use_cache: bool = True):
+    def __init__(self, collection_name: str, top_k_bm25: int = 100, top_k_vector: int = 100, use_cache: bool = True, vector_store=None):
         self.collection_name = collection_name
         self.top_k_bm25 = top_k_bm25
         self.top_k_vector = top_k_vector
@@ -60,7 +60,8 @@ class HybridRetriever:
         self.doc_texts = []
         self.doc_metadatas = []
         self._loaded = False
-        self._vector_store = VectorStore(collection_name)
+        # LA-051: 支持外部传入 vector_store（用于权限感知的跨用户数据访问）
+        self._vector_store = vector_store or VectorStore(collection_name)
         self._embedding = EmbeddingManager()
 
     def _build_bm25_index(self):

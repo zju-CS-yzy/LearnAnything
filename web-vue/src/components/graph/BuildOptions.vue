@@ -34,6 +34,32 @@
           </div>
         </div>
 
+        <!-- 模型提供商 -->
+        <div class="option-section">
+          <div class="option-label">
+            <span class="option-icon">🤖</span>
+            <span>模型提供商</span>
+          </div>
+          <p class="option-desc">选择用于语义提取的 LLM 模型（不同模型的响应速度和稳定性不同）</p>
+          <div class="provider-cards">
+            <div
+              v-for="p in providers"
+              :key="p.id"
+              class="provider-card"
+              :class="{ active: options.llmProvider === p.id }"
+              @click="options.llmProvider = p.id"
+            >
+              <div class="provider-radio">
+                <div class="radio-dot" :class="{ checked: options.llmProvider === p.id }"></div>
+              </div>
+              <div class="provider-info">
+                <div class="provider-name">{{ p.name }}</div>
+                <div class="provider-desc">{{ p.description }}</div>
+              </div>
+            </div>
+          </div>
+        </div>
+
         <!-- 分解粒度 -->
         <div class="option-section">
           <div class="option-label">
@@ -131,7 +157,15 @@ const options = reactive({
   withSemantic: true,
   withDedupe: true,
   forceRebuild: false,
+  llmProvider: 'auto',
 })
+
+// LA-ROBUST: 支持的模型提供商列表
+const providers = [
+  { id: 'auto', name: '自动（跟随全局配置）', description: '使用当前配置文件中设定的默认 LLM' },
+  { id: 'deepseek', name: 'DeepSeek', description: '高性价比中文模型，适合大多数场景' },
+  { id: 'kimi', name: 'Kimi (月之暗面)', description: '256K 超长上下文，稳定性较好，适合长文本提取' },
+]
 </script>
 
 <style scoped>
@@ -287,6 +321,57 @@ const options = reactive({
   height: 6px;
   background: #fff;
   border-radius: 50%;
+}
+
+.paradigm-info { flex: 1; }
+
+/* 模型提供商卡片 */
+.provider-cards {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.provider-card {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 12px 14px;
+  background: var(--bg-card, #fff);
+  border: 2px solid var(--border-color, #e0e0e0);
+  border-radius: 8px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.provider-card:hover {
+  border-color: var(--accent-primary, #3498db);
+  box-shadow: 0 2px 8px rgba(52, 152, 219, 0.1);
+}
+
+.provider-card.active {
+  border-color: var(--accent-primary, #3498db);
+  background: #f0f7ff;
+}
+
+.provider-radio {
+  padding-top: 2px;
+  flex-shrink: 0;
+}
+
+.provider-info { flex: 1; }
+
+.provider-name {
+  font-weight: 600;
+  font-size: var(--font-size-sm);
+  color: var(--text-primary, #2c3e50);
+  margin-bottom: 2px;
+}
+
+.provider-desc {
+  font-size: var(--font-size-xs);
+  color: var(--text-muted, #7f8c8d);
+  line-height: 1.4;
 }
 
 .paradigm-info { flex: 1; }

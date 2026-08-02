@@ -24,11 +24,15 @@ from core.embedding import EmbeddingManager
 class VectorStore:
     """向量数据库封装（SQLite + numpy 实现）。"""
 
-    def __init__(self, collection_name: str, embedding_dim: int = DEFAULT_EMBEDDING_DIM):
+    def __init__(self, collection_name: str, embedding_dim: int = DEFAULT_EMBEDDING_DIM, db_path: Optional[str] = None):
         self.collection_name = collection_name
         self.embedding_dim = embedding_dim
         self._embedding = EmbeddingManager()
-        self._db_path = VECTOR_DB_DIR / f"{collection_name}.db"
+        # LA-050-Phase3: 支持自定义 db_path（用户隔离）
+        if db_path:
+            self._db_path = Path(db_path)
+        else:
+            self._db_path = VECTOR_DB_DIR / f"{collection_name}.db"
         self._conn = sqlite3.connect(str(self._db_path))
         self._ensure_table()
 

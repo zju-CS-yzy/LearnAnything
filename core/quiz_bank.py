@@ -44,6 +44,7 @@ def _ensure_table(conn: sqlite3.Connection):
             answer TEXT,
             explanation TEXT,
             difficulty INTEGER DEFAULT 2,
+            bloom_level TEXT,
             source TEXT,
             source_entry_id TEXT,
             tags TEXT,
@@ -57,6 +58,15 @@ def _ensure_table(conn: sqlite3.Connection):
     conn.execute('CREATE INDEX IF NOT EXISTS idx_qb_topic ON question_bank(topic)')
     conn.execute('CREATE INDEX IF NOT EXISTS idx_qb_source_entry ON question_bank(source_entry_id)')
     conn.execute('CREATE INDEX IF NOT EXISTS idx_qb_approved ON question_bank(is_approved)')
+    
+    # LA-040-P2: 兼容旧表 — 如果表已存在但没有 bloom_level 列，则添加
+    cursor = conn.execute("PRAGMA table_info(question_bank)")
+    columns = [row[1] for row in cursor.fetchall()]
+    if 'bloom_level' not in columns:
+        conn.execute('ALTER TABLE question_bank ADD COLUMN bloom_level TEXT')
+        print("[QuizBank] 已升级表结构: 添加 bloom_level 列")
+    
+    conn.execute('CREATE INDEX IF NOT EXISTS idx_qb_bloom ON question_bank(bloom_level)')
     conn.commit()
     # 迁移：从旧数据库复制数据（如果旧数据库存在且新数据库为空）
     _migrate_legacy_data(conn)
@@ -103,6 +113,7 @@ def save_question(
     topic: str = None,
     is_approved: bool = False,
     source_entry_id: str = None,
+    bloom_level: str = None,
 ) -> str:
     """保存一道题目到题库"""
     conn = _get_conn()
@@ -123,8 +134,8 @@ def save_question(
             """
             INSERT OR REPLACE INTO question_bank
             (id, subject, topic, type, question, options, answer, explanation,
-             difficulty, source, source_entry_id, tags, is_approved, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             difficulty, bloom_level, source, source_entry_id, tags, is_approved, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 qid,
@@ -136,6 +147,7 @@ def save_question(
                 question.get("answer", ""),
                 question.get("explanation", ""),
                 question.get("difficulty", 2),
+                bloom_level or question.get("bloom_level", ""),
                 question.get("source", ""),
                 source_entry_id or "",
                 tags,
@@ -145,6 +157,107 @@ def save_question(
         )
         conn.commit()
         return qid
+    finally:
+        conn.close()
+
+
+def update_bloom_level(qid: str, bloom_level: str) -> bool:
+    """更新题目的 Bloom 认知层次"""
+    valid_levels = {"remember", "understand", "apply", "analyze", "evaluate", "create"}
+    if bloom_level not in valid_levels:
+        return False
+
+    conn = _get_conn()
+    try:
+        cur = conn.execute(
+            "UPDATE question_bank SET bloom_level = ? WHERE id = ?",
+            (bloom_level, qid),
+        )
+        conn.commit()
+        return cur.rowcount > 0
+    finally:
+        conn.close()
+
+
+def batch_update_bloom(subject: str = None, questions: List[Dict] = None) -> Dict[str, Any]:
+    """批量更新题目的 Bloom 认知层次
+
+    Args:
+        subject: 学科筛选（可选）
+        questions: [{'id': 'qb-xxx', 'bloom_level': 'analyze'}, ...]
+
+    Returns:
+        {'updated': N, 'skipped': M}
+    """
+    if not questions:
+        return {"updated": 0, "skipped": 0}
+
+    conn = _get_conn()
+    valid_levels = {"remember", "understand", "apply", "analyze", "evaluate", "create"}
+    updated = 0
+    skipped = 0
+
+    try:
+        for q in questions:
+            qid = q.get("id")
+            level = q.get("bloom_level", "").lower()
+            if not qid or level not in valid_levels:
+                skipped += 1
+                continue
+
+            cur = conn.execute(
+                "UPDATE question_bank SET bloom_level = ? WHERE id = ?",
+                (level, qid),
+            )
+            if cur.rowcount > 0:
+                updated += 1
+            else:
+                skipped += 1
+
+        conn.commit()
+        return {"updated": updated, "skipped": skipped}
+    finally:
+        conn.close()
+
+
+def get_bloom_stats(subject: str = None) -> Dict[str, Any]:
+    """获取题库的 Bloom 认知层次统计"""
+    conn = _get_conn()
+    try:
+        conditions = ["1=1"]
+        params = []
+        if subject:
+            conditions.append("subject = ?")
+            params.append(subject)
+
+        where = " AND ".join(conditions)
+
+        # 各层次题目数量
+        rows = conn.execute(
+            f"SELECT bloom_level, COUNT(*) FROM question_bank WHERE {where} GROUP BY bloom_level",
+            params,
+        ).fetchall()
+
+        stats = {r[0] or "unlabeled": r[1] for r in rows}
+
+        # 已标注 / 未标注
+        labeled = conn.execute(
+            f"SELECT COUNT(*) FROM question_bank WHERE {where} AND bloom_level IS NOT NULL AND bloom_level != ''",
+            params,
+        ).fetchone()[0]
+
+        total = conn.execute(
+            f"SELECT COUNT(*) FROM question_bank WHERE {where}",
+            params,
+        ).fetchone()[0]
+
+        return {
+            "total": total,
+            "labeled": labeled,
+            "unlabeled": total - labeled,
+            "by_level": stats,
+            "coverage": round(labeled / max(total, 1) * 100, 1),
+        }
     finally:
         conn.close()
 

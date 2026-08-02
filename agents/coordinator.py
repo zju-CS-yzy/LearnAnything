@@ -36,7 +36,7 @@ class Coordinator:
         result = coordinator.handle("给我出几道化学题")
     """
 
-    def __init__(self, collection_name: str = "learnanything_v1", top_k: int = 5, enabled_intents: List[str] = None, graph_store=None, user_theta: Optional[float] = None):
+    def __init__(self, collection_name: str = "learnanything_v1", top_k: int = 5, enabled_intents: List[str] = None, graph_store=None, vector_store=None, user_theta: Optional[float] = None):
         self.collection_name = collection_name
         self.top_k = top_k
         self.enabled_intents = enabled_intents or ["concept", "quiz", "job", "evaluate"]
@@ -59,7 +59,9 @@ class Coordinator:
 
         # P0-INT-1: lazy initialization of P0 modules (avoid immediate database connection)
         # P0-QUIZ-fix: support external shared GraphStore instance to avoid KuzuDB repeated connections / file locking
+        # LA-051: support external vector_store for permission-aware data access
         self._graph_store = graph_store
+        self._vector_store = vector_store
         self._retriever = None
         self._builder = None
         self._assembler = None
@@ -93,7 +95,7 @@ class Coordinator:
         # 阶段 1 增强: 会话管理（含跨学科切换检测）
         if self._dialog_manager is None:
             self._dialog_manager = DialogContextManager()
-        actual_user_id = user_id or "anonymous"
+        actual_user_id = user_id or "default"
         
         # LA-044-B: 详细的函数链打印
         print(f"\n{'='*60}")
@@ -187,8 +189,9 @@ class Coordinator:
                 # 重新加载 dialog_context 以使用新话题
                 dialog_context = self._dialog_manager.build_context(sid)
 
-        # P0-INT-1: 对 quiz / concept 意图使用图谱教育模块组装上下文
-        if resolved_intent in ("quiz", "concept"):
+        # P0-INT-1: 对 quiz / concept / evaluate 意图使用图谱教育模块组装上下文
+        # LA-040-P2-QUIZ-FIX: evaluate 意图也需要图谱上下文，否则 CoachAgent 出题时回退到旧方式
+        if resolved_intent in ("quiz", "concept", "evaluate"):
             try:
                 print(f"[Coordinator] P0-INT-1: 使用图谱教育模块为 {resolved_intent} 意图组装上下文")
                 graph_store = self._get_graph_store()
@@ -213,15 +216,23 @@ class Coordinator:
                     # 阶段 1: 传递 context 给 Agent
                     agent_result = agent.handle(resolved_query, context=dialog_context, filters=filters, graph_context=graph_context, user_theta=user_theta)
                 else:
-                    print(f"[Coordinator] 无匹配概念，回退到旧方式")
-                    agent_result = agent.handle(resolved_query, context=dialog_context, filters=filters, user_theta=user_theta)
+                    # LA-040-P2-QUIZ-FIX: seed_concepts 为空时，不直接回退到旧方式
+                    # 而是尝试用 HybridRetriever 检索相关文本，构建简化版 GraphContext
+                    print(f"[Coordinator] LA-040-P2-QUIZ-FIX: 无匹配概念，尝试文本检索兜底")
+                    graph_context = self._build_fallback_context(graph_store, topic, budget=ContextBudget(max_tokens=2000, max_nodes=15))
+                    if graph_context and graph_context.text:
+                        print(f"[Coordinator] LA-040-P2-QUIZ-FIX: 文本检索兜底成功，{graph_context.token_count} tokens")
+                        agent_result = agent.handle(resolved_query, context=dialog_context, filters=filters, graph_context=graph_context, user_theta=user_theta)
+                    else:
+                        print(f"[Coordinator] 文本检索兜底也失败，回退到旧方式")
+                        agent_result = agent.handle(resolved_query, context=dialog_context, filters=filters, user_theta=user_theta)
             except Exception as e:
                 print(f"[Coordinator] P0 模块调用失败，回退到旧模式: {e}")
                 import traceback
                 traceback.print_exc()
                 agent_result = agent.handle(resolved_query, context=dialog_context, filters=filters, user_theta=user_theta)
         else:
-            # 非 quiz/concept 意图，原方式执行（但传递 context）
+            # 非 quiz/concept/evaluate 意图，原方式执行（但传递 context）
             agent_result = agent.handle(resolved_query, context=dialog_context, filters=filters, user_theta=user_theta)
 
         total_duration_ms = (time.time() - start_time) * 1000
@@ -318,6 +329,11 @@ class Coordinator:
             except Exception as e:
                 print(f"[Coordinator] IRT 能力估计失败: {e}")
 
+                # LA-050-C: Agent 标准化输出包装
+        from agents.message_formats import wrap_agent_output
+        standardized_result = wrap_agent_output(agent.agent_name, agent_result, query)
+        print(f"[Coordinator] LA-050-C: Agent 输出已标准化 | agent={agent.agent_name} | content_type={standardized_result['content_type']}")
+
         # LA-044-B: 详细的函数链退出打印
         result_text = agent_result.get("text", "")[:100] if agent_result else ""
         print(f"\n{'='*60}")
@@ -338,6 +354,7 @@ class Coordinator:
             "intent": intent_info,
             "agent": agent.agent_name,
             "result": agent_result,
+            "standardized": standardized_result,  # LA-050-C: 新增标准化输出
             "monitoring": {
                 "query_id": query_id,
                 "total_duration_ms": round(total_duration_ms, 2),
@@ -358,8 +375,13 @@ class Coordinator:
         """延迟初始化 ConceptRetriever，传入 HybridRetriever 作为 vector_store"""
         if self._retriever is None:
             print(f"[Coordinator] 延迟初始化 ConceptRetriever")
-            # P0-QUIZ-FIX: 传入 HybridRetriever 使 embedding 语义检索可用
-            vector_store = HybridRetriever(graph_store.collection_name)
+            # LA-051: 使用外部传入的 vector_store（权限感知）或创建默认的
+            if self._vector_store is not None:
+                vector_store = self._vector_store
+                print(f"[Coordinator] 使用外部传入的 vector_store")
+            else:
+                vector_store = HybridRetriever(graph_store.collection_name)
+                print(f"[Coordinator] 使用默认 vector_store")
             self._retriever = ConceptRetriever(
                 graph_store=graph_store,
                 vector_store=vector_store,
@@ -386,6 +408,85 @@ class Coordinator:
             print(f"[Coordinator] 延迟初始化 IRTEstimator")
             self._irt = IRTEstimator(calibration_stage=1)
         return self._irt
+
+    # LA-040-P2-QUIZ-FIX: 当 ConceptRetriever 无法解析概念时，用 HybridRetriever 做文本检索兜底
+    def _build_fallback_context(self, graph_store: GraphStore, topic: str, budget: ContextBudget):
+        """
+        文本检索兜底：当图谱中没有匹配的概念节点时，
+        使用 HybridRetriever 检索与主题相关的文本片段，组装为简化版 GraphContext。
+        """
+        from core.graph_education.types import GraphContext, Subgraph, ConceptNode
+        from core.graph_education.context_assembler import ContextAssembler
+
+        try:
+            print(f"[Coordinator] _build_fallback_context: 使用 HybridRetriever 检索主题 '{topic}'")
+            # LA-051: 使用外部传入的 vector_store（权限感知）或创建默认的
+            if self._vector_store is not None:
+                vector_store = self._vector_store
+                print(f"[Coordinator] _build_fallback_context: 使用外部传入的 vector_store")
+            else:
+                vector_store = HybridRetriever(graph_store.collection_name)
+            results = vector_store.query(topic, n_results=budget.max_nodes)
+
+            if not results:
+                print(f"[Coordinator] _build_fallback_context: 无检索结果")
+                return None
+
+            # 将检索结果组装为文本上下文
+            sections = []
+            concept_nodes = []
+            for i, doc in enumerate(results):
+                text = doc.get("text", "")
+                metadata = doc.get("metadata", {})
+                if not text.strip():
+                    continue
+                source = metadata.get("source", "")
+                heading = metadata.get("heading_path", "")
+                # 构建引用标注
+                ref_parts = []
+                if source:
+                    ref_parts.append(source)
+                if heading:
+                    ref_parts.append(heading)
+                ref = f"[{' | '.join(ref_parts)}]" if ref_parts else f"[片段{i+1}]"
+                sections.append(f"{ref}\n{text.strip()}")
+
+                # 同时创建一个简化 ConceptNode（用于 subgraph，让 QuizAgent 能提取 concept_names）
+                # 从文本前 20 个字符作为临时概念名
+                pseudo_name = text.strip()[:20] + "..." if len(text.strip()) > 20 else text.strip()
+                concept_nodes.append(ConceptNode(
+                    canonical_id=f"fallback_{i}",
+                    name=pseudo_name,
+                    concept_type="fallback",
+                    description=text.strip()[:200],
+                ))
+
+            full_text = "\n\n---\n\n".join(sections)
+            # 包装为 GraphContext 格式（与正常 P0 上下文一致）
+            assembled_text = f"## 相关知识片段\n\n{full_text}"
+
+            # 构建简化 Subgraph
+            subgraph = Subgraph(
+                nodes=concept_nodes,
+                edges=[],
+                seed_concepts=[],
+                build_mode="fallback"
+            )
+
+            token_count = len(assembled_text) * 1  # 粗略估算
+
+            print(f"[Coordinator] _build_fallback_context: 组装完成，{len(sections)} 个片段，约 {token_count} tokens")
+            return GraphContext(
+                text=assembled_text,
+                token_count=token_count,
+                subgraph=subgraph,
+                sections={"sources": full_text}
+            )
+        except Exception as e:
+            print(f"[Coordinator] _build_fallback_context 失败: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
 
     def _extract_topic_from_query(self, query: str) -> str:
         """

@@ -45,6 +45,23 @@
           </div>
         </div>
 
+        <!-- LA-035-P42-FIX: 图片节点直接显示图片（media_refs 为空时使用 imageUrl/image_path） -->
+        <div v-if="(!node.media_refs || node.media_refs.length === 0) && (node.imageUrl || node.image_path || node.thumbnail_path)" class="tooltip-section">
+          <div class="tooltip-label">图片</div>
+          <div class="tooltip-media-list single-image">
+            <div class="tooltip-media-item single">
+              <div class="tooltip-media-thumb single">
+                <img
+                  :src="node.imageUrl || getMediaUrl(node.thumbnail_path || node.image_path)"
+                  :alt="node.label || '图片'"
+                  loading="lazy"
+                  @error="onImageError"
+                />
+              </div>
+            </div>
+          </div>
+        </div>
+
         <!-- 关联媒体 -->
         <div v-if="node.media_refs && node.media_refs.length > 0" class="tooltip-section">
           <div class="tooltip-label">
@@ -227,6 +244,10 @@ function renderFormula(ref) {
 function getMediaUrl(path) {
   if (!path) return ''
   if (path.startsWith('http')) return path
+  // LA-035-P42-FIX: 如果路径已经是 /api/ 开头的 API 路径（如 /api/images/rag/xxx.png），直接加上 origin
+  if (path.startsWith('/api/')) {
+    return `${window.location.origin}${path}`
+  }
   // LA-035: Windows 路径反斜杠替换为正斜杠，确保 URL 正确
   const normalizedPath = path.replace(/\\/g, '/')
   // 本地路径：通过后端静态文件服务

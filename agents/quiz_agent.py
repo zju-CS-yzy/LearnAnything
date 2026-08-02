@@ -39,7 +39,8 @@ JSON 格式：
   "question": "题干文本",
   "options": ["A. 选项1", "B. 选项2", "C. 选项3", "D. 选项4"],
   "answer": "A",
-  "explanation": "解析"
+  "explanation": "解析",
+  "bloom_level": "understand"
 }}
 """,
 
@@ -57,7 +58,8 @@ JSON 格式：
   "question": "题干文本",
   "options": ["A. 选项1", "B. 选项2", "C. 选项3", "D. 选项4"],
   "answer": ["A", "C"],
-  "explanation": "解析（逐一说明每个选项）"
+  "explanation": "解析（逐一说明每个选项）",
+  "bloom_level": "understand"
 }}
 """,
 
@@ -73,7 +75,8 @@ JSON 格式：
   "question": "陈述文本",
   "options": ["正确", "错误"],
   "answer": "正确",
-  "explanation": "解析"
+  "explanation": "解析",
+  "bloom_level": "remember"
 }}
 """,
 
@@ -89,7 +92,8 @@ JSON 格式：
   "question": "含有____的题干文本",
   "options": [],
   "answer": "填空答案",
-  "explanation": "解析"
+  "explanation": "解析",
+  "bloom_level": "remember"
 }}
 """,
 
@@ -106,7 +110,8 @@ JSON 格式：
   "question": "简答题干文本",
   "options": [],
   "answer": "参考答案要点",
-  "explanation": "评分要点：1. xxx；2. xxx"
+  "explanation": "评分要点：1. xxx；2. xxx",
+  "bloom_level": "understand"
 }}
 """,
 }
@@ -125,6 +130,22 @@ QUIZ_OUTPUT_FORMAT = """
   ]
 }}
 
+每道题目必须包含以下字段：
+- type: 题型（single_choice / multiple_choice / true_false / fill_blank / short_answer）
+- question: 题干文本
+- options: 选项数组（简答题为空数组）
+- answer: 正确答案
+- explanation: 解析
+- bloom_level: Bloom认知层次（remember/understand/apply/analyze/evaluate/create）
+
+Bloom 认知层次标注规则：
+- remember（记忆）：考察事实性知识的回忆和识别
+- understand（理解）：考察概念的理解、解释和归纳
+- apply（应用）：考察知识的应用和解决问题
+- analyze（分析）：考察分解信息、识别关系和模式
+- evaluate（评估）：考察判断、评价和论证
+- create（创造）：考察综合、设计和创新
+
 注意：
 - 所有内容必须是中文（技术术语可保留英文）
 - 确保 JSON 格式完全正确，可以被 Python json.loads 解析
@@ -142,6 +163,7 @@ QUIZ_GENERATION_PROMPT = """你是一个专业的教育出题专家。请基于�
 4. **答案**: 只有一个正确答案
 5. **解析**: 解释为什么正确答案是正确的，其他选项为什么错误
 6. **来源**: 每道题应基于不同的知识片段，避免重复考察同一知识点
+7. **Bloom认知层次**: 每道题标注其考察的Bloom认知层次（remember/understand/apply/analyze/evaluate/create）
 
 ## 检索到的知识片段
 
@@ -159,7 +181,8 @@ QUIZ_GENERATION_PROMPT = """你是一个专业的教育出题专家。请基于�
       "question": "完整的题干文本",
       "options": ["A. 完整选项1", "B. 完整选项2", "C. 完整选项3", "D. 完整选项4"],
       "answer": "A",
-      "explanation": "解析说明"
+      "explanation": "解析说明",
+      "bloom_level": "understand"
     }}
   ]
 }}
@@ -553,6 +576,7 @@ class QuizAgent(BaseAgent):
             "options": [f"{['A','B','C','D'][j]}. {opt}" for j, opt in enumerate(options_pool + ["其他选项"] * 3)],
             "answer": "A",
             "explanation": sentence[:200],
+            "bloom_level": "understand",
             "source": "graph_context",
         }
 
@@ -565,6 +589,7 @@ class QuizAgent(BaseAgent):
             "options": [],
             "answer": sentence[:200],
             "explanation": "（基于知识片段生成）",
+            "bloom_level": "understand",
             "source": "graph_context",
         }
 
@@ -706,12 +731,26 @@ class QuizAgent(BaseAgent):
             return []
 
     def _validate_and_clean_question(self, q: Dict[str, Any], qid: int) -> Optional[Dict[str, Any]]:
-        """验证 LLM 返回的题目格式，清理无效内容（支持多题型）"""
+        """验证 LLM 返回的题目格式，清理无效内容（支持多题型 + Bloom 标注）"""
         question_text = q.get("question", "").strip()
         qtype = q.get("type", "single_choice")
         options = q.get("options", [])
         answer = q.get("answer", "")
         explanation = q.get("explanation", "").strip()
+        bloom_level = q.get("bloom_level", "").strip().lower()
+
+        # 验证并标准化 bloom_level
+        valid_bloom = {"remember", "understand", "apply", "analyze", "evaluate", "create"}
+        if bloom_level not in valid_bloom:
+            # 根据题型推断默认 Bloom 层次
+            default_bloom = {
+                "single_choice": "understand",
+                "multiple_choice": "understand",
+                "true_false": "remember",
+                "fill_blank": "remember",
+                "short_answer": "understand",
+            }
+            bloom_level = default_bloom.get(qtype, "understand")
 
         # 基本验证：题干必须非空
         if not question_text or len(question_text) < 10:
@@ -719,20 +758,20 @@ class QuizAgent(BaseAgent):
 
         # 按题型分别验证
         if qtype == "single_choice":
-            return self._validate_single_choice(qid, question_text, options, answer, explanation, q)
+            return self._validate_single_choice(qid, question_text, options, answer, explanation, q, bloom_level)
         elif qtype == "multiple_choice":
-            return self._validate_multiple_choice(qid, question_text, options, answer, explanation, q)
+            return self._validate_multiple_choice(qid, question_text, options, answer, explanation, q, bloom_level)
         elif qtype == "true_false":
-            return self._validate_true_false(qid, question_text, options, answer, explanation, q)
+            return self._validate_true_false(qid, question_text, options, answer, explanation, q, bloom_level)
         elif qtype == "fill_blank":
-            return self._validate_fill_blank(qid, question_text, answer, explanation, q)
+            return self._validate_fill_blank(qid, question_text, answer, explanation, q, bloom_level)
         elif qtype == "short_answer":
-            return self._validate_short_answer(qid, question_text, answer, explanation, q)
+            return self._validate_short_answer(qid, question_text, answer, explanation, q, bloom_level)
         else:
             # 未知题型回退为单选题验证
-            return self._validate_single_choice(qid, question_text, options, answer, explanation, q)
+            return self._validate_single_choice(qid, question_text, options, answer, explanation, q, bloom_level)
 
-    def _validate_single_choice(self, qid: int, question_text: str, options: List[str], answer: str, explanation: str, q: Dict) -> Optional[Dict[str, Any]]:
+    def _validate_single_choice(self, qid: int, question_text: str, options: List[str], answer: str, explanation: str, q: Dict, bloom_level: str = "understand") -> Optional[Dict[str, Any]]:
         """验证单选题"""
         if len(options) < 2:
             return None
@@ -765,10 +804,11 @@ class QuizAgent(BaseAgent):
             "options": cleaned_options,
             "answer": answer_str,
             "explanation": explanation or "暂无解析",
+            "bloom_level": bloom_level,
             "source": q.get("source", ""),
         }
 
-    def _validate_multiple_choice(self, qid: int, question_text: str, options: List[str], answer: str, explanation: str, q: Dict) -> Optional[Dict[str, Any]]:
+    def _validate_multiple_choice(self, qid: int, question_text: str, options: List[str], answer: str, explanation: str, q: Dict, bloom_level: str = "understand") -> Optional[Dict[str, Any]]:
         """验证多选题"""
         if len(options) < 4:
             return None
@@ -805,10 +845,11 @@ class QuizAgent(BaseAgent):
             "options": cleaned_options,
             "answer": answer_list,
             "explanation": explanation or "暂无解析",
+            "bloom_level": bloom_level,
             "source": q.get("source", ""),
         }
 
-    def _validate_true_false(self, qid: int, question_text: str, options: List[str], answer: str, explanation: str, q: Dict) -> Optional[Dict[str, Any]]:
+    def _validate_true_false(self, qid: int, question_text: str, options: List[str], answer: str, explanation: str, q: Dict, bloom_level: str = "remember") -> Optional[Dict[str, Any]]:
         """验证判断题"""
         cleaned_options = ["正确", "错误"]
         answer_str = str(answer).strip()
@@ -826,10 +867,11 @@ class QuizAgent(BaseAgent):
             "options": cleaned_options,
             "answer": answer_str,
             "explanation": explanation or "暂无解析",
+            "bloom_level": bloom_level,
             "source": q.get("source", ""),
         }
 
-    def _validate_fill_blank(self, qid: int, question_text: str, answer: str, explanation: str, q: Dict) -> Optional[Dict[str, Any]]:
+    def _validate_fill_blank(self, qid: int, question_text: str, answer: str, explanation: str, q: Dict, bloom_level: str = "remember") -> Optional[Dict[str, Any]]:
         """验证填空题"""
         answer_clean = answer
         if isinstance(answer, list):
@@ -847,10 +889,11 @@ class QuizAgent(BaseAgent):
             "options": [],
             "answer": answer_clean,
             "explanation": explanation or "暂无解析",
+            "bloom_level": bloom_level,
             "source": q.get("source", ""),
         }
 
-    def _validate_short_answer(self, qid: int, question_text: str, answer: str, explanation: str, q: Dict) -> Optional[Dict[str, Any]]:
+    def _validate_short_answer(self, qid: int, question_text: str, answer: str, explanation: str, q: Dict, bloom_level: str = "understand") -> Optional[Dict[str, Any]]:
         """验证简答题"""
         answer_clean = str(answer).strip() if answer else ""
         if not answer_clean:
@@ -863,6 +906,7 @@ class QuizAgent(BaseAgent):
             "options": [],
             "answer": answer_clean,
             "explanation": explanation or "暂无解析",
+            "bloom_level": bloom_level,
             "source": q.get("source", ""),
         }
 
@@ -980,6 +1024,7 @@ class QuizAgent(BaseAgent):
             "options": [f"{['A','B','C','D'][i]}. {opt}" for i, opt in enumerate(options)],
             "answer": ["A","B","C","D"][correct_idx],
             "explanation": key_sentences[0][:200],
+            "bloom_level": "understand",
             "source": source,
         }
 
@@ -995,6 +1040,7 @@ class QuizAgent(BaseAgent):
             "options": [],
             "answer": "（开放性问题）",
             "explanation": "（开放性问题，无标准答案）",
+            "bloom_level": "apply",
             "source": "",
         }
 

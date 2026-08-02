@@ -66,6 +66,9 @@
                 <span class="question-number">{{ i + 1 }}</span>
               </label>
               <span class="question-type tag">{{ q.type }}</span>
+              <span v-if="q.bloom_level" class="bloom-tag" :class="'bloom-' + q.bloom_level">
+                {{ bloomLabel(q.bloom_level) }}
+              </span>
             </div>
             <div class="question-text">{{ q.question }}</div>
             <div v-if="q.options && q.options.length" class="question-options">
@@ -111,6 +114,20 @@ const selectedQuestions = computed(() => {
   if (!quizResult.value) return []
   return quizResult.value.questions.filter(q => selectedIds.value.has(q.id))
 })
+
+// Bloom 认知层次标签映射
+const bloomLabels = {
+  remember: '记忆',
+  understand: '理解',
+  apply: '应用',
+  analyze: '分析',
+  evaluate: '评估',
+  create: '创造',
+}
+
+function bloomLabel(level) {
+  return bloomLabels[level] || level
+}
 
 function toggleSelectAll() {
   if (selectAll.value && quizResult.value) {
@@ -301,6 +318,52 @@ async function saveToBank() {
 
 .question-type {
   font-size: var(--font-size-xs);
+}
+
+/* Bloom 认知层次标签 */
+.bloom-tag {
+  margin-left: auto;
+  font-size: var(--font-size-xs);
+  font-weight: 500;
+  padding: 2px 8px;
+  border-radius: 4px;
+  border: 1px solid transparent;
+}
+
+.bloom-remember {
+  background: #f0f0f0;
+  color: #666;
+  border-color: #ddd;
+}
+
+.bloom-understand {
+  background: #e3f2fd;
+  color: #1976d2;
+  border-color: #bbdefb;
+}
+
+.bloom-apply {
+  background: #e8f5e9;
+  color: #388e3c;
+  border-color: #c8e6c9;
+}
+
+.bloom-analyze {
+  background: #fff3e0;
+  color: #f57c00;
+  border-color: #ffe0b2;
+}
+
+.bloom-evaluate {
+  background: #fce4ec;
+  color: #c2185b;
+  border-color: #f8bbd9;
+}
+
+.bloom-create {
+  background: #f3e5f5;
+  color: #7b1fa2;
+  border-color: #e1bee7;
 }
 
 .question-text {

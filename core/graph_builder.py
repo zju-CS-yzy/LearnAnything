@@ -28,16 +28,23 @@ class GraphBuilder:
     并建立结构层关系（文档层级、页码相邻、parent-child引用）。
     """
 
-    def __init__(self, collection_name: str, paradigm: str = "theory"):
+    def __init__(self, collection_name: str, paradigm: str = "theory",
+                 vector_store=None, graph_store=None, llm_provider: str = None):
         """
         Args:
             collection_name: 学科集合名（如 "ai_llm_v2"）
             paradigm: 分解范式，可选 "theory" / "engineering" / "hierarchical"
+            vector_store: 可选自定义 VectorStore 实例（LA-050-Phase5: 用户隔离）
+            graph_store: 可选自定义 GraphStore 实例（LA-050-Phase5: 用户隔离）
+            llm_provider: 可选，指定语义提取使用的 LLM 提供商
+                          （deepseek / kimi / openai 等），用于多模型切换
         """
         self.collection_name = collection_name
         self.paradigm = paradigm
-        self.vector_store = VectorStore(collection_name)
-        self.graph_store = GraphStore(collection_name)
+        self.llm_provider = llm_provider
+        # LA-050-Phase5: 支持传入自定义 store（用户隔离）
+        self.vector_store = vector_store or VectorStore(collection_name)
+        self.graph_store = graph_store or GraphStore(collection_name)
 
     def build_all(self, force_rebuild: bool = False) -> Dict[str, Any]:
         """
@@ -150,7 +157,7 @@ class GraphBuilder:
         from core.semantic_extractor import SemanticExtractor
         from core.semantic_quality_evaluator import SemanticQualityEvaluator
 
-        extractor = SemanticExtractor(paradigm=self.paradigm)
+        extractor = SemanticExtractor(paradigm=self.paradigm, provider=self.llm_provider)
         evaluator = SemanticQualityEvaluator()
 
         # 获取所有 chunk

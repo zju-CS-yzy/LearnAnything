@@ -38,19 +38,23 @@ from typing import List, Dict, Any, Optional, Tuple, Set
 import numpy as np
 from core.graph_store import GraphStore
 from core.llm_client import LLMClient
-from config.settings import KNOWLEDGE_BASE_DIR
+from config.settings import KNOWLEDGE_BASE_DIR, PROJECT_ROOT
 
 
 def _load_paradigms_from_yaml() -> Dict[str, Any]:
     """加载 paradigms.yaml 中的 relation_map 等配置。"""
     import yaml
-    yaml_path = KNOWLEDGE_BASE_DIR.parent / "config" / "paradigms.yaml"
+    # LA-051 FIX: 使用 PROJECT_ROOT 而非 KNOWLEDGE_BASE_DIR.parent（目录结构改造后路径变化）
+    yaml_path = PROJECT_ROOT / "config" / "paradigms.yaml"
     if not yaml_path.exists():
+        print(f"[SemanticLinker] paradigms.yaml 未找到: {yaml_path}")
         return {}
     try:
         with open(yaml_path, "r", encoding="utf-8") as f:
             data = yaml.safe_load(f)
-        return data.get("paradigms", {})
+        paradigms = data.get("paradigms", {})
+        print(f"[SemanticLinker] 成功加载 paradigms.yaml，包含 {len(paradigms)} 个范式")
+        return paradigms
     except Exception as e:
         print(f"[SemanticLinker] 加载 paradigms.yaml 失败: {e}")
         return {}

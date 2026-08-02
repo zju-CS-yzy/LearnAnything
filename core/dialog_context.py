@@ -18,6 +18,8 @@ from typing import Dict, List, Optional, Any, Tuple
 from pathlib import Path
 from dataclasses import dataclass, field
 
+from config.settings import KNOWLEDGE_BASE_DIR
+
 
 @dataclass
 class UserProfile:
@@ -231,7 +233,8 @@ class DialogContext:
 class DialogContextManager:
     """对话上下文管理器（阶段 1 增强版）"""
 
-    DB_PATH = Path(r"D:\MyCS\AI\Project\LearnAnything\knowledge_base\user_states.db")
+    # LA-DEPLOY: 使用 KNOWLEDGE_BASE_DIR 替代硬编码路径，支持任意部署位置
+    DB_PATH = KNOWLEDGE_BASE_DIR / "user_states.db"
     SESSION_TIMEOUT_MINUTES = 30
     MAX_HISTORY_TURNS = 20
 
@@ -322,10 +325,91 @@ class DialogContextManager:
             cursor.execute("""
                 CREATE INDEX IF NOT EXISTS idx_topics_session ON dialog_topics(session_id, mention_count DESC)
             """)
+
+            # ====== LA-040-P2: 评测历史表 ======
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS evaluation_history (
+                    history_id TEXT PRIMARY KEY,
+                    user_id TEXT NOT NULL,
+                    subject_id TEXT NOT NULL,
+                    eval_session_id TEXT,
+                    topic TEXT DEFAULT '',
+                    theta REAL DEFAULT 0.0,
+                    total_score INTEGER DEFAULT 0,
+                    max_score INTEGER DEFAULT 0,
+                    correct_count INTEGER DEFAULT 0,
+                    total_questions INTEGER DEFAULT 0,
+                    accuracy REAL DEFAULT 0.0,
+                    weak_areas TEXT DEFAULT '[]',
+                    strong_areas TEXT DEFAULT '[]',
+                    evaluated_at TEXT NOT NULL
+                )
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_eval_history_user_subject
+                ON evaluation_history(user_id, subject_id)
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_eval_history_date
+                ON evaluation_history(evaluated_at)
+            """)
+
+            # ====== LA-040-P2: 错题本表 ======
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS wrong_answers (
+                    wrong_id TEXT PRIMARY KEY,
+                    user_id TEXT NOT NULL,
+                    subject_id TEXT NOT NULL,
+                    question_id TEXT,
+                    question_text TEXT NOT NULL,
+                    question_type TEXT,
+                    options TEXT,
+                    user_answer TEXT,
+                    correct_answer TEXT,
+                    explanation TEXT,
+                    concept_id TEXT,
+                    concept_name TEXT,
+                    bloom_level TEXT,
+                    is_mastered INTEGER DEFAULT 0,
+                    is_in_review INTEGER DEFAULT 0,
+                    wrong_count INTEGER DEFAULT 1,
+                    first_wrong_at TEXT,
+                    last_wrong_at TEXT NOT NULL,
+                    UNIQUE(user_id, subject_id, question_id)
+                )
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_wrong_user_subject
+                ON wrong_answers(user_id, subject_id)
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_wrong_concept
+                ON wrong_answers(concept_id)
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_wrong_mastered
+                ON wrong_answers(is_mastered)
+            """)
+
+            # LA-040-P3-FIX: 为旧数据库升级表结构（添加缺失的列）
+            self._upgrade_schema(cursor)
+
             conn.commit()
-            print("[DialogContextManager] 表初始化完成: dialog_sessions, dialog_messages, user_profiles, dialog_topics")
+            print("[DialogContextManager] 表初始化完成: dialog_sessions, dialog_messages, user_profiles, dialog_topics, evaluation_history, wrong_answers")
         finally:
             conn.close()
+
+    def _upgrade_schema(self, cursor):
+        """LA-040-P3-FIX: 升级旧数据库表结构，添加缺失的列"""
+        # 检查 wrong_answers 表是否有 bloom_level 列
+        cursor.execute("PRAGMA table_info(wrong_answers)")
+        columns = {row[1] for row in cursor.fetchall()}
+        
+        if 'bloom_level' not in columns:
+            print("[DialogContextManager] LA-040-P3-FIX: 为 wrong_answers 表添加 bloom_level 列")
+            cursor.execute("ALTER TABLE wrong_answers ADD COLUMN bloom_level TEXT")
+        
+        # 可以在此添加更多未来的列升级
 
     # ---------- 用户画像（跨学科共享）----------
 
@@ -433,7 +517,11 @@ class DialogContextManager:
             if session and not self._is_expired(session):
                 print(f"[DialogContextManager] 显式恢复会话: session_id={session_id[:8]}..., subject={session.get('subject_id')}")
                 return session_id, session
-            print(f"[DialogContextManager] 显式 session_id 已过期或不存在，将创建新会话")
+            print(f"[DialogContextManager] 显式 session_id 不存在或已过期，将使用传入的 session_id 创建新会话")
+            # LA-050-HISTORY-FIX: 使用传入的 session_id 创建新会话（保持前后端一致）
+            new_session = self._create_session(user_id, subject_id, session_id=session_id)
+            print(f"[DialogContextManager] 创建新会话（使用传入ID）: session={new_session['session_id'][:8]}...")
+            return new_session["session_id"], new_session
 
         # 2. 关闭该用户的过期会话
         closed_count = self._close_expired_sessions(user_id)
@@ -464,11 +552,12 @@ class DialogContextManager:
         print(f"[DialogContextManager] 创建新会话: session={new_session['session_id'][:8]}..., subject={subject_id}")
         return new_session["session_id"], new_session
 
-    def _create_session(self, user_id: str, subject_id: str = None) -> Dict:
+    def _create_session(self, user_id: str, subject_id: str = None, session_id: str = None) -> Dict:
         now = datetime.now().isoformat()
-        session_id = str(uuid.uuid4())
+        # LA-050-HISTORY-FIX: 支持传入自定义 session_id（保持前后端一致）
+        sid = session_id or str(uuid.uuid4())
         session = {
-            "session_id": session_id,
+            "session_id": sid,
             "user_id": user_id,
             "subject_id": subject_id or "",
             "status": "active",

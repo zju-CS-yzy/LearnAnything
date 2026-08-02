@@ -346,12 +346,19 @@ class ImageConceptExtractor:
             pseudo_text = f"[图片 - {heading}]\n{text}"
         
         # LA-035: 使用 KB 中的实际路径，保留原始信息
+        # LA-054-FIX: 清除可能包含错误原始文件名的 relative_path
         media_ref = dict(img_ref)  # 复制，避免修改原始
         if kb_path and kb_path.exists():
+            # LA-054-FIX: 设置正确的相对路径（相对于 KNOWLEDGE_BASE_DIR）
+            try:
+                rel_path = str(kb_path.relative_to(KNOWLEDGE_BASE_DIR)).replace('\\', '/')
+            except ValueError:
+                rel_path = str(kb_path).replace('\\', '/')
             media_ref["path"] = str(kb_path)
-            # 推断缩略图路径
-            thumb_path = str(kb_path).replace("_v1_images/", "_v1_thumbnails/")
-            media_ref["thumbnail_path"] = thumb_path
+            media_ref["relative_path"] = rel_path  # 覆盖旧的 MinerU 文件名
+            # LA-054-FIX: 正确推断缩略图路径（处理 Windows 反斜杠）
+            thumb_path = str(kb_path).replace('\\', '/').replace('_v1_images/', '_v1_thumbnails/')
+            media_ref["thumbnail_path"] = thumb_path.replace('/', '\\') if '\\' in str(kb_path) else thumb_path
         
         # LA-035-P21: 构建 media_refs
         media_refs = [media_ref]

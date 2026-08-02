@@ -1,6 +1,9 @@
 """
-Embedding 模型管理器
-支持智谱AI Embedding API，保留 HashEmbedding 离线降级方案
+Embedding 模型管理器 (LA-DEPLOY-FEAT)
+
+按功能模块读取配置：文本向量化 (embedding)
+支持任意 OpenAI 兼容的 Embedding API。
+保留 HashEmbedding 离线降级方案。
 """
 
 import os
@@ -13,7 +16,7 @@ from typing import List, Optional
 
 import numpy as np
 
-from config.settings import CACHE_DIR, DEFAULT_EMBEDDING_DIM, ZHIPU_API_KEY, ZHIPU_EMBEDDING_BASE_URL, ZHIPU_EMBEDDING_MODEL
+from config.settings import CACHE_DIR, DEFAULT_EMBEDDING_DIM, get_embedding_config
 
 
 # 模型缓存目录（打包环境下指向可写目录）
@@ -75,9 +78,11 @@ class ApiEmbeddingClient:
         timeout: int = 30,
         max_retries: int = 3,
     ):
-        self.api_key = api_key or ZHIPU_API_KEY
-        self.base_url = (base_url or ZHIPU_EMBEDDING_BASE_URL).rstrip("/")
-        self.model = model or ZHIPU_EMBEDDING_MODEL
+        # LA-DEPLOY-FEAT: 按功能模块读取配置
+        cfg = get_embedding_config()
+        self.api_key = api_key or cfg.api_key
+        self.base_url = (base_url or cfg.base_url or "https://open.bigmodel.cn/api/paas/v4").rstrip("/")
+        self.model = model or cfg.model or "embedding-3"
         self.dimensions = dimensions or DEFAULT_EMBEDDING_DIM
         self.timeout = timeout
         self.max_retries = max_retries
@@ -234,9 +239,10 @@ class EmbeddingManager:
         if self._client is not None:
             return self._client
 
-        # 检查 API key 是否配置
-        if not ZHIPU_API_KEY:
-            print("[Embedding] WARNING: ZHIPU_API_KEY 未配置，启用降级 embedding")
+        # LA-DEPLOY-FEAT: 检查 embedding 配置
+        cfg = get_embedding_config()
+        if not cfg.api_key:
+            print("[Embedding] WARNING: 文本向量化 API 未配置，启用降级 embedding")
             self._client = HashEmbeddingFunction(dim=DEFAULT_EMBEDDING_DIM)
             self._fallback = True
             return self._client
@@ -247,12 +253,12 @@ class EmbeddingManager:
             # 发一个测试请求验证连通性
             test_result = client.encode(["test"])
             if len(test_result) == 1 and len(test_result[0]) > 0:
-                print(f"[Embedding] OK: 智谱AI Embedding API 连接成功 (model={client.model}, dim={len(test_result[0])})")
+                print(f"[Embedding] OK: Embedding API 连接成功 (provider={cfg.provider}, model={client.model}, dim={len(test_result[0])})")
                 self._client = client
                 self._fallback = False
                 return self._client
         except Exception as e:
-            print(f"[Embedding] WARNING: 智谱AI API 初始化失败: {e}")
+            print(f"[Embedding] WARNING: Embedding API 初始化失败: {e}")
 
         # 降级
         print("[Embedding] WARNING: 启用降级 embedding（HashEmbedding）--搜索质量会下降")

@@ -47,7 +47,12 @@
         </div>
 
         <div class="question-card card" v-if="currentQuestion">
-          <div class="question-type tag">{{ currentQuestion.type }}</div>
+          <div class="question-meta">
+            <span class="question-type tag">{{ currentQuestion.type }}</span>
+            <span v-if="currentQuestion.bloom_level" class="bloom-tag" :class="'bloom-' + currentQuestion.bloom_level">
+              {{ bloomLabel(currentQuestion.bloom_level) }}
+            </span>
+          </div>
           <div class="question-text">{{ currentQuestion.question }}</div>
           <div v-if="currentQuestion.options && currentQuestion.options.length" class="options-list">
             <div
@@ -148,6 +153,9 @@
                 <div class="detail-header">
                   <span class="detail-status">{{ d.is_correct ? '✅' : '❌' }}</span>
                   <span class="detail-question">{{ d.question }}</span>
+                  <span v-if="d.bloom_level" class="bloom-tag-small" :class="'bloom-' + d.bloom_level">
+                    {{ bloomLabel(d.bloom_level) }}
+                  </span>
                 </div>
                 <div class="detail-answers">
                   <span :class="{ 'user-correct': d.is_correct, 'user-wrong': !d.is_correct }">
@@ -203,6 +211,20 @@ const currentIndex = ref(0)
 const report = ref(null)
 
 const currentQuestion = computed(() => questions.value[currentIndex.value])
+
+// Bloom 认知层次标签映射
+const bloomLabels = {
+  remember: '记忆',
+  understand: '理解',
+  apply: '应用',
+  analyze: '分析',
+  evaluate: '评估',
+  create: '创造',
+}
+
+function bloomLabel(level) {
+  return bloomLabels[level] || level
+}
 
 async function startEval() {
   if (!topic.value.trim()) return
@@ -353,9 +375,42 @@ function handlePractice(conceptName) {
   margin: 0 auto 20px;
 }
 
-.question-type {
+.question-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   margin-bottom: 10px;
 }
+
+.question-type {
+  /* 保留原有样式 */
+}
+
+/* Bloom 认知层次标签 */
+.bloom-tag {
+  font-size: var(--font-size-xs);
+  font-weight: 500;
+  padding: 2px 8px;
+  border-radius: 4px;
+  border: 1px solid transparent;
+}
+
+.bloom-tag-small {
+  margin-left: auto;
+  font-size: var(--font-size-xs);
+  font-weight: 500;
+  padding: 1px 6px;
+  border-radius: 4px;
+  border: 1px solid transparent;
+  flex-shrink: 0;
+}
+
+.bloom-remember { background: #f0f0f0; color: #666; border-color: #ddd; }
+.bloom-understand { background: #e3f2fd; color: #1976d2; border-color: #bbdefb; }
+.bloom-apply { background: #e8f5e9; color: #388e3c; border-color: #c8e6c9; }
+.bloom-analyze { background: #fff3e0; color: #f57c00; border-color: #ffe0b2; }
+.bloom-evaluate { background: #fce4ec; color: #c2185b; border-color: #f8bbd9; }
+.bloom-create { background: #f3e5f5; color: #7b1fa2; border-color: #e1bee7; }
 
 .question-text {
   font-size: var(--font-size-md);

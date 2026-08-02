@@ -152,15 +152,16 @@ export function buildCyStyles() {
       }
     },
     // ========== 图片节点样式（P41: 背景图预览）==========
+    // LA-035-P43: 图片节点宽度与其他文档树节点一致（nodeWidth），高度根据图片比例自适应
     {
       selector: 'node[chunkType="image"], node[chunkType="image_pseudo"]',
       style: {
         'label': '',
         'background-image': 'data(bgImage)',
-        'background-fit': 'cover',
+        'background-fit': 'contain',           // ← 改为 contain，完整显示图片不裁剪
         'background-color': '#f39c12',
-        'width': 80,
-        'height': 80,
+        'width': 'data(nodeWidth)',            // ← 与其他文档树节点宽度一致
+        'height': 'data(cardHeight)',          // ← 根据图片比例自适应的高度
         'border-width': 2,
         'border-color': '#e67e22',
         'shape': 'round-rectangle',

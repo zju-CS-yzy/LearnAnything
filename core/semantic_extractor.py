@@ -277,13 +277,22 @@ class SemanticExtractor:
     支持多分解范式：理论归纳、工程分解、层级归纳。
     """
 
-    def __init__(self, llm_client: Optional[LLMClient] = None, paradigm: str = "theory"):
+    def __init__(self, llm_client: Optional[LLMClient] = None, paradigm: str = "theory", provider: Optional[str] = None):
         """
         Args:
             llm_client: 可选的 LLMClient 实例。未提供时自动创建。
             paradigm: 分解范式，可选 "theory" / "engineering" / "hierarchical" / "custom"
+            provider: 可选，指定 LLM 提供商（deepseek / kimi / openai 等）。
+                      用于切换模型而不修改全局配置。例如：
+                      SemanticExtractor(provider="kimi") 会使用 Kimi API。
         """
-        self.llm = llm_client or LLMClient()
+        if llm_client:
+            self.llm = llm_client
+        elif provider:
+            # LA-ROBUST: 按 provider 名称创建对应的 LLMClient
+            self.llm = LLMClient.from_provider(provider, timeout=120, max_retries=2)
+        else:
+            self.llm = LLMClient(timeout=120, max_retries=2)
         self.paradigm = paradigm
         self._validate_paradigm()
 
@@ -356,11 +365,13 @@ class SemanticExtractor:
         system_prompt = self._get_system_prompt()
 
         try:
+            # LA-ROBUST: 单 chunk 提取，2048 token 足够覆盖正常输出
             result = self.llm.chat_json(
                 messages=messages,
                 system_prompt=system_prompt,
                 temperature=0.1,
-                max_tokens=1200,
+                max_tokens=2048,
+                timeout=180,
             )
 
             if isinstance(result, list):
@@ -536,12 +547,19 @@ class SemanticExtractor:
 注意：只为标记了【chunk_id=xxx】的片段提取概念。【上下文声明】只用于理解语义层级，不为其提取概念。
 """
 
+        # 动态计算超时和输出限制
+        # LA-ROBUST: 每个 chunk 分配 180s 超时 + 1024 token 输出空间
+        chunk_count = len(chunk_index_map)
+        dynamic_timeout = max(120, min(300, chunk_count * 180))
+        dynamic_max_tokens = max(2048, min(8192, chunk_count * 1024))
+
         try:
             result = self.llm.chat_json(
                 messages=messages,
                 system_prompt=system_prompt + output_format,
                 temperature=0.1,
-                max_tokens=2000,
+                max_tokens=dynamic_max_tokens,
+                timeout=dynamic_timeout,
             )
 
             # 解析结果

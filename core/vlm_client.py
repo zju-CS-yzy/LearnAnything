@@ -1,8 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-VLM 客户端 — 封装智谱 GLM-4.5V 多模态 API
-支持图片理解、表格提取、流程图分析、公式识别
+VLM Client (LA-DEPLOY-FEAT)
+
+按功能模块读取配置：视觉处理 (vlm)
+支持任意 OpenAI 兼容的多模态 API。
+
+LA-050: 稳定性增强（重试机制 + 降级策略）
 """
 
 import base64
@@ -13,18 +17,21 @@ from typing import Dict, Any, List, Optional, Tuple
 
 import requests
 
-from config.settings import ZHIPU_API_KEY, ZHIPU_EMBEDDING_BASE_URL
+from config.settings import get_vlm_config
 
 
 class VLMClient:
     """
-    视觉语言模型客户端（智谱 GLM-4.5V）
+    视觉语言模型客户端 (LA-DEPLOY-FEAT)
 
-    使用智谱统一 API Key，复用 ZHIPU_API_KEY 和 base_url。
+    按功能模块读取配置，支持任意 OpenAI 兼容的多模态 API。
+    LA-050: 增加重试机制和降级策略，提升 API 调用稳定性。
     """
 
-    # 模型名称
-    MODEL = "glm-4.5v"
+    # LA-050: 重试配置
+    MAX_RETRIES = 3
+    BASE_RETRY_DELAY = 2  # 秒
+    REQUEST_TIMEOUT = 60  # 秒（从 300 缩短到 60，避免长时间挂起）
     
     # 系统提示词 — 根据任务类型切换
     SYSTEM_PROMPTS = {
@@ -77,12 +84,15 @@ class VLMClient:
         ),
     }
 
-    def __init__(self):
-        self.api_key = ZHIPU_API_KEY
-        self.base_url = ZHIPU_EMBEDDING_BASE_URL.rstrip("/")
+    def __init__(self, model: Optional[str] = None):
+        # LA-DEPLOY-FEAT: 按功能模块读取配置
+        cfg = get_vlm_config()
+        self.api_key = cfg.api_key
+        self.base_url = (cfg.base_url or "https://open.bigmodel.cn/api/paas/v4").rstrip("/")
+        self.model = model or cfg.model or "glm-4.5v"
         self.available = bool(self.api_key)
         if not self.available:
-            print("[VLMClient] Warning: ZHIPU_API_KEY not set, VLM features disabled")
+            print("[VLMClient] Warning: 视觉处理 API 未配置，VLM 功能已禁用")
 
     def _image_to_base64(self, image_path: str) -> str:
         """将图片文件转为 base64 编码"""
@@ -94,7 +104,19 @@ class VLMClient:
         return base64.b64encode(image_bytes).decode("utf-8")
 
     def _call_api(self, messages: List[Dict[str, Any]], max_tokens: int = 4096) -> Optional[str]:
-        """调用智谱 VLM API"""
+        """
+        调用智谱 VLM API（LA-050: 增加重试机制和降级策略）
+
+        重试策略:
+            - 最多重试 MAX_RETRIES 次
+            - 指数退避: delay = BASE_RETRY_DELAY * (2 ** attempt)
+            - 仅对可重试错误（HTTP 429/500/502/503/504、超时、连接错误）进行重试
+            - 对 400 类错误（请求参数错误）不重试
+
+        降级策略:
+            - 所有重试耗尽后返回 None
+            - 调用方负责处理 None（使用空描述或跳过）
+        """
         if not self.available:
             return None
 
@@ -104,34 +126,84 @@ class VLMClient:
             "Content-Type": "application/json",
         }
         payload = {
-            "model": self.MODEL,
+            "model": self.model,
             "messages": messages,
             "max_tokens": max_tokens,
             "temperature": 0.3,
         }
 
-        try:
-            resp = requests.post(url, headers=headers, json=payload, timeout=300)
-            
-            # LA-035: 打印详细业务错误码
-            if resp.status_code != 200:
+        # LA-050: 重试循环
+        for attempt in range(self.MAX_RETRIES + 1):
+            try:
+                resp = requests.post(url, headers=headers, json=payload, timeout=self.REQUEST_TIMEOUT)
+                
+                # 成功
+                if resp.status_code == 200:
+                    data = resp.json()
+                    return data["choices"][0]["message"]["content"]
+                
+                # LA-050: 解析错误响应
+                error_code = "unknown"
+                error_message = resp.text[:200]
                 try:
                     error_data = resp.json()
                     error_code = error_data.get("error", {}).get("code", "unknown")
                     error_message = error_data.get("error", {}).get("message", resp.text[:200])
-                    print(f"[VLMClient] ERROR: API 返回错误 (HTTP {resp.status_code})")
-                    print(f"[VLMClient]   业务错误码: {error_code}")
-                    print(f"[VLMClient]   错误消息: {error_message}")
-                    print(f"[VLMClient]   模型: {self.MODEL}")
                 except Exception:
-                    print(f"[VLMClient] ERROR: API 返回错误 (HTTP {resp.status_code}): {resp.text[:200]}")
+                    pass
+
+                # LA-050: 判断是否需要重试
+                # 可重试: 429(限流) / 500 / 502 / 503 / 504
+                # 不可重试: 400 / 401 / 403 / 404
+                if resp.status_code in (429, 500, 502, 503, 504):
+                    if attempt < self.MAX_RETRIES:
+                        delay = self.BASE_RETRY_DELAY * (2 ** attempt)
+                        print(f"[VLMClient] LA-050: 可重试错误 (HTTP {resp.status_code}, code={error_code})，"
+                              f"第 {attempt + 1}/{self.MAX_RETRIES} 次重试，等待 {delay}s...")
+                        time.sleep(delay)
+                        continue
+                    else:
+                        print(f"[VLMClient] LA-050: 重试耗尽 (HTTP {resp.status_code}, code={error_code})，"
+                              f"返回 None 降级")
+                        return None
+                else:
+                    # 不可重试错误，直接返回 None
+                    print(f"[VLMClient] LA-050: 不可重试错误 (HTTP {resp.status_code}, code={error_code})，"
+                          f"message={error_message}，跳过")
+                    return None
+
+            except requests.exceptions.Timeout:
+                # 超时 — 可重试
+                if attempt < self.MAX_RETRIES:
+                    delay = self.BASE_RETRY_DELAY * (2 ** attempt)
+                    print(f"[VLMClient] LA-050: 请求超时，第 {attempt + 1}/{self.MAX_RETRIES} 次重试，"
+                          f"等待 {delay}s...")
+                    time.sleep(delay)
+                    continue
+                else:
+                    print(f"[VLMClient] LA-050: 重试耗尽（超时），返回 None 降级")
+                    return None
+
+            except requests.exceptions.ConnectionError as e:
+                # 连接错误 — 可重试
+                if attempt < self.MAX_RETRIES:
+                    delay = self.BASE_RETRY_DELAY * (2 ** attempt)
+                    print(f"[VLMClient] LA-050: 连接错误 ({e})，第 {attempt + 1}/{self.MAX_RETRIES} 次重试，"
+                          f"等待 {delay}s...")
+                    time.sleep(delay)
+                    continue
+                else:
+                    print(f"[VLMClient] LA-050: 重试耗尽（连接错误），返回 None 降级")
+                    return None
+
+            except Exception as e:
+                # 其他异常 — 不可重试
+                print(f"[VLMClient] LA-050: 未预期异常 ({type(e).__name__}: {e})，返回 None")
                 return None
-            
-            data = resp.json()
-            return data["choices"][0]["message"]["content"]
-        except Exception as e:
-            print(f"[VLMClient] API call failed: {e}")
-            return None
+
+        # 理论上不会到达这里，但作为兜底
+        print(f"[VLMClient] LA-050: 所有重试路径已耗尽，返回 None")
+        return None
 
     def analyze_image(self, image_path: str, task: str = "describe") -> Optional[str]:
         """
@@ -142,7 +214,7 @@ class VLMClient:
             task: 任务类型 — describe/table/formula/diagram/chart
 
         Returns:
-            VLM 生成的文本描述，失败返回 None
+            VLM 生成的文本描述，失败返回 None（LA-050: 调用方需处理 None）
         """
         system_prompt = self.SYSTEM_PROMPTS.get(task, self.SYSTEM_PROMPTS["describe"])
         b64 = self._image_to_base64(image_path)
@@ -186,7 +258,7 @@ class VLMClient:
 
     def analyze_pdf_page(self, page_image_bytes: bytes, page_type: str, page_num: int) -> Optional[str]:
         """
-        分析 PDF 页面图片。
+        分析 PDF 页面图片（LA-050: 增加降级处理）。
 
         Args:
             page_image_bytes: 页面渲染后的 PNG bytes
@@ -194,7 +266,7 @@ class VLMClient:
             page_num: 页码（用于日志）
 
         Returns:
-            结构化文本描述
+            结构化文本描述，失败返回 None（调用方应使用空描述继续流程）
         """
         task_map = {
             "table": "table",
@@ -212,31 +284,41 @@ class VLMClient:
         start = time.time()
         result = self.analyze_image_bytes(page_image_bytes, task=task)
         elapsed = time.time() - start
-        print(f"[VLMClient] Page {page_num} done in {elapsed:.1f}s")
+
+        if result is None:
+            print(f"[VLMClient] LA-050: Page {page_num} FAILED after retries, returning None (downgrade)")
+        else:
+            print(f"[VLMClient] Page {page_num} done in {elapsed:.1f}s")
 
         return result
 
     def batch_analyze(self, items: List[Tuple[bytes, str, int]]) -> List[Optional[str]]:
         """
-        批量分析多个页面。
+        批量分析多个页面（LA-050: 单个失败不影响整体流程）。
 
         Args:
             items: [(image_bytes, page_type, page_num), ...]
 
         Returns:
-            [result_text, ...]（与输入顺序一致）
+            [result_text, ...]（与输入顺序一致，失败项为 None）
         """
         results = []
+        success_count = 0
         for img_bytes, ptype, pnum in items:
             result = self.analyze_pdf_page(img_bytes, ptype, pnum)
             results.append(result)
+            if result is not None:
+                success_count += 1
+        
+        print(f"[VLMClient] LA-050: Batch analyze complete | "
+              f"success={success_count}/{len(items)}, failed={len(items) - success_count}")
         return results
 
 
 # 便捷函数
 
 def vlm_describe(image_path: str) -> Optional[str]:
-    """便捷函数：描述图片内容"""
+    """便捷函数：描述图片内容（LA-050: 失败返回 None）"""
     client = VLMClient()
     return client.analyze_image(image_path, task="describe")
 
