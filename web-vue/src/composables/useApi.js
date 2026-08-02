@@ -362,3 +362,18 @@ export async function apiReviewChange(changeId, approve, note = '') {
     body: JSON.stringify({ approve, note }),
   })
 }
+
+// ========== LLM-ROBUST: 诊断 API ==========
+
+// 获取 LLM 诊断信息（配置快照 + Key 池状态）
+export async function apiLLMDiagnostic() {
+  return fetchApi('/api/llm/diagnostic')
+}
+
+// 测试 LLM 连接
+export async function apiLLMTest(provider = null, message = 'Hello, this is a connection test.') {
+  return fetchApi('/api/llm/test', {
+    method: 'POST',
+    body: JSON.stringify({ provider, message }),
+  })
+}

@@ -606,6 +606,149 @@ def update_config(request: ConfigUpdateRequest):
     return {"success": True, "message": "配置已保存"}
 
 
+# ========== LLM-ROBUST: 诊断 API ==========
+
+class LLMDiagnosticResponse(BaseModel):
+    """LLM 诊断响应"""
+    provider: str
+    model: str
+    base_url: str
+    key_count: int
+    active_keys: int
+    current_key_hash: str
+    fallback_provider: str
+    fallback_model: str
+    fallback_enabled: bool
+
+@app.get("/api/llm/diagnostic", response_model=LLMDiagnosticResponse)
+def get_llm_diagnostic():
+    """
+    LLM-ROBUST: 获取 LLM 诊断信息。
+    
+    返回当前 LLM 配置的快照（脱敏），包括 Key 池状态。
+    用于前端验证多 Key 轮换配置是否正确加载。
+    """
+    from config.settings import get_full_config
+    import hashlib
+    
+    cfg = get_full_config()
+    llm = cfg.llm
+    fb = cfg.llm_fallback
+    
+    # 计算 Key 数量
+    keys = [k.strip() for k in llm.api_key.split(",") if k.strip()]
+    key_count = len(keys)
+    
+    # 当前 Key 的 hash（用于前端验证轮换是否发生）
+    current_key = keys[0] if keys else ""
+    key_hash = hashlib.md5(current_key.encode()).hexdigest()[:8] if current_key else "none"
+    
+    return LLMDiagnosticResponse(
+        provider=llm.provider,
+        model=llm.model,
+        base_url=llm.base_url,
+        key_count=key_count,
+        active_keys=key_count,  # 简化：假设都活跃
+        current_key_hash=key_hash,
+        fallback_provider=fb.provider,
+        fallback_model=fb.model,
+        fallback_enabled=bool(fb.api_key),
+    )
+
+
+class LLMTestRequest(BaseModel):
+    """LLM 连接测试请求"""
+    provider: Optional[str] = None  # 为空时使用主 LLM
+    message: str = "Hello, this is a connection test."
+
+class LLMTestResponse(BaseModel):
+    """LLM 连接测试响应"""
+    success: bool
+    provider: str
+    model: str
+    response_text: str
+    duration_ms: float
+    key_hash: str
+    error: Optional[str] = None
+
+@app.post("/api/llm/test", response_model=LLMTestResponse)
+def test_llm_connection(request: LLMTestRequest):
+    """
+    LLM-ROBUST: 测试 LLM 连接。
+    
+    发送一条简单消息到指定 Provider，返回响应和耗时。
+    用于验证 Key 是否有效、连接是否正常。
+    """
+    import time
+    import hashlib
+    from config.settings import get_full_config, FeatureConfig
+    
+    cfg = get_full_config()
+    
+    # 选择 Provider
+    if request.provider:
+        # 查找匹配的 Provider 配置
+        for fc in [cfg.llm, cfg.llm_fallback, cfg.vlm]:
+            if fc.provider == request.provider and fc.api_key:
+                target = fc
+                break
+        else:
+            return LLMTestResponse(
+                success=False, provider=request.provider, model="",
+                response_text="", duration_ms=0, key_hash="",
+                error=f"Provider '{request.provider}' not found or no API key",
+            )
+    else:
+        target = cfg.llm
+    
+    if not target.api_key:
+        return LLMTestResponse(
+            success=False, provider=target.provider, model=target.model,
+            response_text="", duration_ms=0, key_hash="",
+            error="No API key configured",
+        )
+    
+    # 创建临时客户端测试
+    client = LLMClient(
+        api_key=target.api_key,
+        base_url=target.base_url,
+        model=target.model,
+        provider=target.provider,
+        timeout=30,
+    )
+    
+    start = time.time()
+    try:
+        result = client.chat(
+            messages=[{"role": "user", "content": request.message}],
+            max_tokens=100,
+        )
+        duration = (time.time() - start) * 1000
+        
+        # 获取当前 Key 的 hash（验证是否发生轮换）
+        key_hash = hashlib.md5(client._key_pool.current_key.encode()).hexdigest()[:8]
+        
+        return LLMTestResponse(
+            success=True,
+            provider=target.provider,
+            model=target.model,
+            response_text=result[:200],
+            duration_ms=round(duration, 2),
+            key_hash=key_hash,
+        )
+    except Exception as e:
+        duration = (time.time() - start) * 1000
+        return LLMTestResponse(
+            success=False,
+            provider=target.provider,
+            model=target.model,
+            response_text="",
+            duration_ms=round(duration, 2),
+            key_hash="",
+            error=str(e)[:500],
+        )
+
+
 # ========== LA-052: 认证 API ==========
 
 @app.post("/api/auth/register", response_model=AuthResponse)
