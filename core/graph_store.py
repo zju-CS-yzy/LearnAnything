@@ -634,11 +634,14 @@ class GraphStore:
             
             ref_copy = dict(ref)
             
-            # LA-054-FIX: relative_path 只有在是有效路径时才替代 path
-            # 有效路径：包含 _v1_images/ 或 _v1_thumbnails/
+            # LA-051-DIR: 有效路径：包含 _v1_images/ _v1_thumbnails/ (旧) 或 media/images/ media/thumbnails/ (新)
             rel_path = ref_copy.get("relative_path", "")
             path_val = ref_copy.get("path", "")
-            if rel_path and ('_v1_images/' in rel_path or '_v1_thumbnails/' in rel_path):
+            is_valid_rel = (
+                '_v1_images/' in rel_path or '_v1_thumbnails/' in rel_path
+                or 'media/images/' in rel_path or 'media/thumbnails/' in rel_path
+            )
+            if rel_path and is_valid_rel:
                 # relative_path 是有效相对路径，用它替代 path
                 ref_copy["path"] = rel_path
             elif rel_path and ':' in path_val and '/' in rel_path:
@@ -726,10 +729,17 @@ class GraphStore:
                         raw_image_path = first_ref.get("path", "") or first_ref.get("image_path", "")
                         raw_thumbnail_path = first_ref.get("thumbnail_path", "") or first_ref.get("thumbnail", "")
                         print(f"[GraphStore] LA-035-P42-FIX: 从 media_refs 提取 image_path for {chunk['id']}: {raw_image_path}")
-            # LA-035-P26: 将 Windows 绝对路径转换为相对路径（保留 学科_v1_images/文件名 部分）
+            # LA-035-P26: 将 Windows 绝对路径转换为相对路径
+            # LA-051-DIR: 同时支持旧路径 (学科_v1_images/文件名) 和新路径 (Share/学科/media/images/文件名)
             import re as _re
+            # 旧结构匹配
             img_match = _re.search(r'([^\\/]+_v1_images[\\/][^\\/]+)$', raw_image_path)
             thumb_match = _re.search(r'([^\\/]+_v1_thumbnails[\\/][^\\/]+)$', raw_thumbnail_path)
+            # 新结构匹配 (Share/学科/media/images/文件名 或 Users/用户/学科/media/images/文件名)
+            if not img_match:
+                img_match = _re.search(r'((?:Share|Users)[\\/].*?media[\\/]images[\\/][^\\/]+)$', raw_image_path)
+            if not thumb_match:
+                thumb_match = _re.search(r'((?:Share|Users)[\\/].*?media[\\/]thumbnails[\\/][^\\/]+)$', raw_thumbnail_path)
             image_path = self._escape_cypher_string(img_match.group(1) if img_match else raw_image_path)
             thumbnail_path = self._escape_cypher_string(thumb_match.group(1) if thumb_match else raw_thumbnail_path)
             width = meta.get("width", 0) or 0

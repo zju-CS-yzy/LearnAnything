@@ -30,7 +30,7 @@ import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from config.settings import KNOWLEDGE_BASE_DIR, get_mineru_config
+from config.settings import KNOWLEDGE_BASE_DIR, get_mineru_config, get_subject_images_dir, get_subject_thumbnails_dir, get_user_subject_dir, get_share_subject_dir
 
 
 # ========== 默认配置 ==========
@@ -270,6 +270,7 @@ class MinerUClient:
         pdf_path: str,
         subject: str = "generic",
         metadata: Optional[Dict[str, Any]] = None,
+        user_id: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         """
         将 PDF 解析为 LearnAnything 标准 chunk 列表。
@@ -301,10 +302,30 @@ class MinerUClient:
         markdown_text, output_dir, image_paths = self.parse_pdf_to_markdown(str(pdf_path))
 
         # 2. 将图片复制到项目知识库目录
-        copied_images = self._copy_images_to_kb(image_paths, subject, pdf_path.name)
+        copied_images = self._copy_images_to_kb(image_paths, subject, pdf_path.name, user_id=user_id)
 
         # 3. 将 Markdown 中的图片引用路径替换为本地知识库路径
         markdown_text = self._replace_image_paths(markdown_text, copied_images)
+
+        # 3b. LA-051-DIR: 保存 Markdown 文件到学科 md/ 目录
+        # 使用原始文件名（source_name）而非临时 PDF 名
+        if user_id:
+            md_dir = get_user_subject_dir(user_id, subject) / "md"
+        else:
+            md_dir = get_share_subject_dir(subject) / "md"
+        md_dir.mkdir(parents=True, exist_ok=True)
+        orig_name = metadata.get("source", pdf_path.name)
+        md_stem = Path(orig_name).stem
+        md_name = f"{md_stem}.md"
+        md_path = md_dir / md_name
+        # 如果文件已存在，添加序号
+        counter = 1
+        while md_path.exists():
+            md_name = f"{md_stem}_{counter}.md"
+            md_path = md_dir / md_name
+            counter += 1
+        md_path.write_text(markdown_text, encoding="utf-8")
+        print(f"[MinerUClient] Markdown saved: {md_path}")
 
         # 4. 按标题层级分块（使用 MarkdownChunker v2.0）
         from core.markdown_chunker import MarkdownChunker
@@ -424,6 +445,7 @@ class MinerUClient:
         image_paths: List[Path],
         subject: str,
         doc_name: str,
+        user_id: Optional[str] = None,
     ) -> Dict[str, Path]:
         """
         将 MinerU 提取的图片复制到项目知识库目录。
@@ -431,11 +453,11 @@ class MinerUClient:
         Returns:
             {原始文件名: 目标路径} 映射
         """
+        # LA-051-DIR: 使用 settings.py 统一路径入口，传入 user_id 确保私有学科路径正确
+        img_dir = get_subject_images_dir(subject, user_id)
+        thumb_dir = get_subject_thumbnails_dir(subject, user_id)
+        
         safe_doc_name = re.sub(r'[^\w\-_.]', '_', Path(doc_name).stem)
-        img_dir = KNOWLEDGE_BASE_DIR / f"{subject}_v1_images"
-        thumb_dir = KNOWLEDGE_BASE_DIR / f"{subject}_v1_thumbnails"
-        img_dir.mkdir(parents=True, exist_ok=True)
-        thumb_dir.mkdir(parents=True, exist_ok=True)
 
         from PIL import Image as PILImage
 

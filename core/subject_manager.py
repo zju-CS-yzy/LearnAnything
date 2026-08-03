@@ -1,22 +1,27 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-学科管理模块 — v3 (LA-050-Phase3)
+学科管理模块 — v4 (LA-051-DIR)
 
-负责学科的 CRUD、自动识别、知识库隔离、学科文件夹管理。
+目录结构（统一 LA-051-STRUCT）：
+    data/knowledge_base/
+        Share/<subject_id>/        ← 公有学科
+            raw/
+            media/images/
+            media/thumbnails/
+            vector.db
+            graph/
+        Users/<user_id>/<subject_id>/  ← 私有学科
+            raw/
+            media/images/
+            media/thumbnails/
+            vector.db
+            graph/
+    data/
+        subjects.db                 ← 全局学科注册表
+        users/<user_id>/subjects.db ← 用户私有学科注册表
 
-LA-050-Phase3 改造说明:
-- 新增 SubjectManager 类，支持自定义 db_path 和 kb_root（用户隔离）
-- 原有模块级函数保留为向后兼容的包装（委托给默认全局实例）
-- 现有代码无需修改即可继续工作
-
-目录结构:
-    <user_data_dir>/
-        subjects.db              # 学科元数据
-    <kb_root>/<subject_id>/
-        raw/                     # 原始资料
-        meta.json                # 学科元数据汇总
-        visual/                  # 可视化数据（预留）
+所有目录创建均通过 config.settings 辅助函数，确保路径一致性。
 """
 
 import json
@@ -27,17 +32,16 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, List, Optional
 
-from config.settings import KNOWLEDGE_BASE_DIR
-
-# 用户数据目录（支持 PyInstaller 持久化）
-from config.settings import DATA_ROOT
-_user_data_dir = DATA_ROOT
-_user_data_dir.mkdir(parents=True, exist_ok=True)
-
-# 知识库根目录
-KB_ROOT = KNOWLEDGE_BASE_DIR
-KB_ROOT.mkdir(parents=True, exist_ok=True)
-
+# LA-051-DIR: 统一路径入口
+from config.settings import (
+    DATA_ROOT,
+    get_share_subject_dir,
+    get_user_subject_dir,
+    get_subject_vector_db_path,
+    get_subject_graph_db_path,
+    get_subject_images_dir,
+    get_subject_thumbnails_dir,
+)
 
 # LA-051: 学科可见性枚举
 VISIBILITY_PUBLIC = "public"
@@ -45,20 +49,45 @@ VISIBILITY_PRIVATE = "private"
 VISIBILITY_GROUP = "group"
 
 
-# ==================== SubjectManager 类 (LA-050-Phase3) ====================
+# ==================== SubjectManager 类 (LA-051-DIR) ====================
 
 class SubjectManager:
-    """学科管理器（支持用户级路径参数化）。"""
+    """学科管理器（统一路径，支持用户隔离）。"""
 
     def __init__(self, db_path: Optional[str] = None, kb_root: Optional[str] = None):
         """
         Args:
-            db_path: 学科元数据数据库路径（默认 ~/.learnanything/subjects.db）
-            kb_root: 知识库根目录（默认 KNOWLEDGE_BASE_DIR）
+            db_path: 学科元数据数据库路径（默认 data/subjects.db）
+            kb_root: 已废弃参数（LA-051-DIR: 路径由 settings.py 统一管理，忽略此参数）
         """
-        self.db_path = Path(db_path) if db_path else _user_data_dir / "subjects.db"
-        self.kb_root = Path(kb_root) if kb_root else KB_ROOT
-        self.kb_root.mkdir(parents=True, exist_ok=True)
+        self.db_path = Path(db_path) if db_path else DATA_ROOT / "subjects.db"
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # ---------- 学科路径（统一通过 settings.py） ----------
+
+    @staticmethod
+    def get_subject_dir(subject_id: str, owner_id: str = "system",
+                         visibility: str = VISIBILITY_PUBLIC) -> Path:
+        """
+        获取学科目录。
+        LA-051-DIR: 根据 owner_id 和 visibility 选择正确路径。
+        """
+        # 用户私有学科 → Users/<user>/<subject>/
+        if visibility == VISIBILITY_PRIVATE and owner_id and owner_id != "system":
+            return get_user_subject_dir(owner_id, subject_id)
+        # 公有/组内学科 → Share/<subject>/
+        return get_share_subject_dir(subject_id)
+
+    @staticmethod
+    def ensure_subject_dir(subject_id: str, owner_id: str = "system",
+                             visibility: str = VISIBILITY_PUBLIC) -> Path:
+        """
+        确保学科目录存在（创建完整结构）。
+        LA-051-DIR: 通过 settings.py 辅助函数自动创建 raw/media/。
+        """
+        return SubjectManager.get_subject_dir(subject_id, owner_id, visibility)
+
+    # ---------- 内部数据库 ----------
 
     def _get_conn(self):
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -69,7 +98,6 @@ class SubjectManager:
 
     @staticmethod
     def _ensure_table(conn: sqlite3.Connection):
-        # 基础 subjects 表（LA-050）
         conn.execute('''
             CREATE TABLE IF NOT EXISTS subjects (
                 id TEXT PRIMARY KEY,
@@ -78,21 +106,12 @@ class SubjectManager:
                 keywords TEXT,
                 created_at TEXT,
                 document_count INTEGER DEFAULT 0,
-                raw_files_count INTEGER DEFAULT 0
+                raw_files_count INTEGER DEFAULT 0,
+                owner_id TEXT,
+                visibility TEXT DEFAULT 'public',
+                updated_at TEXT
             )
         ''')
-        # LA-051: 向后兼容添加 owner_id / visibility / updated_at
-        for col, dtype in [
-            ("document_count", "INTEGER DEFAULT 0"),
-            ("raw_files_count", "INTEGER DEFAULT 0"),
-            ("owner_id", "TEXT"),
-            ("visibility", "TEXT DEFAULT 'public'"),
-            ("updated_at", "TEXT"),
-        ]:
-            try:
-                conn.execute(f"ALTER TABLE subjects ADD COLUMN {col} {dtype}")
-            except sqlite3.OperationalError:
-                pass  # 已存在
         conn.execute('''
             CREATE TABLE IF NOT EXISTS subject_documents (
                 id TEXT PRIMARY KEY,
@@ -103,25 +122,15 @@ class SubjectManager:
                 imported_at TEXT
             )
         ''')
-        try:
-            conn.execute('ALTER TABLE subject_documents ADD COLUMN source_path TEXT')
-        except sqlite3.OperationalError:
-            pass
         conn.commit()
 
-    # ---------- 学科文件夹管理 ----------
+    # ---------- 原始文件管理 ----------
 
-    def get_subject_dir(self, subject_id: str) -> Path:
-        return self.kb_root / subject_id
-
-    def ensure_subject_dir(self, subject_id: str) -> Path:
-        subj_dir = self.get_subject_dir(subject_id)
-        (subj_dir / "raw").mkdir(parents=True, exist_ok=True)
-        (subj_dir / "visual").mkdir(parents=True, exist_ok=True)
-        return subj_dir
-
-    def save_raw_file(self, subject_id: str, filename: str, content: bytes) -> Path:
-        raw_dir = self.ensure_subject_dir(subject_id) / "raw"
+    def save_raw_file(self, subject_id: str, filename: str, content: bytes,
+                      owner_id: str = "system", visibility: str = VISIBILITY_PUBLIC) -> Path:
+        """保存原始文件到学科 raw/ 目录。"""
+        raw_dir = self.get_subject_dir(subject_id, owner_id, visibility) / "raw"
+        raw_dir.mkdir(parents=True, exist_ok=True)
         target = raw_dir / filename
         counter = 1
         stem = Path(filename).stem
@@ -132,8 +141,10 @@ class SubjectManager:
         target.write_bytes(content)
         return target
 
-    def list_raw_files(self, subject_id: str) -> List[Dict[str, Any]]:
-        raw_dir = self.get_subject_dir(subject_id) / "raw"
+    def list_raw_files(self, subject_id: str, owner_id: str = "system",
+                       visibility: str = VISIBILITY_PUBLIC) -> List[Dict[str, Any]]:
+        """列出学科 raw/ 目录下的文件。"""
+        raw_dir = self.get_subject_dir(subject_id, owner_id, visibility) / "raw"
         if not raw_dir.exists():
             return []
         files = []
@@ -148,19 +159,30 @@ class SubjectManager:
                 })
         return sorted(files, key=lambda x: x["modified"], reverse=True)
 
-    def delete_raw_file(self, subject_id: str, filename: str) -> bool:
-        target = self.get_subject_dir(subject_id) / "raw" / filename
+    def delete_raw_file(self, subject_id: str, filename: str,
+                        owner_id: str = "system", visibility: str = VISIBILITY_PUBLIC) -> bool:
+        """删除学科 raw/ 目录下的文件。"""
+        target = self.get_subject_dir(subject_id, owner_id, visibility) / "raw" / filename
         if target.exists():
             target.unlink()
             return True
         return False
 
     def get_subject_meta(self, subject_id: str) -> Dict[str, Any]:
+        """获取学科完整元数据。"""
         subj = self.get_subject(subject_id)
         if not subj:
             return {}
-        raw_files = self.list_raw_files(subject_id)
-        subj_dir = self.get_subject_dir(subject_id)
+        raw_files = self.list_raw_files(
+            subject_id,
+            owner_id=subj.get("owner_id", "system"),
+            visibility=subj.get("visibility", VISIBILITY_PUBLIC),
+        )
+        subj_dir = self.get_subject_dir(
+            subject_id,
+            owner_id=subj.get("owner_id", "system"),
+            visibility=subj.get("visibility", VISIBILITY_PUBLIC),
+        )
         return {
             **subj,
             "raw_files": raw_files,
@@ -171,17 +193,19 @@ class SubjectManager:
 
     # ---------- 学科 CRUD ----------
 
-    def create_subject(self, id: str, name: str, description: str = "", keywords: List[str] = None,
-                       owner_id: str = "system", visibility: str = VISIBILITY_PUBLIC) -> Dict[str, Any]:
+    def create_subject(self, id: str, name: str, description: str = "",
+                       keywords: List[str] = None,
+                       owner_id: str = "system",
+                       visibility: str = VISIBILITY_PUBLIC) -> Dict[str, Any]:
         """
-        创建学科（LA-051: 新增 owner_id 和 visibility）
-        
+        创建学科（LA-051-DIR: 使用统一路径入口）。
+
         Args:
             id: 学科唯一标识
             name: 显示名称
             description: 描述
             keywords: 关键词列表
-            owner_id: 所有者用户ID（默认 "system"）
+            owner_id: 所有者用户ID
             visibility: 可见性（public/private/group）
         """
         conn = self._get_conn()
@@ -198,12 +222,14 @@ class SubjectManager:
                  now, now, owner_id, visibility),
             )
             conn.commit()
-            self.ensure_subject_dir(clean_id)
+            # LA-051-DIR: 创建学科目录（通过 settings.py，自动创建完整结构）
+            self.ensure_subject_dir(clean_id, owner_id, visibility)
             return self.get_subject(clean_id)
         finally:
             conn.close()
 
     def get_subject(self, subject_id: str) -> Optional[Dict[str, Any]]:
+        """获取学科信息。"""
         conn = self._get_conn()
         try:
             row = conn.execute("SELECT * FROM subjects WHERE id = ?", (subject_id,)).fetchone()
@@ -214,6 +240,7 @@ class SubjectManager:
             conn.close()
 
     def list_subjects(self) -> List[Dict[str, Any]]:
+        """列出所有学科。"""
         conn = self._get_conn()
         try:
             rows = conn.execute("SELECT * FROM subjects ORDER BY created_at DESC").fetchall()
@@ -221,24 +248,45 @@ class SubjectManager:
         finally:
             conn.close()
 
-    def delete_subject(self, subject_id: str) -> bool:
-        conn = self._get_conn()
+    def delete_subject(self, subject_id: str, owner_id: str = None, visibility: str = None) -> bool:
+        """
+        删除学科及其所有数据。
+        LA-051-DIR: 支持传入 owner_id/visibility。
+        
+        删除顺序（关键！避免文件句柄冲突）：
+        1. 先关闭并删除 GraphStore（释放 KùzuDB 文件句柄）
+        2. 删除 VectorStore 数据库文件
+        3. 删除数据库记录
+        4. 最后删除学科目录
+        """
+        # 确定路径参数
+        if owner_id is None or visibility is None:
+            subj = self.get_subject(subject_id)
+            if subj:
+                owner_id = subj.get("owner_id", "system")
+                visibility = subj.get("visibility", VISIBILITY_PUBLIC)
+            else:
+                owner_id = owner_id or "system"
+                visibility = visibility or VISIBILITY_PUBLIC
+
+        # 1. 先关闭并删除 GraphStore（释放文件句柄）
         try:
-            cursor = conn.execute("DELETE FROM subject_documents WHERE subject_id = ?", (subject_id,))
-            deleted_docs = cursor.rowcount
-            print(f"[SubjectDelete] 删除 {deleted_docs} 条 subject_documents 记录")
-            conn.execute("DELETE FROM subjects WHERE id = ?", (subject_id,))
-            conn.commit()
+            from core.graph_store import GraphStore
+            graph_db_path = get_subject_graph_db_path(
+                subject_id, owner_id if visibility == VISIBILITY_PRIVATE else None
+            )
+            if graph_db_path.exists():
+                store = GraphStore(subject_id, db_path=str(graph_db_path))
+                store.delete_all()  # 这会关闭连接并删除目录
+                print(f"[SubjectDelete] GraphStore 已删除: {graph_db_path}")
+        except Exception as e:
+            print(f"[SubjectDelete] GraphStore 删除失败（非阻塞）: {e}")
 
-            # 删除学科文件夹
-            subj_dir = self.get_subject_dir(subject_id)
-            if subj_dir.exists():
-                shutil.rmtree(subj_dir)
-                print(f"[SubjectDelete] 删除学科文件夹: {subj_dir}")
-
-            # 删除向量数据库
-            from config.settings import VECTOR_DB_DIR
-            vec_db = VECTOR_DB_DIR / f"{subject_id}_v1.db"
+        # 2. 删除 VectorStore 数据库文件
+        try:
+            vec_db = get_subject_vector_db_path(
+                subject_id, owner_id if visibility == VISIBILITY_PRIVATE else None
+            )
             if vec_db.exists():
                 vec_db.unlink()
                 print(f"[SubjectDelete] 删除向量数据库: {vec_db}")
@@ -246,39 +294,39 @@ class SubjectManager:
                 extra = vec_db.parent / f"{vec_db.name}{suffix}"
                 if extra.exists():
                     extra.unlink()
-                    print(f"[SubjectDelete] 删除向量数据库附属文件: {extra}")
-
-            # 删除图数据库
-            try:
-                from core.graph_store import GraphStore
-                store = GraphStore(f"{subject_id}_v1")
-                store.delete_all()
-                print(f"[SubjectDelete] GraphStore.delete_all() succeeded for {subject_id}")
-            except Exception as e:
-                print(f"[SubjectDelete] GraphStore.delete_all() failed (fallback): {e}")
-                graph_db_dir = KNOWLEDGE_BASE_DIR / "graph_db"
-                graph_db_file = graph_db_dir / f"{subject_id}_v1_graph"
-                if graph_db_file.exists():
-                    graph_db_file.unlink()
-                    print(f"[SubjectDelete] 手动删除图数据库: {graph_db_file}")
-                wal_dir = graph_db_dir / f"{subject_id}_v1_graph.wal"
-                if wal_dir.exists():
-                    shutil.rmtree(wal_dir)
-
-            # 删除图片和缩略图目录
-            img_dir = KNOWLEDGE_BASE_DIR / f"{subject_id}_v1_images"
-            if img_dir.exists():
-                shutil.rmtree(img_dir)
-            thumb_dir = KNOWLEDGE_BASE_DIR / f"{subject_id}_v1_thumbnails"
-            if thumb_dir.exists():
-                shutil.rmtree(thumb_dir)
-
-            return True
         except Exception as e:
-            print(f"[SubjectDelete] Error: {e}")
-            return False
+            print(f"[SubjectDelete] 向量数据库删除失败（非阻塞）: {e}")
+
+        # 3. 删除数据库记录
+        conn = self._get_conn()
+        try:
+            cursor = conn.execute("DELETE FROM subject_documents WHERE subject_id = ?", (subject_id,))
+            print(f"[SubjectDelete] 删除 {cursor.rowcount} 条 subject_documents 记录")
+            conn.execute("DELETE FROM subjects WHERE id = ?", (subject_id,))
+            conn.commit()
+        except Exception as e:
+            print(f"[SubjectDelete] 数据库记录删除失败: {e}")
         finally:
             conn.close()
+
+        # 4. 最后删除学科目录（此时所有文件句柄已释放）
+        try:
+            subj_dir = self.get_subject_dir(subject_id, owner_id, visibility)
+            if subj_dir.exists():
+                # Windows: 使用 onerror 处理只读文件
+                import stat
+                def _onerror(func, path, exc_info):
+                    os.chmod(path, stat.S_IWRITE)
+                    func(path)
+                shutil.rmtree(subj_dir, onerror=_onerror)
+                print(f"[SubjectDelete] 删除学科目录: {subj_dir}")
+        except Exception as e:
+            print(f"[SubjectDelete] 学科目录删除失败: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+
+        return True
 
     def update_document_count(self, subject_id: str, count: int):
         conn = self._get_conn()
@@ -289,7 +337,12 @@ class SubjectManager:
             conn.close()
 
     def update_raw_files_count(self, subject_id: str):
-        count = len(self.list_raw_files(subject_id))
+        subj = self.get_subject(subject_id)
+        count = len(self.list_raw_files(
+            subject_id,
+            owner_id=subj.get("owner_id", "system") if subj else "system",
+            visibility=subj.get("visibility", VISIBILITY_PUBLIC) if subj else VISIBILITY_PUBLIC,
+        ))
         conn = self._get_conn()
         try:
             conn.execute("UPDATE subjects SET raw_files_count = ? WHERE id = ?", (count, subject_id))
@@ -297,7 +350,8 @@ class SubjectManager:
         finally:
             conn.close()
 
-    def record_import(self, subject_id: str, source_name: str, source_path: str = "", chunk_count: int = 0):
+    def record_import(self, subject_id: str, source_name: str,
+                      source_path: str = "", chunk_count: int = 0):
         conn = self._get_conn()
         try:
             doc_id = f"doc_{uuid.uuid4().hex[:8]}"
@@ -305,13 +359,16 @@ class SubjectManager:
                 "INSERT INTO subject_documents (id, subject_id, source_name, source_path, chunk_count, imported_at) VALUES (?, ?, ?, ?, ?, ?)",
                 (doc_id, subject_id, source_name, source_path, chunk_count, datetime.now().isoformat()),
             )
-            total_chunks = conn.execute("SELECT SUM(chunk_count) FROM subject_documents WHERE subject_id = ?", (subject_id,)).fetchone()[0] or 0
-            total_files = conn.execute("SELECT COUNT(*) FROM subject_documents WHERE subject_id = ?", (subject_id,)).fetchone()[0] or 0
-            # LA-051: 防御性更新，兼容旧表结构
-            try:
-                conn.execute("UPDATE subjects SET document_count = ?, raw_files_count = ? WHERE id = ?", (total_chunks, total_files, subject_id))
-            except sqlite3.OperationalError as e:
-                print(f"[SubjectManager] 更新计数失败(兼容旧表): {e}")
+            total_chunks = conn.execute(
+                "SELECT SUM(chunk_count) FROM subject_documents WHERE subject_id = ?", (subject_id,)
+            ).fetchone()[0] or 0
+            total_files = conn.execute(
+                "SELECT COUNT(*) FROM subject_documents WHERE subject_id = ?", (subject_id,)
+            ).fetchone()[0] or 0
+            conn.execute(
+                "UPDATE subjects SET document_count = ?, raw_files_count = ? WHERE id = ?",
+                (total_chunks, total_files, subject_id),
+            )
             conn.commit()
         finally:
             conn.close()
@@ -348,22 +405,6 @@ class SubjectManager:
                 best_match = sub["id"]
         return best_match if best_score >= 1 else None
 
-    # ---------- 启动初始化 ----------
-
-    def ensure_default_subjects(self):
-        print(f"[SubjectManager] DB path: {self.db_path}")
-        print(f"[SubjectManager] KB root: {self.kb_root}")
-        subjects = self.list_subjects()
-        print(f"[SubjectManager] Loaded {len(subjects)} subjects: {[s['id'] for s in subjects]}")
-        if not subjects:
-            self.create_subject(
-                id="generic",
-                name="通用",
-                description="默认通用知识库",
-                keywords=["通用", "知识", "学习"],
-            )
-            print("[SubjectManager] Created default 'generic' subject")
-
     # ---------- 工具函数 ----------
 
     @staticmethod
@@ -374,7 +415,6 @@ class SubjectManager:
                 d["keywords"] = json.loads(d["keywords"])
             except:
                 d["keywords"] = []
-        # LA-051: 新字段默认值（处理数据库 NULL）
         if d.get("owner_id") is None:
             d["owner_id"] = "system"
         if d.get("visibility") is None:
@@ -389,8 +429,9 @@ class SubjectManager:
 _default_subject_manager = SubjectManager()
 
 # 保留原有模块级函数，委托给默认实例
+# 注意：这些函数不传递 owner_id/visibility，仅用于全局学科（向后兼容）
 
-SUBJECT_DB_PATH = _user_data_dir / "subjects.db"
+SUBJECT_DB_PATH = DATA_ROOT / "subjects.db"
 
 
 def _get_conn():
@@ -425,8 +466,10 @@ def get_subject_meta(subject_id: str) -> Dict[str, Any]:
     return _default_subject_manager.get_subject_meta(subject_id)
 
 
-def create_subject(id: str, name: str, description: str = "", keywords: List[str] = None) -> Dict[str, Any]:
-    return _default_subject_manager.create_subject(id, name, description, keywords)
+def create_subject(id: str, name: str, description: str = "",
+                   keywords: List[str] = None, owner_id: str = "system",
+                   visibility: str = VISIBILITY_PUBLIC) -> Dict[str, Any]:
+    return _default_subject_manager.create_subject(id, name, description, keywords, owner_id, visibility)
 
 
 def get_subject(subject_id: str) -> Optional[Dict[str, Any]]:
@@ -455,10 +498,6 @@ def record_import(subject_id: str, source_name: str, source_path: str = "", chun
 
 def detect_subject(query: str) -> Optional[str]:
     return _default_subject_manager.detect_subject(query)
-
-
-def ensure_default_subjects():
-    return _default_subject_manager.ensure_default_subjects()
 
 
 def _row_to_dict(row: sqlite3.Row) -> Dict[str, Any]:

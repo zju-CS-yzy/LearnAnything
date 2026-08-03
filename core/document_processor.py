@@ -21,7 +21,7 @@ from typing import Dict, List, Any, Optional, Tuple
 import fitz
 from PIL import Image
 
-from config.settings import KNOWLEDGE_BASE_DIR
+from config.settings import KNOWLEDGE_BASE_DIR, get_subject_images_dir, get_subject_thumbnails_dir
 from core.chunking import DocumentChunker
 from core.subject_analyzer import SubjectAnalyzer, save_subject_config
 
@@ -93,15 +93,17 @@ class DocumentProcessor:
                 self._formula_ocr = None
         return self._formula_ocr
 
-    def process_file(self, path: str, subject: str = "generic", source_name: str = None, raw_path: str = None) -> List[Dict[str, Any]]:
+    def process_file(self, path: str, subject: str = "generic", source_name: str = None, raw_path: str = None, user_id: str = None) -> List[Dict[str, Any]]:
         """
         处理单个文件，返回 chunk 列表。
+        LA-051-DIR: 传入 user_id 确保路径正确。
 
         Args:
             path: 文件路径
             subject: 学科名称
             source_name: 原始文件名（用于溯源）
             raw_path: 原始文件保存路径
+            user_id: 用户ID（LA-051-DIR: 用于确定私有学科路径）
 
         Returns:
             [{"id": str, "text": str, "metadata": dict, "source": str}, ...]
@@ -117,13 +119,14 @@ class DocumentProcessor:
             "source": source_name,
             "raw_path": raw_path or str(path),
             "subject": subject,
+            "user_id": user_id,
         }
 
         ext = path.suffix.lower()
         if ext in (".txt", ".md"):
             return self._process_text(path, metadata)
         elif ext == ".pdf":
-            return self._process_pdf(path, metadata, subject=subject)
+            return self._process_pdf(path, metadata, subject=subject, user_id=user_id)
         elif ext in (".png", ".jpg", ".jpeg"):
             return self._process_image(path, metadata)
         else:
@@ -156,9 +159,10 @@ class DocumentProcessor:
             })
         return result
 
-    def _process_pdf(self, path: Path, metadata: Dict[str, Any], subject: str = "generic") -> List[Dict[str, Any]]:
+    def _process_pdf(self, path: Path, metadata: Dict[str, Any], subject: str = "generic", user_id: str = None) -> List[Dict[str, Any]]:
         """
         处理 PDF 文件。
+        LA-051-DIR: 传入 user_id 确保路径正确。
         
         支持两种引擎:
         - "pymupdf" (默认): 逐页提取文本 + 标题检测 + 图片提取 + 全局分块
@@ -168,28 +172,15 @@ class DocumentProcessor:
         """
         # ===== 引擎选择 =====
         if self.pdf_engine == "mineru":
-            return self._process_pdf_mineru(path, metadata, subject)
+            return self._process_pdf_mineru(path, metadata, subject, user_id=user_id)
         
         # ===== PyMuPDF 模式（默认）=====
-        return self._process_pdf_pymupdf(path, metadata, subject)
+        return self._process_pdf_pymupdf(path, metadata, subject, user_id=user_id)
     
-    def _process_pdf_mineru(self, path: Path, metadata: Dict[str, Any], subject: str = "generic") -> List[Dict[str, Any]]:
+    def _process_pdf_mineru(self, path: Path, metadata: Dict[str, Any], subject: str = "generic", user_id: str = None) -> List[Dict[str, Any]]:
         """
         使用 MinerU CLI 解析 PDF，输出结构化 Markdown chunk。
-        
-        优势:
-        - 自动识别标题层级（## ### 等）
-        - 提取图片并保存到知识库
-        - 公式识别为 LaTeX
-        - 表格保留 Markdown 格式
-        
-        Args:
-            path: PDF 文件路径
-            metadata: 基础元数据
-            subject: 学科名称
-        
-        Returns:
-            标准格式 chunk 列表
+        LA-051-DIR: 传入 user_id 确保图片保存到正确的用户目录。
         """
         client = self._get_mineru_client()
         if client is None or not client.has_token():
@@ -203,23 +194,19 @@ class DocumentProcessor:
                 str(path),
                 subject=subject,
                 metadata=metadata,
+                user_id=user_id,
             )
             print(f"[DocumentProcessor] MinerU 解析完成: {len(chunks)} chunks")
             return chunks
         except Exception as e:
             print(f"[DocumentProcessor] MinerU 解析失败: {e}")
             print(f"[DocumentProcessor] 回退到 PyMuPDF")
-            return self._process_pdf_pymupdf(path, metadata, subject)
+            return self._process_pdf_pymupdf(path, metadata, subject, user_id=user_id)
     
-    def _process_pdf_pymupdf(self, path: Path, metadata: Dict[str, Any], subject: str = "generic") -> List[Dict[str, Any]]:
+    def _process_pdf_pymupdf(self, path: Path, metadata: Dict[str, Any], subject: str = "generic", user_id: str = None) -> List[Dict[str, Any]]:
         """
         使用 PyMuPDF 处理 PDF 文件（Parent-Child 双层分块，先全局分 Child 再按页码聚合 Parent）。
-        
-        **核心改进**:
-        - 先收集所有页面文本，全局分 Child chunk（跨页段落不会被切断）
-        - 再按页码聚合 Parent chunk（每页一个 Parent，用于引用溯源）
-        - 提取标题结构（从书签/文本特征），填充 heading_path
-        - 提取页面图片为 image chunk
+        LA-051-DIR: 传入 user_id 确保图片保存到正确的用户目录。
         """
         doc = fitz.open(str(path))
         total_pages = len(doc)
@@ -232,7 +219,6 @@ class DocumentProcessor:
         
         # === Step 1: 收集所有页面文本，同时提取标题结构 ===
         pages = []
-        # page_headings: {page_num: heading_path_string}
         page_headings = self._extract_page_headings(doc)
         
         for page_num in range(total_pages):
@@ -249,8 +235,9 @@ class DocumentProcessor:
             page_type = self._detect_page_type(page, text)
             
             # LA-035: 提取页面中的图片
+            # LA-051-DIR: 传入 user_id 确保图片保存到正确的用户目录
             page_image_chunks = self._extract_pdf_page_images(
-                doc, page, page_num + 1, page_meta, subject, path.name
+                doc, page, page_num + 1, page_meta, subject, path.name, user_id=user_id
             )
             image_chunks.extend(page_image_chunks)
             
@@ -358,31 +345,22 @@ class DocumentProcessor:
         page_meta: Dict[str, Any],
         subject: str,
         doc_name: str,
+        user_id: str = None,
     ) -> List[Dict[str, Any]]:
         """
         提取 PDF 页面中的内嵌图片，保存为文件并生成 image chunk。
-        
-        Args:
-            doc: PyMuPDF Document 对象
-            page: 当前页面
-            page_num: 页码（1-based）
-            page_meta: 页面元数据
-            subject: 学科名称
-            doc_name: 文档名称
-        
-        Returns:
-            图片 chunk 列表
+        LA-051-DIR: 传入 user_id 确保图片保存到正确的用户目录。
         """
         image_list = page.get_images(full=True)
         if not image_list:
             return []
         
-        # 准备存储目录
+        # LA-051-DIR: 使用 settings.py 统一路径入口，传入 user_id 确保私有学科路径正确
+        img_dir = get_subject_images_dir(subject, user_id)
+        thumb_dir = get_subject_thumbnails_dir(subject, user_id)
+        
+        # 生成安全的文档名前缀
         safe_doc_name = re.sub(r'[^\w\-_.]', '_', Path(doc_name).stem)
-        img_dir = KNOWLEDGE_BASE_DIR / f"{subject}_v1_images"
-        thumb_dir = KNOWLEDGE_BASE_DIR / f"{subject}_v1_thumbnails"
-        img_dir.mkdir(parents=True, exist_ok=True)
-        thumb_dir.mkdir(parents=True, exist_ok=True)
         
         chunks = []
         for img_idx, img_info in enumerate(image_list):

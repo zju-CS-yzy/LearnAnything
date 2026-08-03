@@ -53,20 +53,27 @@ OLD_KNOWLEDGE_BASE_DIR = PROJECT_ROOT / "knowledge_base"
 OLD_USERS_DATA_DIR = Path.home() / ".learnanything"
 
 
-# ========== 学科路径辅助函数（LA-051-STRUCT）==========
+# ========== LA-051-STRUCT: 学科路径辅助函数（统一入口）==========
 
 def get_share_subject_dir(subject_id: str) -> Path:
-    """获取共享学科目录"""
+    """获取共享学科目录。创建完整的学科内聚结构。"""
     d = SHARE_KB_DIR / subject_id
-    d.mkdir(parents=True, exist_ok=True)
+    _ensure_subject_structure(d)
     return d
 
 
 def get_user_subject_dir(user_id: str, subject_id: str) -> Path:
-    """获取用户私有学科目录"""
+    """获取用户私有学科目录。创建完整的学科内聚结构。"""
     d = USERS_KB_DIR / user_id / subject_id
-    d.mkdir(parents=True, exist_ok=True)
+    _ensure_subject_structure(d)
     return d
+
+
+def _ensure_subject_structure(base_dir: Path) -> None:
+    """创建学科内聚目录结构（raw/ + media/images/ + media/thumbnails/）。"""
+    (base_dir / "raw").mkdir(parents=True, exist_ok=True)
+    (base_dir / "media" / "images").mkdir(parents=True, exist_ok=True)
+    (base_dir / "media" / "thumbnails").mkdir(parents=True, exist_ok=True)
 
 
 def get_subject_vector_db_path(subject_id: str, user_id: str = None) -> Path:

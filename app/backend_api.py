@@ -54,7 +54,7 @@ from core.vector_store import VectorStore
 from core.user_manager import get_user_manager  # LA-052: 用户管理
 from core.subject_manager import (
     create_subject, list_subjects, get_subject, delete_subject,
-    detect_subject, ensure_default_subjects, record_import,
+    detect_subject,
 )
 from core.subject_analyzer import SubjectAnalyzer, save_subject_config
 from core.llm_client import FallbackLLMClient as LLMClient  # LLM-ROBUST: 自动故障转移
@@ -186,8 +186,8 @@ def _cleanup_session(session_id: str):
 
 # ========== 启动初始化 ==========
 
-# 确保默认学科存在
-ensure_default_subjects()
+# LA-051-DIR: 默认学科初始化已移除（数据已清理，按需创建）
+# ensure_default_subjects()  # 旧代码，已废弃
 
 
 # ========== Pydantic 模型（请求/响应） ==========
@@ -1715,12 +1715,18 @@ def import_file(
 
             # 先保存原始文件到学科 raw 文件夹（获取 raw_path）
             print(f"[ImportFile] Saving raw file...")
-            from core.subject_manager import save_raw_file
-            raw_path = save_raw_file(subject, file.filename, content)
+            from core.subject_manager import SubjectManager
+            # LA-051-DIR: 使用学科管理器实例方法，传入 owner_id/visibility
+            sm = SubjectManager()
+            raw_path = sm.save_raw_file(
+                subject, file.filename, content,
+                owner_id=owner_id, visibility=sub.get("visibility", "private")
+            )
             print(f"[ImportFile] Raw file saved: {raw_path}")
 
             print(f"[ImportFile] Processing file...")
-            chunks = processor.process_file(tmp_path, subject=subject, source_name=file.filename, raw_path=str(raw_path))
+            # LA-051-DIR: 传入 user_id 确保图片保存到正确的用户目录
+            chunks = processor.process_file(tmp_path, subject=subject, source_name=file.filename, raw_path=str(raw_path), user_id=effective_user_id)
             print(f"[ImportFile] Processed, chunks={len(chunks)}")
 
             if chunks:
@@ -1732,8 +1738,9 @@ def import_file(
                 # 同时写入 KùzuDB 图数据库
                 print(f"[ImportFile] Writing to KùzuDB...")
                 if graph_store is None:
-                    from core.graph_store import GraphStore
-                    graph_store = GraphStore(f"{subject}_v1")
+                    from config.settings import get_subject_graph_db_path
+                    graph_db_path = get_subject_graph_db_path(subject)
+                    graph_store = GraphStore(f"{subject}_v1", db_path=str(graph_db_path))
                 graph_store.init_schema()
                 graph_store.add_chunk_nodes(chunks)
                 graph_store.build_belongs_to_relations()
@@ -1849,14 +1856,28 @@ def knowledge_base_stats(
         # LA-051-P1-FIX: 使用权限感知的 VectorStore
         store = _get_accessible_vector_store(subject, effective_user_id)
         count = store.count()
-        # 动态计算原始文件数量
-        from core.subject_manager import list_raw_files
-        raw_files = list_raw_files(subject)
+        
+        # LA-051-DIR: 使用正确的 SubjectManager 实例统计原始文件
+        subj = _get_subject_anywhere(subject, effective_user_id)
+        raw_files_count = 0
+        if subj:
+            owner_id = subj.get("owner_id", "system")
+            visibility = subj.get("visibility", "public")
+            from core.subject_manager import SubjectManager
+            from config.settings import USERS_DIR
+            if owner_id and owner_id != "system" and visibility == "private":
+                user_db = USERS_DIR / owner_id / "subjects.db"
+                sm = SubjectManager(db_path=str(user_db))
+            else:
+                sm = SubjectManager()
+            files = sm.list_raw_files(subject, owner_id=owner_id, visibility=visibility)
+            raw_files_count = len(files)
+        
         return {
             "subject": subject,
             "collection": f"{subject}_v1",
             "document_count": count,
-            "raw_files_count": len(raw_files),
+            "raw_files_count": raw_files_count,
             "status": "active" if count > 0 else "empty",
         }
     except Exception as e:
@@ -1864,6 +1885,7 @@ def knowledge_base_stats(
             "subject": subject,
             "collection": f"{subject}_v1",
             "document_count": 0,
+            "raw_files_count": 0,
             "status": f"error: {str(e)}",
         }
 
@@ -2311,31 +2333,46 @@ def api_delete_subject(
     """
     删除学科（同时清空关联知识库）。
     LA-051: 仅 owner/maintainer 可删除。
+    LA-051-DIR: 只调用一次 SubjectManager.delete_subject，避免重复删除。
     """
     effective_user_id = get_current_user_id(x_user_id, authorization)
 
-    # LA-051: 获取学科信息并检查权限
-    sub = get_subject(subject_id)
+    # 跨数据库查找学科
+    sub = _get_subject_anywhere(subject_id, effective_user_id)
     if not sub:
         raise HTTPException(status_code=404, detail=f"学科「{subject_id}」不存在")
 
     owner_id = sub.get("owner_id", "system")
+    visibility = sub.get("visibility", "public")
+    
     pm = PermissionManager()
     if not pm.can_manage(effective_user_id, subject_id, owner_id):
         raise HTTPException(status_code=403, detail="您没有权限删除此学科")
 
-    # 删除知识库
-    try:
-        from config.settings import VECTOR_DB_DIR
-        db_path = VECTOR_DB_DIR / f"{subject_id}_v1.db"
-        if db_path.exists():
-            db_path.unlink()
-    except Exception as e:
-        print(f"[SubjectDelete] 删除知识库失败: {e}")
+    from core.subject_manager import SubjectManager
+    from config.settings import USERS_DIR
 
-    success = delete_subject(subject_id)
-    if not success:
-        raise HTTPException(status_code=404, detail=f"学科「{subject_id}」不存在")
+    # 只从学科实际存在的数据库中删除一次
+    deleted = False
+    
+    # 先查全局数据库
+    sm_global = SubjectManager()
+    if sm_global.get_subject(subject_id):
+        deleted = sm_global.delete_subject(subject_id, owner_id=owner_id, visibility=visibility)
+        print(f"[API] 从全局数据库删除学科: {subject_id}")
+    
+    # 再查用户私有数据库（如果全局没找到或删除失败）
+    if not deleted and owner_id and owner_id != "system":
+        user_db = USERS_DIR / owner_id / "subjects.db"
+        if user_db.exists():
+            sm_user = SubjectManager(db_path=str(user_db))
+            if sm_user.get_subject(subject_id):
+                deleted = sm_user.delete_subject(subject_id, owner_id=owner_id, visibility=visibility)
+                print(f"[API] 从用户数据库删除学科: {subject_id}")
+    
+    if not deleted:
+        raise HTTPException(status_code=404, detail=f"学科「{subject_id}」删除失败")
+    
     return {"message": f"学科「{subject_id}」已删除", "deleted": True}
 
 
@@ -2497,8 +2534,9 @@ def _auto_import_from_change(subject_id: str, change: Dict[str, Any], reviewer_i
     from core.document_processor import DocumentProcessor
     from core.vector_store import VectorStore
     from core.graph_store import GraphStore
-    from core.subject_manager import save_raw_file, record_import
+    from core.subject_manager import SubjectManager
     from core.user_manager import get_user_manager
+    from config.settings import get_subject_vector_db_path, get_subject_graph_db_path
 
     file_data = change.get("file_data")
     file_name = change.get("file_name") or "unknown"
@@ -2511,11 +2549,20 @@ def _auto_import_from_change(subject_id: str, change: Dict[str, Any], reviewer_i
     subj = _get_subject_anywhere(subject_id, reviewer_id)
     owner_id = subj.get("owner_id", "system") if subj else reviewer_id
 
-    um = get_user_manager()
-    owner_vector_dir = um.get_user_vector_db_dir(owner_id)
-    owner_graph_dir = um.get_user_graph_db_dir(owner_id)
-    owner_raw_dir = um.get_user_kb_dir(owner_id) / subject_id / "raw"
-    owner_raw_dir.mkdir(parents=True, exist_ok=True)
+    # LA-051-DIR: 使用 settings.py 统一路径入口
+    from config.settings import get_subject_vector_db_path, get_subject_graph_db_path, get_user_subject_dir
+    
+    # 确定学科目录（owner 的私有学科 → Users/<owner>/<subject>/）
+    if subj and subj.get("visibility") == "private" and owner_id != "system":
+        vec_db_path = get_subject_vector_db_path(subject_id, owner_id)
+        graph_db_path = get_subject_graph_db_path(subject_id, owner_id)
+        raw_dir = get_user_subject_dir(owner_id, subject_id) / "raw"
+    else:
+        vec_db_path = get_subject_vector_db_path(subject_id)
+        graph_db_path = get_subject_graph_db_path(subject_id)
+        from config.settings import get_share_subject_dir
+        raw_dir = get_share_subject_dir(subject_id) / "raw"
+    raw_dir.mkdir(parents=True, exist_ok=True)
 
     # 2. 写入临时文件
     suffix = Path(file_name).suffix.lower()
@@ -2531,12 +2578,18 @@ def _auto_import_from_change(subject_id: str, change: Dict[str, Any], reviewer_i
         # 3. 处理文件
         processor = DocumentProcessor()
 
-        # VectorStore: 使用 owner 的路径
-        db_path = owner_vector_dir / f"{subject_id}_v1.db"
-        store = VectorStore(subject_id, db_path=str(db_path))
+        # VectorStore: 使用 owner 的路径（LA-051-DIR: 学科内聚）
+        store = VectorStore(subject_id, db_path=str(vec_db_path))
 
         # 保存原始文件到 owner 的 raw 目录
-        raw_path = save_raw_file(subject_id, file_name, file_data.tobytes() if isinstance(file_data, memoryview) else file_data)
+        from core.subject_manager import SubjectManager
+        sm = SubjectManager()
+        raw_path = sm.save_raw_file(
+            subject_id, file_name,
+            file_data.tobytes() if isinstance(file_data, memoryview) else file_data,
+            owner_id=owner_id,
+            visibility=subj.get("visibility", "private") if subj else "private"
+        )
 
         # 处理文件
         chunks = processor.process_file(tmp_path, subject=subject_id, source_name=file_name, raw_path=str(raw_path))
@@ -2547,8 +2600,7 @@ def _auto_import_from_change(subject_id: str, change: Dict[str, Any], reviewer_i
         # 4. 写入 VectorStore
         store.add_documents(chunks)
 
-        # 5. 写入 GraphStore（owner 的目录）
-        graph_db_path = owner_graph_dir / f"{subject_id}_v1"
+        # 5. 写入 GraphStore（owner 的目录，LA-051-DIR: 学科内聚）
         graph_store = GraphStore(f"{subject_id}_v1", db_path=str(graph_db_path))
         graph_store.init_schema()
         graph_store.add_chunk_nodes(chunks)
@@ -2556,7 +2608,7 @@ def _auto_import_from_change(subject_id: str, change: Dict[str, Any], reviewer_i
         graph_store.build_adjacent_relations()
 
         # 6. 记录导入
-        record_import(subject_id, file_name, str(raw_path), len(chunks))
+        sm.record_import(subject_id, file_name, str(raw_path), len(chunks))
 
         return {
             "success": True,
@@ -3633,15 +3685,36 @@ def list_paradigms():
 
 
 @app.get("/api/subjects/{subject_id}/raw-files")
-def api_list_raw_files(subject_id: str):
+def api_list_raw_files(
+    subject_id: str,
+    x_user_id: Optional[str] = Header(None, alias="X-User-ID"),
+    authorization: Optional[str] = Header(None),
+):
     """
     列出学科的原始资料文件。
+    LA-051-DIR: 支持跨数据库查找，使用正确的路径。
     """
-    from core.subject_manager import list_raw_files, get_subject_dir
-    subj = get_subject(subject_id)
+    effective_user_id = get_current_user_id(x_user_id, authorization)
+    
+    # LA-051-DIR: 跨数据库查找学科
+    subj = _get_subject_anywhere(subject_id, effective_user_id)
     if not subj:
         raise HTTPException(status_code=404, detail=f"学科「{subject_id}」不存在")
-    files = list_raw_files(subject_id)
+    
+    owner_id = subj.get("owner_id", "system")
+    visibility = subj.get("visibility", "public")
+    
+    # 使用正确的 SubjectManager 实例（全局或用户私有）
+    from core.subject_manager import SubjectManager
+    from config.settings import USERS_DIR
+    
+    if owner_id and owner_id != "system" and visibility == "private":
+        user_db = USERS_DIR / owner_id / "subjects.db"
+        sm = SubjectManager(db_path=str(user_db))
+    else:
+        sm = SubjectManager()
+    
+    files = sm.list_raw_files(subject_id, owner_id=owner_id, visibility=visibility)
     return {
         "subject": subject_id,
         "files": files,
@@ -3650,12 +3723,36 @@ def api_list_raw_files(subject_id: str):
 
 
 @app.get("/api/subjects/{subject_id}/meta")
-def api_get_subject_meta(subject_id: str):
+def api_get_subject_meta(
+    subject_id: str,
+    x_user_id: Optional[str] = Header(None, alias="X-User-ID"),
+    authorization: Optional[str] = Header(None),
+):
     """
     获取学科的完整元数据（含原始文件列表）。
+    LA-051-DIR: 支持跨数据库查找。
     """
-    from core.subject_manager import get_subject_meta
-    meta = get_subject_meta(subject_id)
+    effective_user_id = get_current_user_id(x_user_id, authorization)
+    
+    # 跨数据库查找学科
+    subj = _get_subject_anywhere(subject_id, effective_user_id)
+    if not subj:
+        raise HTTPException(status_code=404, detail=f"学科「{subject_id}」不存在")
+    
+    owner_id = subj.get("owner_id", "system")
+    visibility = subj.get("visibility", "public")
+    
+    # 使用正确的 SubjectManager 实例
+    from core.subject_manager import SubjectManager
+    from config.settings import USERS_DIR
+    
+    if owner_id and owner_id != "system" and visibility == "private":
+        user_db = USERS_DIR / owner_id / "subjects.db"
+        sm = SubjectManager(db_path=str(user_db))
+    else:
+        sm = SubjectManager()
+    
+    meta = sm.get_subject_meta(subject_id)
     if not meta:
         raise HTTPException(status_code=404, detail=f"学科「{subject_id}」不存在")
     return meta
@@ -3938,9 +4035,9 @@ def serve_media(path: str, x_user_id: Optional[str] = Header(None, alias="X-User
     # LA-050-Phase5: 优先检查用户私有目录
     if effective_user_id != "default":
         try:
-            from core.user_manager import get_user_manager
-            um = get_user_manager()
-            user_kb = um.get_user_kb_dir(effective_user_id)
+            # LA-051-DIR: 使用 settings.py 统一路径入口
+            from config.settings import get_user_subject_dir
+            user_kb = get_user_subject_dir(effective_user_id, "")  # 获取用户知识库根
             user_path = user_kb / normalized_path
             user_path = user_path.resolve()
             if user_path.exists() and user_path.is_file():
@@ -4125,17 +4222,10 @@ def _get_subject_anywhere(subject_id: str, user_id: Optional[str] = None) -> Opt
 def _get_accessible_vector_store(subject_id: str, user_id: str):
     """
     根据用户权限获取可访问的 VectorStore。
-    
-    对于 owner/maintainer: 使用自己的数据目录
-    对于 reader/contributor: 使用 owner 的数据目录（只读）
-    对于无权限: 抛出 403
-    
-    Returns:
-        VectorStore 实例
+    LA-051-DIR: 使用 settings.py 统一路径入口。
     """
     from core.vector_store import VectorStore
     from core.permission_manager import PermissionManager
-    from core.user_manager import get_user_manager
     from config.settings import VECTOR_DB_DIR
     
     # 1. 获取学科信息
@@ -4151,16 +4241,16 @@ def _get_accessible_vector_store(subject_id: str, user_id: str):
         raise HTTPException(status_code=403, detail="无权访问该学科")
     
     # 2. 判断使用哪个用户的数据目录
-    # LA-051-P1-FIX: 只有 owner 使用自己的目录。
+    # LA-051-DIR: 只有 owner 使用自己的目录。
     # Maintainer/Contributor/Reader 都访问 owner 的数据（权限控制是逻辑层面的，数据物理位置统一在 owner 目录）。
     if user_id == owner_id:
         data_user_id = user_id
     else:
         data_user_id = owner_id
     
-    # 3. 构建路径并返回 VectorStore
-    um = get_user_manager()
-    db_path = um.get_user_vector_db_dir(data_user_id) / f"{subject_id}_v1.db"
+    # 3. 构建路径并返回 VectorStore（LA-051-DIR: 学科内聚路径）
+    from config.settings import get_subject_vector_db_path
+    db_path = get_subject_vector_db_path(subject_id, data_user_id)
     
     if db_path.exists():
         return VectorStore(subject_id, db_path=str(db_path))
@@ -4177,17 +4267,10 @@ def _get_accessible_vector_store(subject_id: str, user_id: str):
 def _get_accessible_graph_store(subject_id: str, user_id: str):
     """
     根据用户权限获取可访问的 GraphStore。
-    
-    对于 owner/maintainer: 使用自己的数据目录
-    对于 reader/contributor: 使用 owner 的数据目录（只读）
-    对于无权限: 抛出 403
-    
-    Returns:
-        GraphStore 实例
+    LA-051-DIR: 使用 settings.py 统一路径入口。
     """
     from core.graph_store import GraphStore
     from core.permission_manager import PermissionManager
-    from core.user_manager import get_user_manager
     from config.settings import GRAPH_DB_DIR
     
     # 1. 获取学科信息
@@ -4203,16 +4286,14 @@ def _get_accessible_graph_store(subject_id: str, user_id: str):
         raise HTTPException(status_code=403, detail="无权访问该学科")
     
     # 2. 判断使用哪个用户的数据目录
-    # LA-051-P1-FIX: 只有 owner 使用自己的目录。
-    # Maintainer/Contributor/Reader 都访问 owner 的数据（权限控制是逻辑层面的，数据物理位置统一在 owner 目录）。
     if user_id == owner_id:
         data_user_id = user_id
     else:
         data_user_id = owner_id
     
-    # 3. 构建路径并返回 GraphStore
-    um = get_user_manager()
-    db_path = um.get_user_graph_db_dir(data_user_id) / f"{subject_id}_v1"
+    # 3. 构建路径并返回 GraphStore（LA-051-DIR: 学科内聚路径）
+    from config.settings import get_subject_graph_db_path
+    db_path = get_subject_graph_db_path(subject_id, data_user_id)
     
     if db_path.exists():
         return GraphStore(f"{subject_id}_v1", db_path=str(db_path))

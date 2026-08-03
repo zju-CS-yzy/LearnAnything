@@ -22,13 +22,15 @@ LA-035 Phase 2.2: 图片 → VLM 描述/公式识别 → 伪文本 chunk → 概
 """
 
 import hashlib
+import json
+import re
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from PIL import Image as PILImage
 
-from config.settings import KNOWLEDGE_BASE_DIR
+from config.settings import KNOWLEDGE_BASE_DIR, get_subject_images_dir, get_subject_thumbnails_dir, get_user_subject_dir, get_share_subject_dir
 from core.vlm_client import VLMClient
 
 
@@ -65,6 +67,7 @@ class ImageConceptExtractor:
     ) -> List[Dict[str, Any]]:
         """
         对 chunks 中的图片进行 VLM 描述，增强 chunk 文本内容。
+        同时基于 VLM 描述对图片进行总结性命名，重命名文件并同步更新所有路径引用。
         
         Args:
             chunks: MarkdownChunker 输出的 chunk 列表
@@ -75,6 +78,7 @@ class ImageConceptExtractor:
             增强后的 chunk 列表（新增了图片伪文本 chunks）
         """
         result = []
+        rename_map = {}  # old_relative_path -> new_relative_path
         
         for chunk in chunks:
             result.append(chunk)
@@ -98,24 +102,41 @@ class ImageConceptExtractor:
                     print(f"[ImageConceptExtractor] 图片不存在: {img_ref}")
                     continue
                 
-                # LA-035-P21: 调用智能图片分析（自动判断公式 vs 普通图片）
-                analyze_result = self._describe_image_with_context(img_path, context)
+                # LA-IMG-NAMING: 调用 VLM 获取标题和描述（JSON 格式）
+                analyze_result = self._analyze_image_with_title(img_path, context)
                 
                 if not analyze_result:
                     continue
                 
-                text, source = analyze_result  # text=LaTeX 或描述, source="vlm_formula" 或 "vlm_describe"
+                title, description, source = analyze_result
                 
-                # 创建"伪文本 chunk"
+                # LA-IMG-NAMING: 基于 VLM 生成的标题重命名图片
+                user_id = chunk.get("metadata", {}).get("user_id")
+                file_name = self._generate_filename_from_title(title, img_path)
+                rename_result = self._rename_image_file(img_path, file_name, subject, user_id)
+                if rename_result:
+                    old_rel = img_ref.get("relative_path", "")
+                    if old_rel:
+                        rename_map[old_rel] = rename_result["relative_path"]
+                    # 更新 img_ref 指向新路径（直接修改原 chunk 的引用）
+                    img_ref.update(rename_result)
+                
+                # 创建"伪文本 chunk"（使用更新后的路径）
+                kb_path = rename_result["full_path"] if rename_result else img_path
                 pseudo_chunk = self._create_pseudo_chunk(
                     parent_chunk=chunk,
                     img_ref=img_ref,
-                    text=text,
+                    text=description,  # 使用完整描述作为 chunk 文本
                     source=source,
                     img_idx=img_idx,
-                    kb_path=img_path,
+                    kb_path=kb_path,
                 )
                 result.append(pseudo_chunk)
+        
+        # 统一更新所有 chunk 中的图片路径引用
+        if rename_map:
+            self._update_all_media_refs(result, rename_map)
+            print(f"[ImageConceptExtractor] 已重命名 {len(rename_map)} 张图片")
         
         return result
     
@@ -188,6 +209,233 @@ class ImageConceptExtractor:
             print(f"[ImageConceptExtractor] VLM 调用失败: {e}")
             return None
     
+    def _analyze_image_with_title(
+        self,
+        img_path: Path,
+        context: str,
+        ) -> Optional[Tuple[str, str, str]]:
+        """
+        LA-IMG-NAMING: 调用 VLM 获取图片标题和描述（JSON 格式）。
+    
+        增强鲁棒性：
+        - max_tokens=8192 防止截断
+        - 清理控制字符后再解析 JSON
+        - 检测并修复截断的 JSON
+        - 回退时清理 markdown 标记
+    
+        Returns:
+            (title, description, source) 三元组，失败返回 None
+        """
+        print(f"[ImageConceptExtractor] 分析图片（含标题生成）: {img_path.name}")
+        start = time.time()
+    
+        # Step 1: 检测是否为公式图片
+        is_formula = self._is_formula_image(img_path)
+    
+        if is_formula:
+            latex = self._recognize_formula(img_path)
+            if latex:
+                title = f"数学公式-{hashlib.md5(latex.encode()).hexdigest()[:6]}"
+                return (title, latex, "vlm_formula")
+    
+        # Step 2: 普通图片 — 调用 VLM 返回 JSON
+        try:
+            import base64
+            with open(img_path, "rb") as f:
+                b64 = base64.b64encode(f.read()).decode("utf-8")
+        
+            system_prompt = (
+                "你是一位专业的文档图片分析助手。请仔细分析图片内容，"
+                "然后用 JSON 格式返回结果。\n\n"
+                "要求：\n"
+                "1. title: 用 3-5 个中文词概括图片核心内容，作为标题\n"
+                "2. description: 对图片进行详细描述（200-500字）\n"
+                "3. title 必须简洁、概括性强，不含 markdown 格式\n"
+                "4. 只输出 JSON，不要有其他文字\n"
+                "5. JSON 字符串中的换行符必须使用 \\n 转义\n\n"
+                "JSON 格式：\n"
+                '{\"title\": "概括性标题\", "description\": "详细描述...\"}'
+            )
+        
+            user_text = "请分析这张图片。"
+            if context:
+                user_text += f"\n\n上下文信息：\n{context}"
+        
+            messages = [
+                {"role": "system", "content": system_prompt},
+                {
+                    "role": "user",
+                    "content": [
+                    {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}},
+                    {"type": "text", "text": user_text},
+                    ],
+                },
+            ]
+        
+            # LA-FIX: 增加 max_tokens 防止截断
+            result = self.vlm._call_api(messages, max_tokens=8192)
+            elapsed = time.time() - start
+        
+            if not result:
+                print(f"[ImageConceptExtractor] VLM 返回空结果")
+                return None
+        
+            # 尝试解析 JSON（多层防护）
+            parsed = self._safe_parse_json(result)
+            if parsed:
+                title = parsed.get("title", "").strip()
+                description = parsed.get("description", "").strip()
+            
+                # 清理 title
+                title = re.sub(r"[^\w\s\u4e00-\u9fff\-]", "", title).strip("-")
+            
+                if title and description:
+                    print(f"[ImageConceptExtractor] 标题+描述生成完成 ({elapsed:.1f}s): title={title[:40]}")
+                    return (title, description, "vlm_describe")
+        
+            # 回退：清理后把返回内容当描述
+            print(f"[ImageConceptExtractor] JSON 解析失败，回退到纯描述")
+            return self._fallback_title_from_text(result)
+        
+        except Exception as e:
+            print(f"[ImageConceptExtractor] VLM 调用失败: {e}")
+            return None
+    
+    def _safe_parse_json(self, text: str) -> Optional[Dict[str, Any]]:
+        """
+        安全解析可能包含控制字符或被截断的 JSON。
+    
+        防护策略：
+        1. 提取 JSON 块（处理 markdown 代码块包裹）
+        2. 修复截断（补全缺少的 }）
+        3. 清理非法控制字符（原始换行符 → 转义 \\n）
+        4. 修复未转义的双引号
+        """
+        import json
+    
+        # 1. 提取 JSON 块
+        # 处理被 markdown 代码块包裹的情况
+        code_block_match = re.search(r"```(?:json)?\s*\n(.*?)```", text, re.DOTALL)
+        if code_block_match:
+            json_str = code_block_match.group(1).strip()
+        else:
+            # 直接找 { ... }
+            brace_match = re.search(r"\{.*\}", text, re.DOTALL)
+            if not brace_match:
+                return None
+            json_str = brace_match.group().strip()
+    
+        # 2. 修复截断：如果缺少闭合的 }，尝试补全
+        open_count = json_str.count("{")
+        close_count = json_str.count("}")
+        if open_count > close_count:
+            json_str += "}" * (open_count - close_count)
+    
+        # 3. 清理非法控制字符
+        # 将原始换行符（JSON 字符串值内部的）替换为转义的 \\n
+        cleaned = []
+        in_string = False
+        escape_next = False
+        for char in json_str:
+            if escape_next:
+                cleaned.append(char)
+                escape_next = False
+                continue
+            if char == "\\":
+                cleaned.append(char)
+                escape_next = True
+                continue
+            if char == '"' and not escape_next:
+                in_string = not in_string
+                cleaned.append(char)
+                continue
+            if in_string and char == "\n":
+                # 字符串值内部的原始换行符 → 转义
+                cleaned.append("\\n")
+            elif in_string and ord(char) < 32 and char not in "\t\r":
+                # 其他控制字符 → 空格
+                cleaned.append(" ")
+            else:
+                cleaned.append(char)
+    
+        json_str_clean = "".join(cleaned)
+    
+        # 4. 尝试解析
+        try:
+            return json.loads(json_str_clean)
+        except json.JSONDecodeError:
+            # 5. 尝试修复未转义的双引号（字符串值内部）
+            try:
+                fixed = self._fix_unescaped_quotes(json_str_clean)
+                return json.loads(fixed)
+            except:
+                return None
+    
+    def _fix_unescaped_quotes(self, s: str) -> str:
+        """
+        修复 JSON 字符串值内部未转义的双引号。
+        简单策略：假设 key 的引号是正确转义的，只修复 value 中的。
+        """
+        result = []
+        in_string = False
+        escape_next = False
+        for i, char in enumerate(s):
+            if escape_next:
+                result.append(char)
+                escape_next = False
+                continue
+            if char == "\\":
+                result.append(char)
+                escape_next = True
+                continue
+            if char == '"' and not escape_next:
+                if in_string:
+                    # 检查下一个非空白字符
+                    j = i + 1
+                    while j < len(s) and s[j] in " \t\n":
+                        j += 1
+                    if j < len(s) and s[j] in ",}]:":
+                        # 字符串正常结束
+                        in_string = False
+                        result.append(char)
+                    else:
+                        # 可能是未转义的引号
+                        result.append('\\"')
+                else:
+                    in_string = True
+                    result.append(char)
+            else:
+                result.append(char)
+        return "".join(result)
+    
+    def _fallback_title_from_text(self, text: str) -> Tuple[str, str, str]:
+        """
+        从 VLM 原始输出中提取标题和描述（回退策略）。
+        清理 markdown 标记，生成合理的文件名。
+        """
+        import re as _re
+    
+        # 1. 清理 markdown 代码块标记
+        cleaned = _re.sub(r"```\w*\s*\n?|```", "", text).strip()
+        # 2. 清理其他 markdown
+        cleaned = cleaned.replace("**", "").replace("#", "").strip()
+    
+        # 3. 尝试从中提取 title 和 description
+        title_match = _re.search(r'"title"\s*:\s*"([^"]*)"', cleaned)
+        desc_match = _re.search(r'"description"\s*:\s*"([^"]*)"', cleaned)
+    
+        if title_match:
+            title = title_match.group(1).strip()
+            title = _re.sub(r"[^\w\s\u4e00-\u9fff\-]", "", title).strip("-")
+        else:
+            # 从文本前部取词
+            words = _re.sub(r"[^\w\s\u4e00-\u9fff]", " ", cleaned[:50]).split()
+            title = "-".join(words[:5]) if words else "图片"
+    
+        description = desc_match.group(1) if desc_match else cleaned
+    
+        return (title, description, "vlm_describe")
+
     def _is_formula_image(self, img_path: Path) -> bool:
         """
         判断图片是否为公式图片（基于视觉特征）。
@@ -271,11 +519,14 @@ class ImageConceptExtractor:
         """
         解析图片引用为绝对路径。
         
+        LA-051-DIR: 搜索顺序更新为新目录结构。
+        
         搜索顺序:
             1. base_dir / path（MinerU 输出目录下的相对路径）
             2. 绝对路径
-            3. KNOWLEDGE_BASE_DIR / path
-            4. KNOWLEDGE_BASE_DIR / {subject}_v1_images / path.name
+            3. KNOWLEDGE_BASE_DIR / path（相对路径）
+            4. get_subject_images_dir(subject) / path.name（新结构）
+            5. KNOWLEDGE_BASE_DIR / {subject}_v1_images / path.name（旧结构兼容）
         """
         path_candidates = [
             img_ref.get("path"),
@@ -304,14 +555,140 @@ class ImageConceptExtractor:
             if kb_path.exists():
                 return kb_path
             
-            # 4. 学科图片目录
-            img_dir = KNOWLEDGE_BASE_DIR / f"{subject}_v1_images"
+            # 4. LA-051-DIR: 新结构 - 学科图片目录
+            img_dir = get_subject_images_dir(subject)
             img_path = img_dir / path.name if path.name else img_dir / path_str
             if img_path.exists():
                 return img_path
+            
+            # 5. 旧结构兼容
+            legacy_img_dir = KNOWLEDGE_BASE_DIR / f"{subject}_v1_images"
+            legacy_path = legacy_img_dir / path.name if path.name else legacy_img_dir / path_str
+            if legacy_path.exists():
+                return legacy_path
         
         return None
     
+    # ========== LA-IMG-NAMING: 图片命名与路径同步 ==========
+
+    def _generate_filename_from_title(self, title: str, img_path: Path) -> str:
+        """
+        LA-IMG-NAMING: 基于 VLM 生成的标题生成合法文件名。
+        
+        1. 清理标题中的非法字符和 markdown 格式
+        2. 空格转为连字符
+        3. 限制长度
+        4. 加上原文件 hash 后缀避免冲突
+        """
+        import re
+        
+        # 1. 清理非法字符和 markdown
+        name = re.sub(r"[#*\"'<>|:/?\\]", "", title)
+        name = re.sub(r"\s+", "-", name).strip("-")
+        
+        # 2. 限制长度
+        if len(name) > 40:
+            name = name[:40].rsplit("-", 1)[0] if "-" in name[:40] else name[:40]
+        
+        # 3. 如果为空，回退到 hash
+        if not name:
+            name = hashlib.md5(title.encode()).hexdigest()[:8]
+        
+        # 4. 加上 hash 后缀避免冲突
+        orig_hash = img_path.stem.split("_")[-1] if "_" in img_path.stem else hashlib.md5(str(img_path).encode()).hexdigest()[:4]
+        
+        return f"{name}-{orig_hash}.png"
+
+    def _rename_image_file(
+        self,
+        old_path: Path,
+        new_name: str,
+        subject: str,
+        user_id: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        重命名图片文件及其缩略图。
+        
+        Returns:
+            新的路径信息字典，失败返回 None
+        """
+        if not old_path.exists():
+            return None
+        
+        # 确定目录
+        img_dir = get_subject_images_dir(subject, user_id)
+        thumb_dir = get_subject_thumbnails_dir(subject, user_id)
+        
+        new_img_path = img_dir / new_name
+        
+        # 避免冲突：如果目标已存在，添加序号
+        counter = 1
+        stem = Path(new_name).stem
+        suffix = Path(new_name).suffix
+        while new_img_path.exists():
+            new_img_path = img_dir / f"{stem}_{counter}{suffix}"
+            counter += 1
+        
+        try:
+            # 重命名图片
+            old_path.rename(new_img_path)
+            print(f"[ImageConceptExtractor] 图片重命名: {old_path.name} -> {new_img_path.name}")
+            
+            # 重命名缩略图
+            old_thumb_path = thumb_dir / old_path.name
+            new_thumb_path = thumb_dir / new_img_path.name
+            if old_thumb_path.exists():
+                old_thumb_path.rename(new_thumb_path)
+            
+            return {
+                "full_path": str(new_img_path),  # 转为字符串，避免 JSON 序列化失败
+                "relative_path": str(new_img_path.relative_to(KNOWLEDGE_BASE_DIR)).replace("\\", "/"),
+                "thumbnail_path": str(new_thumb_path.relative_to(KNOWLEDGE_BASE_DIR)).replace("\\", "/") if old_thumb_path.exists() else "",
+                "width": None,
+                "height": None,
+            }
+        except Exception as e:
+            print(f"[ImageConceptExtractor] 图片重命名失败: {e}")
+            return None
+
+    def _update_all_media_refs(self, chunks: List[Dict[str, Any]], rename_map: Dict[str, str]):
+        """
+        统一更新所有 chunk 中的图片路径引用。
+        处理 image_refs 和 media_refs 两种路径存储位置。
+        """
+        for chunk in chunks:
+            # 更新 image_refs
+            for ref in chunk.get("metadata", {}).get("image_refs", []):
+                old_rel = ref.get("relative_path", "")
+                if old_rel in rename_map:
+                    new_rel = rename_map[old_rel]
+                    ref["relative_path"] = new_rel
+                    if "path" in ref:
+                        old_name = Path(old_rel).name
+                        new_name = Path(new_rel).name
+                        ref["path"] = str(ref["path"]).replace(old_name, new_name)
+                    if "thumbnail_path" in ref:
+                        old_name = Path(old_rel).name
+                        new_name = Path(new_rel).name
+                        ref["thumbnail_path"] = str(ref["thumbnail_path"]).replace(old_name, new_name)
+            
+            # 更新 media_refs
+            for ref in chunk.get("metadata", {}).get("media_refs", []):
+                if ref.get("type") != "image":
+                    continue
+                old_rel = ref.get("relative_path", "")
+                if old_rel in rename_map:
+                    new_rel = rename_map[old_rel]
+                    ref["relative_path"] = new_rel
+                    if "path" in ref:
+                        old_name = Path(old_rel).name
+                        new_name = Path(new_rel).name
+                        ref["path"] = str(ref["path"]).replace(old_name, new_name)
+                    if "thumbnail_path" in ref:
+                        old_name = Path(old_rel).name
+                        new_name = Path(new_rel).name
+                        ref["thumbnail_path"] = str(ref["thumbnail_path"]).replace(old_name, new_name)
+
     def _create_pseudo_chunk(
         self,
         parent_chunk: Dict[str, Any],
@@ -348,6 +725,11 @@ class ImageConceptExtractor:
         # LA-035: 使用 KB 中的实际路径，保留原始信息
         # LA-054-FIX: 清除可能包含错误原始文件名的 relative_path
         media_ref = dict(img_ref)  # 复制，避免修改原始
+        # LA-051-DIR: 从 parent_chunk metadata 提取 subject
+        subject = parent_chunk.get("metadata", {}).get("subject", "generic")
+        # LA-FIX: kb_path 可能是 str（来自 rename_result），转为 Path
+        if kb_path:
+            kb_path = Path(kb_path)
         if kb_path and kb_path.exists():
             # LA-054-FIX: 设置正确的相对路径（相对于 KNOWLEDGE_BASE_DIR）
             try:
@@ -356,9 +738,20 @@ class ImageConceptExtractor:
                 rel_path = str(kb_path).replace('\\', '/')
             media_ref["path"] = str(kb_path)
             media_ref["relative_path"] = rel_path  # 覆盖旧的 MinerU 文件名
-            # LA-054-FIX: 正确推断缩略图路径（处理 Windows 反斜杠）
-            thumb_path = str(kb_path).replace('\\', '/').replace('_v1_images/', '_v1_thumbnails/')
-            media_ref["thumbnail_path"] = thumb_path.replace('/', '\\') if '\\' in str(kb_path) else thumb_path
+            # LA-051-DIR: 正确推断缩略图路径（新结构）
+            thumb_dir = get_subject_thumbnails_dir(subject)
+            thumb_path = thumb_dir / kb_path.name
+            if thumb_path.exists():
+                try:
+                    thumb_rel = str(thumb_path.relative_to(KNOWLEDGE_BASE_DIR)).replace('\\', '/')
+                except ValueError:
+                    thumb_rel = str(thumb_path).replace('\\', '/')
+                media_ref["thumbnail_path"] = thumb_rel
+            else:
+                # 旧结构兼容
+                thumb_path_legacy = KNOWLEDGE_BASE_DIR / f"{subject}_v1_thumbnails" / kb_path.name
+                if thumb_path_legacy.exists():
+                    media_ref["thumbnail_path"] = str(thumb_path_legacy.relative_to(KNOWLEDGE_BASE_DIR)).replace('\\', '/')
         
         # LA-035-P21: 构建 media_refs
         media_refs = [media_ref]
