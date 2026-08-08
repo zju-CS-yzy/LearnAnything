@@ -14,11 +14,150 @@ LLM Client (LA-DEPLOY-FEAT)
 
 import os
 import time
+import threading
 from typing import List, Dict, Any, Optional
 
 import requests
 
 from config.settings import get_llm_config, get_llm_fallback_config
+
+# LLM-ROBUST-11: Token 用量追踪
+from core.token_usage_tracker import TokenUsageTracker, log_token_usage
+
+# LLM-ROBUST-12: 慢请求监控
+class SlowRequestMonitor:
+    """
+    慢请求监控器。
+    
+    记录每次 LLM 调用的耗时，标记超过阈值的慢请求，
+    帮助定位性能瓶颈（如特定模型、特定请求类型）。
+    """
+    
+    # 慢请求阈值（毫秒）
+    SLOW_THRESHOLD_MS = 5000  # 5 秒
+    
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._slow_requests: List[Dict[str, Any]] = []
+        self._max_records = 100  # 保留最近 100 条慢请求
+    
+    def record(self, model: str, request_type: str, latency_ms: int, 
+               prompt_tokens: int = 0, completion_tokens: int = 0,
+               provider: str = "", error: Optional[str] = None):
+        """
+        记录一次请求耗时。
+        
+        Args:
+            model: 模型名称
+            request_type: 请求类型
+            latency_ms: 耗时（毫秒）
+            prompt_tokens: 输入 token 数
+            completion_tokens: 输出 token 数
+            provider: 提供商
+            error: 错误信息（如果有）
+        """
+        is_slow = latency_ms >= self.SLOW_THRESHOLD_MS
+        
+        record = {
+            "timestamp": time.time(),
+            "model": model,
+            "provider": provider,
+            "request_type": request_type,
+            "latency_ms": latency_ms,
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "is_slow": is_slow,
+            "error": error,
+        }
+        
+        with self._lock:
+            self._slow_requests.append(record)
+            # 只保留最近的记录
+            if len(self._slow_requests) > self._max_records:
+                self._slow_requests = self._slow_requests[-self._max_records:]
+        
+        # 如果是慢请求，打印告警
+        if is_slow:
+            token_info = f", {prompt_tokens}+{completion_tokens} tokens" if prompt_tokens else ""
+            print(f"[SlowRequest] ⚠️ 慢请求 {latency_ms}ms ({model}@{provider}){token_info}")
+    
+    def get_slow_requests(self, limit: int = 20) -> List[Dict[str, Any]]:
+        """获取最近的慢请求列表"""
+        with self._lock:
+            slow = [r for r in self._slow_requests if r["is_slow"]]
+            return slow[-limit:]
+    
+    def get_stats(self) -> Dict[str, Any]:
+        """获取耗时统计"""
+        with self._lock:
+            if not self._slow_requests:
+                return {
+                    "total": 0, "slow_count": 0,
+                    "slow_ratio": 0.0, "avg_latency_ms": 0,
+                    "max_latency_ms": 0, "threshold_ms": self.SLOW_THRESHOLD_MS,
+                }
+            
+            latencies = [r["latency_ms"] for r in self._slow_requests]
+            slow_count = sum(1 for r in self._slow_requests if r["is_slow"])
+            
+            return {
+                "total": len(self._slow_requests),
+                "slow_count": slow_count,
+                "slow_ratio": round(slow_count / len(self._slow_requests), 4),
+                "avg_latency_ms": round(sum(latencies) / len(latencies), 2),
+                "max_latency_ms": max(latencies),
+                "threshold_ms": self.SLOW_THRESHOLD_MS,
+            }
+    
+    def get_model_breakdown(self) -> List[Dict[str, Any]]:
+        """按模型分组的耗时统计"""
+        with self._lock:
+            from collections import defaultdict
+            model_stats = defaultdict(lambda: {"count": 0, "total_latency": 0, "slow_count": 0})
+            
+            for r in self._slow_requests:
+                m = r["model"] or "unknown"
+                model_stats[m]["count"] += 1
+                model_stats[m]["total_latency"] += r["latency_ms"]
+                if r["is_slow"]:
+                    model_stats[m]["slow_count"] += 1
+            
+            result = []
+            for model, s in sorted(model_stats.items(), key=lambda x: x[1]["total_latency"], reverse=True):
+                result.append({
+                    "model": model,
+                    "count": s["count"],
+                    "avg_latency_ms": round(s["total_latency"] / s["count"], 2),
+                    "slow_count": s["slow_count"],
+                })
+            return result
+
+
+# 全局慢请求监控器
+_slow_request_monitor = SlowRequestMonitor()
+
+
+def get_slow_request_monitor() -> SlowRequestMonitor:
+    """获取全局慢请求监控器"""
+    return _slow_request_monitor
+
+
+# ========== 性能追踪装饰器 ==========
+def _track_latency(func):
+    """记录函数执行耗时"""
+    import functools
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        start = time.time()
+        try:
+            result = func(*args, **kwargs)
+            return result
+        finally:
+            latency_ms = int((time.time() - start) * 1000)
+            # 将 latency 存入实例，供后续记录用量使用
+            if args and hasattr(args[0], '_last_latency_ms'):
+                args[0]._last_latency_ms = latency_ms
+    return wrapper
 
 
 # ========== LLM-ROBUST: Key 池管理 ==========
@@ -134,6 +273,9 @@ class LLMClient:
         self.timeout = timeout
         self.max_retries = max_retries
         self._available = None
+        
+        # LLM-ROBUST-11: 耗时追踪
+        self._last_latency_ms = 0
 
         # LLM-ROBUST: Key 池 + 连接池
         self._key_pool = _KeyPool(self.api_key)
@@ -329,6 +471,12 @@ class LLMClient:
         headers = self._get_headers()
 
         url = f"{self.base_url}/chat/completions"
+        
+        # LLM-ROBUST-11: 记录调用开始时间
+        call_start_time = time.time()
+        
+        # 尝试提取 provider 信息（从 base_url）
+        provider = self._detect_provider(self.base_url)
 
         last_exception = None
         actual_timeout = timeout or self.timeout
@@ -367,6 +515,21 @@ class LLMClient:
                     print(f"[LLMClient] 完整响应预览: {str(data)[:500]}")
                     raise RuntimeError("LLM response content is empty")
 
+                # LLM-ROBUST-11: 记录 Token 用量
+                latency_ms = int((time.time() - call_start_time) * 1000)
+                self._log_token_usage(data, provider, latency_ms, "chat")
+                
+                # LLM-ROBUST-12: 记录慢请求监控
+                usage = data.get("usage", {})
+                get_slow_request_monitor().record(
+                    model=self.model,
+                    request_type="chat",
+                    latency_ms=latency_ms,
+                    prompt_tokens=usage.get("prompt_tokens", 0),
+                    completion_tokens=usage.get("completion_tokens", 0),
+                    provider=provider,
+                )
+
                 return content.strip()
 
             except requests.exceptions.HTTPError as e:                # LLM-ROBUST: enhanced error logging + key rotation                status = e.response.status_code                try:                    resp_body = e.response.text[:500]                except:                    resp_body = "(unable to read body)"                print(f"[LLMClient] HTTP {status} error: {resp_body}")                # 401/429: key issue, rotate key                if self._is_key_error(status):                    if self._try_next_key():                        headers = self._get_headers()                        continue                    else:                        print(f"[LLMClient] All keys failed")                        last_exception = e                        break                # 429/5xx: service issue, exponential backoff                if status in (429, 502, 503, 504) and attempt < self.max_retries:                    wait = 2 ** attempt                    time.sleep(wait)                    continue                last_exception = e                break            except (requests.exceptions.SSLError, requests.exceptions.ConnectionError) as e:
@@ -389,6 +552,60 @@ class LLMClient:
             f"LLM request failed after {self.max_retries + 1} attempts. "
             f"Last error: {type(last_exception).__name__}: {last_exception}"
         )
+
+    # ========== LLM-ROBUST-11: Token 用量追踪辅助方法 ==========
+    
+    def _detect_provider(self, base_url: str) -> str:
+        """从 base_url 检测提供商名称"""
+        url_lower = base_url.lower()
+        if "deepseek" in url_lower:
+            return "deepseek"
+        elif "moonshot" in url_lower or "kimi" in url_lower:
+            return "kimi"
+        elif "openai" in url_lower:
+            return "openai"
+        elif "siliconflow" in url_lower:
+            return "siliconflow"
+        elif "bigmodel" in url_lower or "zhipu" in url_lower:
+            return "zhipu"
+        return "unknown"
+    
+    def _log_token_usage(self, response_data: Dict, provider: str, latency_ms: int, request_type: str, status: str = "success"):
+        """记录 Token 用量到追踪器"""
+        try:
+            usage = response_data.get("usage", {})
+            prompt_tokens = usage.get("prompt_tokens", 0)
+            completion_tokens = usage.get("completion_tokens", 0)
+            
+            # 如果 API 没有返回 usage，尝试估算
+            if prompt_tokens == 0 and completion_tokens == 0:
+                # 从消息内容粗略估算
+                choices = response_data.get("choices", [])
+                if choices:
+                    msg = choices[0].get("message", {})
+                    content = msg.get("content", "") or msg.get("reasoning_content", "")
+                    # 粗略估算：平均 1.5 tokens/中文字符，0.3 tokens/英文 char
+                    completion_tokens = max(len(content), 0)
+                # prompt 从请求消息估算（无法精确知道，设为 0）
+                prompt_tokens = 0
+            
+            _, cost, warning = log_token_usage(
+                model=self.model,
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                provider=provider,
+                feature="llm",
+                request_type=request_type,
+                status=status,
+                latency_ms=latency_ms,
+            )
+            
+            if warning:
+                print(f"[LLMClient] {warning}")
+                
+        except Exception as e:
+            # 用量追踪失败不应影响主流程
+            print(f"[LLMClient] Token 用量记录失败（非关键）: {e}")
 
     def chat_stream(
         self,
@@ -430,6 +647,11 @@ class LLMClient:
         }
 
         url = f"{self.base_url}/chat/completions"
+        
+        # LLM-ROBUST-11: 记录调用开始时间
+        call_start_time = time.time()
+        provider = self._detect_provider(self.base_url)
+        accumulated_content = ""  # 用于流结束后估算 token
 
         try:
             response = self._session.post(
@@ -455,10 +677,48 @@ class LLMClient:
                         delta = chunk.get("choices", [{}])[0].get("delta", {})
                         content = delta.get("content", "")
                         if content:
+                            accumulated_content += content
                             yield content
                     except Exception:
                         continue
+            
+            # LLM-ROBUST-11: 流结束后记录用量（估算）
+            # LLM-ROBUST-12: 记录慢请求监控
+            latency_ms = int((time.time() - call_start_time) * 1000)
+            try:
+                # 流式 API 通常不返回 usage，需要估算
+                completion_tokens = max(len(accumulated_content), 0)
+                log_token_usage(
+                    model=self.model,
+                    prompt_tokens=0,  # 流式无法准确知道 prompt tokens
+                    completion_tokens=completion_tokens,
+                    provider=provider,
+                    feature="llm",
+                    request_type="stream",
+                    status="success",
+                    latency_ms=latency_ms,
+                )
+                # LLM-ROBUST-12: 记录慢请求
+                get_slow_request_monitor().record(
+                    model=self.model,
+                    request_type="stream",
+                    latency_ms=latency_ms,
+                    completion_tokens=completion_tokens,
+                    provider=provider,
+                )
+            except Exception as e:
+                print(f"[LLMClient] Stream token 用量记录失败（非关键）: {e}")
+                
         except requests.exceptions.HTTPError as e:
+            # LLM-ROBUST-12: 记录失败的慢请求
+            latency_ms = int((time.time() - call_start_time) * 1000)
+            get_slow_request_monitor().record(
+                model=self.model,
+                request_type="stream",
+                latency_ms=latency_ms,
+                provider=provider,
+                error=str(e),
+            )
             raise RuntimeError(f"LLM stream request failed: {e}")
         except Exception as e:
             raise RuntimeError(f"LLM stream error: {e}")

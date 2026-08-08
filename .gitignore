@@ -15,6 +15,7 @@
 
 # ---- 密钥 & 敏感文件 ----
 API.txt                         # API 密钥文档
+/config/api_config.ini          # 真实 API 密钥配置（本地保留，不上传）
 *.key
 *.pem
 .env

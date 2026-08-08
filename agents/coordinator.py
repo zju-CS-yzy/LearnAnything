@@ -10,6 +10,7 @@ import re
 from typing import Dict, Any, List, Optional
 
 from core.intent_router import IntentRouter
+from core.intent_classifier import IntentClassifier, IntentResult, AgentTask
 from core.monitoring import get_monitor
 from core.graph_store import GraphStore
 from core.graph_education import (
@@ -43,6 +44,18 @@ class Coordinator:
         self.user_theta = user_theta
 
         self._intent_router = IntentRouter()
+        # LA-UI-001: 新增 LLM 意图识别器，用于无@前缀时的智能Agent选择和多Agent任务拆分
+        self._intent_classifier = IntentClassifier()
+        # Agent 名称映射：IntentClassifier 输出名称 -> Coordinator 内部名称
+        self._agent_name_map = {
+            'tutor': 'concept',
+            'quiz': 'quiz',
+            'coach': 'evaluate',
+            'job': 'job',
+        }
+        # 反向映射：Coordinator 内部名称 -> IntentClassifier 输出名称
+        self._agent_name_reverse = {v: k for k, v in self._agent_name_map.items()}
+
         self._agents: Dict[str, BaseAgent] = {}
 
         # P0-INT-6: create message bus
@@ -70,12 +83,16 @@ class Coordinator:
         # 阶段 1: 延迟初始化 DialogContextManager
         self._dialog_manager = None
 
-    def handle(self, query: str, filters: Optional[Dict[str, Any]] = None, user_id: Optional[str] = None, session_id: Optional[str] = None, user_theta: Optional[float] = None) -> Dict[str, Any]:
+    def handle(self, query: str, filters: Optional[Dict[str, Any]] = None, user_id: Optional[str] = None, session_id: Optional[str] = None, user_theta: Optional[float] = None, agent_target: Optional[str] = None) -> Dict[str, Any]:
         """
         处理用户查询的统一入口。
         阶段 1: 新增对话上下文管理（会话持久化、指代解析、历史注入）。
         LA-044-B: 话题提取、切换检测、追踪。
         LA-044-#2: 支持传入 user_theta 进行个性化讲解。
+        LA-UI-001: 集成 IntentClassifier，支持 @命令解析、LLM智能识别、多Agent任务拆分。
+
+        Args:
+            agent_target: 前端解析的显式Agent目标（可选），如 "tutor" | "quiz" | "coach" | "job"
 
         Returns:
             {
@@ -85,7 +102,9 @@ class Coordinator:
                 "agent": str,
                 "result": dict,
                 "monitoring": {...},
-                "session_id": str,  # 阶段 1 新增
+                "session_id": str,
+                "multi_agent": bool,      # LA-UI-001: 是否为多Agent执行
+                "execution_mode": str,    # LA-UI-001: sequential | parallel | mixed
             }
         """
         start_time = time.time()
@@ -96,7 +115,7 @@ class Coordinator:
         if self._dialog_manager is None:
             self._dialog_manager = DialogContextManager()
         actual_user_id = user_id or "default"
-        
+
         # LA-044-B: 详细的函数链打印
         print(f"\n{'='*60}")
         print(f"[Coordinator] 🔗 函数链: Coordinator.handle() ENTER")
@@ -107,18 +126,19 @@ class Coordinator:
         print(f"[Coordinator]    - user_theta: {user_theta}")
         print(f"[Coordinator]    - collection_name: {self.collection_name}")
         print(f"[Coordinator]    - filters: {filters}")
+        print(f"[Coordinator]    - agent_target: {agent_target}")
         print(f"{'='*60}")
-        
+
         sid, session_info = self._dialog_manager.get_or_create_session(
             user_id=actual_user_id,
             subject_id=self.collection_name,
             session_id=session_id
         )
-        
+
         # 使用增强版 build_context（含全局画像 + 学科隔离）
         dialog_context = self._dialog_manager.build_context(sid)
         turn_number = dialog_context.turn_number + 1 if dialog_context else 1
-        
+
         # LA-044-B: 打印当前会话状态
         print(f"\n[Coordinator] 📊 当前会话状态:")
         print(f"[Coordinator]    - session_id: {sid}")
@@ -127,22 +147,61 @@ class Coordinator:
         print(f"[Coordinator]    - history_len: {len(getattr(dialog_context, 'history', []))}")
         print(f"[Coordinator]    - subject: {getattr(dialog_context, 'subject', None)}")
 
-        # 意图路由
-        resolved_intent, original_intent = self._intent_router.route(query, self.enabled_intents)
-        confidence = 1.0 if self._intent_router.last_match_detail.get("matched_keyword") else 0.0
-        is_fallback = resolved_intent != original_intent
-
-        intent_info = {
-            "original": original_intent,
-            "resolved": resolved_intent,
-            "confidence": confidence,
-            "fallback": is_fallback,
+        # ==================== LA-UI-001: 意图识别（IntentClassifier）====================
+        # 构建上下文信息供 IntentClassifier 使用
+        classifier_context = {
+            "current_topic": getattr(dialog_context, 'current_topic', None),
+            "last_agent": getattr(dialog_context, 'last_agent', None),
+            "turn_count": turn_number,
+            "selected_concept": getattr(dialog_context, 'selected_concept', None),
         }
-        
+
+        # 根据是否有显式 agent_target 决定意图识别路径
+        if agent_target:
+            # 用户通过前端标签栏或@命令显式指定了Agent
+            print(f"[Coordinator] LA-UI-001: 用户显式指定 agent_target={agent_target}")
+            intent_result = IntentResult.single_agent(
+                agent=agent_target,
+                query=query,
+                reason=f"用户显式指定了 {agent_target} Agent",
+            )
+        else:
+            # 无显式指定，使用 IntentClassifier 进行智能识别
+            print(f"[Coordinator] LA-UI-001: 调用 IntentClassifier 进行意图识别...")
+            intent_result = self._intent_classifier.classify(query, context=classifier_context)
+            print(f"[Coordinator] LA-UI-001: 识别结果 primary_intent={intent_result.primary_intent}, "
+                  f"tasks={len(intent_result.agent_tasks)}, mode={intent_result.execution_mode}")
+
+        # 将 IntentClassifier 的 agent 名称映射为 Coordinator 内部名称
+        mapped_tasks = self._map_agent_names(intent_result.agent_tasks)
+        intent_result.agent_tasks = mapped_tasks
+
+        # 构建 intent_info（兼容旧格式）
+        is_multi_agent = len(intent_result.agent_tasks) > 1
+        primary_internal_agent = self._agent_name_map.get(
+            intent_result.primary_intent, intent_result.primary_intent
+        )
+        intent_info = {
+            "original": primary_internal_agent,
+            "resolved": primary_internal_agent,
+            "confidence": 1.0 if agent_target else 0.8,
+            "fallback": False,
+            "primary_intent": intent_result.primary_intent,
+            "execution_mode": intent_result.execution_mode,
+            "shared_topic": intent_result.shared_topic,
+            "reasoning": intent_result.reasoning,
+            "is_multi_agent": is_multi_agent,
+            "task_count": len(intent_result.agent_tasks),
+        }
+
         print(f"\n[Coordinator] 🎯 意图路由结果:")
-        print(f"[Coordinator]    - original: {original_intent}")
-        print(f"[Coordinator]    - resolved: {resolved_intent}")
-        print(f"[Coordinator]    - is_fallback: {is_fallback}")
+        print(f"[Coordinator]    - primary_intent: {intent_result.primary_intent}")
+        print(f"[Coordinator]    - resolved_agent: {primary_internal_agent}")
+        print(f"[Coordinator]    - is_multi_agent: {is_multi_agent}")
+        print(f"[Coordinator]    - execution_mode: {intent_result.execution_mode}")
+        print(f"[Coordinator]    - task_count: {len(intent_result.agent_tasks)}")
+        for t in intent_result.agent_tasks:
+            print(f"[Coordinator]      - {t.agent}: {t.sub_query} (priority={t.priority}, depends_on={t.depends_on})")
 
         monitor.log_stage(
             query_id=query_id,
@@ -151,17 +210,8 @@ class Coordinator:
             metrics=intent_info,
             duration_ms=0,
             input_summary=query[:100],
-            output_summary=f"resolved={resolved_intent}",
+            output_summary=f"resolved={primary_internal_agent}, tasks={len(intent_result.agent_tasks)}, mode={intent_result.execution_mode}",
         )
-
-        # Agent 分发
-        agent = self._agents.get(resolved_intent)
-        if agent is None:
-            # 未实现的 Agent，回退到 concept
-            resolved_intent = "concept"
-            intent_info["resolved"] = "concept"
-            intent_info["fallback"] = True
-            agent = self._agents["concept"]
 
         # 阶段 1: 指代解析
         resolved_query = query
@@ -176,133 +226,85 @@ class Coordinator:
             turn_number=turn_number,
             role="user",
             content=query,
-            intent=resolved_intent
+            intent=primary_internal_agent
         )
 
         # LA-044-B: 话题切换检测
         is_topic_switch, switch_target = self._dialog_manager.detect_topic_switch(query)
         if is_topic_switch:
             print(f"[Coordinator] LA-044-B: 用户意图切换话题 -> '{switch_target}'")
-            # 强制更新 current_topic 为切换目标（如果有）
             if switch_target:
                 self._dialog_manager.update_session_topic(sid, switch_target, turn_number)
-                # 重新加载 dialog_context 以使用新话题
                 dialog_context = self._dialog_manager.build_context(sid)
 
-        # P0-INT-1: 对 quiz / concept / evaluate 意图使用图谱教育模块组装上下文
-        # LA-040-P2-QUIZ-FIX: evaluate 意图也需要图谱上下文，否则 CoachAgent 出题时回退到旧方式
-        if resolved_intent in ("quiz", "concept", "evaluate"):
-            try:
-                print(f"[Coordinator] P0-INT-1: 使用图谱教育模块为 {resolved_intent} 意图组装上下文")
-                graph_store = self._get_graph_store()
-                retriever = self._get_retriever(graph_store)
-
-                # 提取主题
-                topic = self._extract_topic_from_query(resolved_query)
-                print(f"[Coordinator] 提取主题: {topic}")
-                seed_concepts = retriever.resolve([topic])
-
-                if seed_concepts:
-                    print(f"[Coordinator] 解析到 {len(seed_concepts)} 个种子概念")
-                    builder = self._get_builder(graph_store)
-                    subgraph = builder.build(seed_concepts, mode="auto", max_depth=2, max_nodes=15)
-                    print(f"[Coordinator] 构建子图: {subgraph.node_count} 节点, {subgraph.edge_count} 边")
-
-                    assembler = self._get_assembler()
-                    budget = ContextBudget(max_tokens=2000, max_nodes=15)
-                    graph_context = assembler.assemble(subgraph, budget=budget)
-                    print(f"[Coordinator] 组装上下文: {graph_context.token_count} tokens")
-
-                    # 阶段 1: 传递 context 给 Agent
-                    agent_result = agent.handle(resolved_query, context=dialog_context, filters=filters, graph_context=graph_context, user_theta=user_theta)
-                else:
-                    # LA-040-P2-QUIZ-FIX: seed_concepts 为空时，不直接回退到旧方式
-                    # 而是尝试用 HybridRetriever 检索相关文本，构建简化版 GraphContext
-                    print(f"[Coordinator] LA-040-P2-QUIZ-FIX: 无匹配概念，尝试文本检索兜底")
-                    graph_context = self._build_fallback_context(graph_store, topic, budget=ContextBudget(max_tokens=2000, max_nodes=15))
-                    if graph_context and graph_context.text:
-                        print(f"[Coordinator] LA-040-P2-QUIZ-FIX: 文本检索兜底成功，{graph_context.token_count} tokens")
-                        agent_result = agent.handle(resolved_query, context=dialog_context, filters=filters, graph_context=graph_context, user_theta=user_theta)
-                    else:
-                        print(f"[Coordinator] 文本检索兜底也失败，回退到旧方式")
-                        agent_result = agent.handle(resolved_query, context=dialog_context, filters=filters, user_theta=user_theta)
-            except Exception as e:
-                print(f"[Coordinator] P0 模块调用失败，回退到旧模式: {e}")
-                import traceback
-                traceback.print_exc()
-                agent_result = agent.handle(resolved_query, context=dialog_context, filters=filters, user_theta=user_theta)
+        # ==================== LA-UI-001: 多Agent执行调度 ====================
+        # 根据执行模式调度Agent
+        if is_multi_agent:
+            print(f"[Coordinator] LA-UI-001: 多Agent执行，模式={intent_result.execution_mode}")
+            if intent_result.execution_mode == "parallel":
+                execution_result = self._execute_parallel(
+                    intent_result, resolved_query, dialog_context, filters, user_theta, sid, turn_number
+                )
+            else:
+                # 默认串行（sequential 或 mixed 都先按串行实现）
+                execution_result = self._execute_sequential(
+                    intent_result, resolved_query, dialog_context, filters, user_theta, sid, turn_number
+                )
         else:
-            # 非 quiz/concept/evaluate 意图，原方式执行（但传递 context）
-            agent_result = agent.handle(resolved_query, context=dialog_context, filters=filters, user_theta=user_theta)
+            # 单Agent，保持原有逻辑
+            execution_result = self._execute_single(
+                intent_result.agent_tasks[0], resolved_query, dialog_context, filters, user_theta, sid, turn_number
+            )
 
         total_duration_ms = (time.time() - start_time) * 1000
 
-        # 阶段 1: 保存 Agent 回复
-        # LA-044: 将 sources 和 media 存入 metadata
-        agent_metadata = {"query_id": query_id}
-        if agent_result and isinstance(agent_result, dict):
-            if agent_result.get("metadata"):
-                meta = agent_result["metadata"]
-                if meta.get("sources"):
-                    agent_metadata["sources"] = meta["sources"]
-                if meta.get("media"):
-                    agent_metadata["media"] = meta["media"]
-        
-        self._dialog_manager.save_message(
-            session_id=sid,
-            turn_number=turn_number,
-            role="agent",
-            content=agent_result.get("text", ""),
-            agent_name=agent.agent_name,
-            intent=resolved_intent,
-            metadata=agent_metadata
-        )
+        # 阶段 1: 保存 Agent 回复（单Agent已在 _execute_single 中保存，多Agent在各自执行方法中保存）
+        agent_result = execution_result.get("result", {})
+
+        # LA-050-C: Agent 标准化输出包装
+        from agents.message_formats import wrap_agent_output
+        agent_name = execution_result.get("agent", primary_internal_agent)
+        standardized_result = wrap_agent_output(agent_name, agent_result, query)
+        print(f"[Coordinator] LA-050-C: Agent 输出已标准化 | agent={agent_name} | content_type={standardized_result['content_type']}")
 
         # LA-044-B: 从 Agent 回答中提取话题并更新会话
-        answer_text = agent_result.get("text", "")
+        answer_text = agent_result.get("text", "") if isinstance(agent_result, dict) else str(agent_result)
         concept_names = []
-        if hasattr(agent_result, 'get') and agent_result.get("metadata"):
+        if isinstance(agent_result, dict) and agent_result.get("metadata"):
             concept_names = agent_result.get("metadata", {}).get("concepts", [])
-        
-        # 如果检测到话题切换，使用切换目标作为话题
+
         if is_topic_switch and switch_target:
             extracted_topic = switch_target
             print(f"[Coordinator] LA-044-B: 使用话题切换目标: '{extracted_topic}'")
         else:
-            # 从回答中提取话题
             extracted_topic = self._dialog_manager.extract_topic(
                 answer_text=answer_text,
                 concept_names=concept_names,
                 query=query
             )
-        
+
         if extracted_topic:
             self._dialog_manager.update_session_topic(sid, extracted_topic, turn_number)
-        else:
-            # 如果没有提取到话题，保持原有 topic（如果有的话）
-            pass
 
-        # 阶段 1: 更新会话状态（turn_count, updated_at）
-        self._dialog_manager.update_session(
-            sid,
-            turn_count=turn_number,
-        )
+        # 阶段 1: 更新会话状态
+        self._dialog_manager.update_session(sid, turn_count=turn_number)
 
         # 结束监控
         final_metrics = {
-            "agent": agent.agent_name,
-            "resolved_intent": resolved_intent,
-            "original_intent": original_intent,
-            "fallback": is_fallback,
+            "agent": agent_name,
+            "resolved_intent": primary_internal_agent,
+            "original_intent": primary_internal_agent,
+            "fallback": False,
+            "multi_agent": is_multi_agent,
+            "execution_mode": intent_result.execution_mode,
         }
         monitor.end_query(query_id, final_metrics, status="completed")
 
         # P0-INT-1: 对 evaluate 意图，在 CoachAgent 返回后附加 IRT 能力估计
-        if resolved_intent == "evaluate" and "result" in locals() and agent_result:
+        if primary_internal_agent == "evaluate" and isinstance(agent_result, dict):
             try:
                 print(f"[Coordinator] P0-INT-1: 对 evaluate 结果进行 IRT 能力估计")
                 irt = self._get_irt()
-                questions = agent_result.get("questions", [])
                 details = agent_result.get("details", agent_result.get("result", {}).get("details", []))
                 if details:
                     answer_records = []
@@ -324,25 +326,20 @@ class Coordinator:
                         theta = irt.update_theta(theta, record.is_correct, a=1.0, b=0.0, c=0.25)
 
                     print(f"[Coordinator] IRT 能力估计结果: theta={theta:.2f}")
-                    if isinstance(agent_result, dict):
-                        agent_result["irt_theta"] = round(theta, 2)
+                    agent_result["irt_theta"] = round(theta, 2)
             except Exception as e:
                 print(f"[Coordinator] IRT 能力估计失败: {e}")
 
-                # LA-050-C: Agent 标准化输出包装
-        from agents.message_formats import wrap_agent_output
-        standardized_result = wrap_agent_output(agent.agent_name, agent_result, query)
-        print(f"[Coordinator] LA-050-C: Agent 输出已标准化 | agent={agent.agent_name} | content_type={standardized_result['content_type']}")
-
         # LA-044-B: 详细的函数链退出打印
-        result_text = agent_result.get("text", "")[:100] if agent_result else ""
+        result_text = answer_text[:100] if answer_text else ""
         print(f"\n{'='*60}")
         print(f"[Coordinator] 🔗 函数链: Coordinator.handle() EXIT")
         print(f"[Coordinator] 📤 输出数据链:")
         print(f"[Coordinator]    - session_id: {sid}")
-        print(f"[Coordinator]    - agent: {agent.agent_name}")
-        print(f"[Coordinator]    - intent: {resolved_intent}")
-        print(f"[Coordinator]    - answer_len: {len(agent_result.get('text', '')) if agent_result else 0}")
+        print(f"[Coordinator]    - agent: {agent_name}")
+        print(f"[Coordinator]    - intent: {primary_internal_agent}")
+        print(f"[Coordinator]    - multi_agent: {is_multi_agent}")
+        print(f"[Coordinator]    - answer_len: {len(answer_text)}")
         print(f"[Coordinator]    - answer_preview: '{result_text}...'")
         print(f"[Coordinator]    - duration_ms: {round(total_duration_ms, 2)}")
         print(f"[Coordinator]    - topic_chain: {self._dialog_manager.get_topic_chain(sid)[:5]}")
@@ -350,17 +347,287 @@ class Coordinator:
 
         return {
             "question": query,
-            "text": agent_result.get("text", ""),
+            "text": answer_text,
             "intent": intent_info,
-            "agent": agent.agent_name,
+            "agent": agent_name,
             "result": agent_result,
-            "standardized": standardized_result,  # LA-050-C: 新增标准化输出
+            "standardized": standardized_result,
             "monitoring": {
                 "query_id": query_id,
                 "total_duration_ms": round(total_duration_ms, 2),
             },
-            "session_id": sid,  # 阶段 1 新增
+            "session_id": sid,
+            "multi_agent": is_multi_agent,
+            "execution_mode": intent_result.execution_mode,
+            "agent_tasks": [
+                {
+                    "agent": t.agent,
+                    "task": t.task,
+                    "sub_query": t.sub_query,
+                    "priority": t.priority,
+                }
+                for t in intent_result.agent_tasks
+            ],
         }
+
+    # ==================== LA-UI-001: Agent名称映射 ====================
+
+    def _map_agent_names(self, tasks: List[AgentTask]) -> List[AgentTask]:
+        """
+        将 IntentClassifier 输出的 agent 名称映射为 Coordinator 内部名称。
+
+        IntentClassifier 使用: tutor | quiz | coach | job
+        Coordinator 内部使用: concept | quiz | evaluate | job
+        """
+        mapped = []
+        for task in tasks:
+            internal_name = self._agent_name_map.get(task.agent, task.agent)
+            # 创建新的 AgentTask，替换 agent 字段
+            mapped_task = AgentTask(
+                agent=internal_name,
+                task=task.task,
+                sub_query=task.sub_query,
+                priority=task.priority,
+                depends_on=[self._agent_name_map.get(d, d) for d in task.depends_on],
+                estimated_output=task.estimated_output,
+            )
+            mapped.append(mapped_task)
+        return mapped
+
+    # ==================== LA-UI-001: 单Agent执行（提取原有逻辑）====================
+
+    def _execute_single(self, task: AgentTask, resolved_query: str,
+                        dialog_context, filters, user_theta,
+                        sid: str, turn_number: int) -> Dict[str, Any]:
+        """
+        执行单Agent任务，保持原有图谱上下文组装逻辑不变。
+
+        这是 LA-UI-001 之前 handle() 方法的核心执行逻辑，
+        被提取出来供单Agent和多Agent串行执行复用。
+        """
+        agent_name = task.agent
+        agent = self._agents.get(agent_name)
+
+        # Agent 不存在时回退到 concept
+        if agent is None:
+            print(f"[Coordinator] LA-UI-001: Agent '{agent_name}' 未找到，回退到 concept")
+            agent_name = "concept"
+            agent = self._agents["concept"]
+
+        # 使用任务的 sub_query 作为实际查询（已从用户输入中提取）
+        actual_query = task.sub_query or resolved_query
+
+        # P0-INT-1: 对 quiz / concept / evaluate 意图使用图谱教育模块组装上下文
+        if agent_name in ("quiz", "concept", "evaluate"):
+            try:
+                print(f"[Coordinator] P0-INT-1: 使用图谱教育模块为 {agent_name} 意图组装上下文")
+                graph_store = self._get_graph_store()
+                retriever = self._get_retriever(graph_store)
+
+                # 提取主题
+                topic = self._extract_topic_from_query(actual_query)
+                print(f"[Coordinator] 提取主题: {topic}")
+                seed_concepts = retriever.resolve([topic])
+
+                if seed_concepts:
+                    print(f"[Coordinator] 解析到 {len(seed_concepts)} 个种子概念")
+                    builder = self._get_builder(graph_store)
+                    subgraph = builder.build(seed_concepts, mode="auto", max_depth=2, max_nodes=15)
+                    print(f"[Coordinator] 构建子图: {subgraph.node_count} 节点, {subgraph.edge_count} 边")
+
+                    assembler = self._get_assembler()
+                    budget = ContextBudget(max_tokens=2000, max_nodes=15)
+                    graph_context = assembler.assemble(subgraph, budget=budget)
+                    print(f"[Coordinator] 组装上下文: {graph_context.token_count} tokens")
+
+                    agent_result = agent.handle(actual_query, context=dialog_context, filters=filters,
+                                                graph_context=graph_context, user_theta=user_theta)
+                else:
+                    # LA-040-P2-QUIZ-FIX: seed_concepts 为空时，尝试文本检索兜底
+                    print(f"[Coordinator] LA-040-P2-QUIZ-FIX: 无匹配概念，尝试文本检索兜底")
+                    graph_context = self._build_fallback_context(graph_store, topic,
+                                                                  budget=ContextBudget(max_tokens=2000, max_nodes=15))
+                    if graph_context and graph_context.text:
+                        print(f"[Coordinator] LA-040-P2-QUIZ-FIX: 文本检索兜底成功，{graph_context.token_count} tokens")
+                        agent_result = agent.handle(actual_query, context=dialog_context, filters=filters,
+                                                    graph_context=graph_context, user_theta=user_theta)
+                    else:
+                        print(f"[Coordinator] 文本检索兜底也失败，回退到旧方式")
+                        agent_result = agent.handle(actual_query, context=dialog_context, filters=filters,
+                                                    user_theta=user_theta)
+            except Exception as e:
+                print(f"[Coordinator] P0 模块调用失败，回退到旧模式: {e}")
+                import traceback
+                traceback.print_exc()
+                agent_result = agent.handle(actual_query, context=dialog_context, filters=filters, user_theta=user_theta)
+        else:
+            # 非 quiz/concept/evaluate 意图，原方式执行
+            agent_result = agent.handle(actual_query, context=dialog_context, filters=filters, user_theta=user_theta)
+
+        # 保存 Agent 回复到对话历史
+        agent_metadata = {}
+        if isinstance(agent_result, dict) and agent_result.get("metadata"):
+            meta = agent_result["metadata"]
+            if meta.get("sources"):
+                agent_metadata["sources"] = meta["sources"]
+            if meta.get("media"):
+                agent_metadata["media"] = meta["media"]
+
+        self._dialog_manager.save_message(
+            session_id=sid,
+            turn_number=turn_number,
+            role="agent",
+            content=agent_result.get("text", "") if isinstance(agent_result, dict) else str(agent_result),
+            agent_name=agent.agent_name,
+            intent=agent_name,
+            metadata=agent_metadata if agent_metadata else None
+        )
+
+        return {
+            "agent": agent.agent_name,
+            "result": agent_result,
+        }
+
+    # ==================== LA-UI-001: 多Agent串行执行 ====================
+
+    def _execute_sequential(self, intent_result: IntentResult, resolved_query: str,
+                            dialog_context, filters, user_theta,
+                            sid: str, turn_number: int) -> Dict[str, Any]:
+        """
+        串行执行多Agent任务：按优先级依次调用Agent，中间结果传递给后续Agent。
+
+        适用场景：任务有先后依赖，如"先评测再出题"。
+        执行逻辑：
+          1. 按 priority 排序任务
+          2. 依次执行每个任务
+          3. 将前置 Agent 的结果存入 shared_results，供后续 Agent 使用
+          4. 最终返回最后一个 Agent 的结果（或聚合结果）
+        """
+        print(f"[Coordinator] LA-UI-001: 开始串行执行 {len(intent_result.agent_tasks)} 个Agent任务")
+
+        # 按优先级排序（priority 越小优先级越高）
+        sorted_tasks = sorted(intent_result.agent_tasks, key=lambda t: t.priority)
+
+        # 存储各Agent的执行结果，供后续依赖的Agent使用
+        shared_results: Dict[str, Dict[str, Any]] = {}
+        last_result: Dict[str, Any] = {}
+
+        for i, task in enumerate(sorted_tasks):
+            print(f"[Coordinator] LA-UI-001: 串行执行 Step {i+1}/{len(sorted_tasks)}: agent={task.agent}, task={task.task}")
+
+            # 如果有依赖，检查前置Agent是否已完成
+            if task.depends_on:
+                for dep in task.depends_on:
+                    if dep not in shared_results:
+                        print(f"[Coordinator] LA-UI-001: 警告 - 依赖的Agent '{dep}' 尚未执行")
+
+            # 构建传递给当前Agent的上下文（包含前置Agent结果）
+            task_context = dialog_context
+            if task.depends_on and shared_results:
+                # 将前置结果注入 sub_query 或 metadata
+                dep_summaries = []
+                for dep in task.depends_on:
+                    if dep in shared_results:
+                        dep_res = shared_results[dep]
+                        dep_text = dep_res.get("text", "") if isinstance(dep_res, dict) else str(dep_res)
+                        dep_summaries.append(f"[{dep}] 结果: {dep_text[:200]}...")
+
+                if dep_summaries:
+                    # 修改 sub_query，追加前置结果摘要
+                    enhanced_sub_query = task.sub_query + "\n\n【前置分析结果】\n" + "\n".join(dep_summaries)
+                    # 创建临时任务副本（不改变原始任务）
+                    task = AgentTask(
+                        agent=task.agent,
+                        task=task.task,
+                        sub_query=enhanced_sub_query,
+                        priority=task.priority,
+                        depends_on=task.depends_on,
+                        estimated_output=task.estimated_output,
+                    )
+                    print(f"[Coordinator] LA-UI-001: 已注入前置结果到 sub_query")
+
+            # 执行单Agent任务
+            single_result = self._execute_single(task, resolved_query, task_context,
+                                                  filters, user_theta, sid, turn_number)
+
+            # 保存结果到共享池
+            shared_results[task.agent] = single_result.get("result", {})
+            last_result = single_result
+
+            print(f"[Coordinator] LA-UI-001: Step {i+1} 完成: agent={single_result.get('agent')}")
+
+        # 串行执行返回最后一个Agent的结果
+        # TODO: 未来可扩展为返回聚合结果（所有Agent的结果列表）
+        print(f"[Coordinator] LA-UI-001: 串行执行全部完成，返回最后结果 from {last_result.get('agent')}")
+        return last_result
+
+    # ==================== LA-UI-001: 多Agent并行执行 ====================
+
+    def _execute_parallel(self, intent_result: IntentResult, resolved_query: str,
+                          dialog_context, filters, user_theta,
+                          sid: str, turn_number: int) -> Dict[str, Any]:
+        """
+        并行执行多Agent任务：同时调用多个无依赖关系的Agent。
+
+        适用场景：任务相互独立，如"讲解概念同时出题"。
+        执行逻辑：
+          1. 筛选出无依赖的任务（priority 相同的任务）
+          2. 使用线程池并发执行
+          3. 聚合所有结果
+
+        当前实现：使用 ThreadPoolExecutor 并发执行，
+        返回第一个成功结果（简化版）。完整版应返回聚合结果。
+        """
+        print(f"[Coordinator] LA-UI-001: 开始并行执行 {len(intent_result.agent_tasks)} 个Agent任务")
+
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        # 筛选无依赖的任务（当前简化：全部并行）
+        parallel_tasks = [t for t in intent_result.agent_tasks if not t.depends_on]
+        if not parallel_tasks:
+            # 所有任务都有依赖，回退到串行
+            print(f"[Coordinator] LA-UI-001: 所有任务都有依赖，回退到串行执行")
+            return self._execute_sequential(intent_result, resolved_query, dialog_context,
+                                            filters, user_theta, sid, turn_number)
+
+        results: Dict[str, Dict[str, Any]] = {}
+
+        # 限制最大并行数（避免同时调用过多LLM）
+        max_workers = min(len(parallel_tasks), 2)
+        print(f"[Coordinator] LA-UI-001: 线程池大小={max_workers}")
+
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            # 提交所有任务
+            future_to_task = {}
+            for task in parallel_tasks:
+                future = executor.submit(
+                    self._execute_single, task, resolved_query, dialog_context,
+                    filters, user_theta, sid, turn_number
+                )
+                future_to_task[future] = task
+
+            # 收集结果
+            for future in as_completed(future_to_task):
+                task = future_to_task[future]
+                try:
+                    result = future.result()
+                    results[task.agent] = result
+                    print(f"[Coordinator] LA-UI-001: 并行任务完成: agent={task.agent}")
+                except Exception as e:
+                    print(f"[Coordinator] LA-UI-001: 并行任务失败: agent={task.agent}, error={e}")
+                    results[task.agent] = {
+                        "agent": task.agent,
+                        "result": {"text": f"执行出错: {e}"},
+                    }
+
+        # 并行执行返回第一个成功的结果（简化版）
+        # TODO: 未来应返回所有结果的聚合
+        if results:
+            first_agent = list(results.keys())[0]
+            print(f"[Coordinator] LA-UI-001: 并行执行完成，返回首个结果 from {first_agent}")
+            return results[first_agent]
+        else:
+            return {"agent": "unknown", "result": {"text": "所有并行任务均失败"}}
 
     # ==================== P0-INT-1: 辅助方法 ====================
 

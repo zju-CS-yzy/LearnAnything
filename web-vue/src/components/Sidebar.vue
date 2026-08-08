@@ -77,8 +77,8 @@
       </div>
     </nav>
 
-    <!-- 历史会话（仅智能对话视图时显示） -->
-    <div class="history-section" v-show="!collapsed && activeView === 'chat'">
+    <!-- 历史会话（LA-UI-001: ChatView 常驻后，历史会话始终显示在 Sidebar 底部） -->
+    <div class="history-section" v-show="!collapsed">
       <div class="section-title">历史会话</div>
       <div class="history-list" v-if="chatSessions.length">
         <div
@@ -377,15 +377,15 @@ async function deleteSubject() {
   }
 }
 
-// 导航菜单项
+// 导航菜单项（LA-UI-001: 移除"智能对话"，ChatView 已常驻右侧）
 const navItems = [
-  { id: 'chat', icon: '💬', label: '智能对话' },
+  { id: 'graph', icon: '🕸️', label: '知识图谱' },
   { id: 'quiz', icon: '📝', label: '出题' },
   { id: 'evaluate', icon: '📊', label: '评测' },
   { id: 'progress', icon: '📈', label: '学习进度' },
   { id: 'import', icon: '📚', label: '导入' },
   { id: 'knowledge', icon: '🗂️', label: '知识库' },
-  { id: 'graph', icon: '🕸️', label: '知识图谱' },
+  { id: 'monitor', icon: '📡', label: '监控' },
 ]
 
 const settingsItem = { id: 'settings', icon: '⚙️', label: '设置' }
@@ -478,6 +478,26 @@ window.addEventListener('chat-session-created', async (e) => {
   const newSessionId = e.detail?.sessionId
   if (newSessionId && chatSessions.value.some(s => s.id === newSessionId)) {
     currentSessionId.value = newSessionId
+  }
+})
+
+// LA-060-FIX: 监听新对话开始事件（用户发送第一条消息时立即触发）
+// 在 Sidebar 中即时显示新会话，无需等待后端 SSE 返回
+window.addEventListener('chat-session-started', (e) => {
+  const { tempId, title, subject, timestamp } = e.detail || {}
+  if (!tempId) return
+  // 将新会话插入到列表顶部（前端即时显示）
+  const newSession = {
+    id: tempId,
+    title: title || '新会话',
+    subject: subject,
+    updatedAt: new Date(timestamp).toISOString(),
+  }
+  // 避免重复添加（相同 tempId 或相同标题）
+  const exists = chatSessions.value.find(s => s.id === tempId || s.title === title)
+  if (!exists) {
+    chatSessions.value.unshift(newSession)
+    console.log('[Sidebar] 新对话已添加到历史列表:', title)
   }
 })
 </script>

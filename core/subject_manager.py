@@ -48,6 +48,9 @@ VISIBILITY_PUBLIC = "public"
 VISIBILITY_PRIVATE = "private"
 VISIBILITY_GROUP = "group"
 
+# LA-051-DIR-FIX: GraphStore 用于学科删除时清理图数据库
+from core.graph_store import GraphStore
+
 
 # ==================== SubjectManager 类 (LA-051-DIR) ====================
 
@@ -270,17 +273,42 @@ class SubjectManager:
                 visibility = visibility or VISIBILITY_PUBLIC
 
         # 1. 先关闭并删除 GraphStore（释放文件句柄）
+        # LA-051-DIR-FIX: 需要删除所有可能的图数据库路径，因为不同版本代码可能使用不同路径
+        from config.settings import GRAPH_DB_DIR
+
+        # 清除缓存中的 GraphStore 实例（防止下次创建同名学科时返回旧的）
+        # 惰性导入避免循环依赖：core → app
         try:
-            from core.graph_store import GraphStore
-            graph_db_path = get_subject_graph_db_path(
+            import app.backend_api as api_module
+            cache_key = f"{subject_id}_v1"
+            if hasattr(api_module, '_graph_store_cache') and cache_key in api_module._graph_store_cache:
+                del api_module._graph_store_cache[cache_key]
+                print(f"[SubjectDelete] 清除 GraphStore 缓存: {cache_key}")
+        except Exception as e:
+            print(f"[SubjectDelete] 清除 GraphStore 缓存失败（非阻塞）: {e}")
+
+        # 路径1: 新学科内聚路径（LA-051-DIR）
+        try:
+            graph_db_path_new = get_subject_graph_db_path(
                 subject_id, owner_id if visibility == VISIBILITY_PRIVATE else None
             )
-            if graph_db_path.exists():
-                store = GraphStore(subject_id, db_path=str(graph_db_path))
-                store.delete_all()  # 这会关闭连接并删除目录
-                print(f"[SubjectDelete] GraphStore 已删除: {graph_db_path}")
+            if graph_db_path_new.exists():
+                store = GraphStore(subject_id, db_path=str(graph_db_path_new))
+                store.delete_all()
+                print(f"[SubjectDelete] GraphStore(新路径) 已删除: {graph_db_path_new}")
         except Exception as e:
-            print(f"[SubjectDelete] GraphStore 删除失败（非阻塞）: {e}")
+            print(f"[SubjectDelete] GraphStore(新路径) 删除失败（非阻塞）: {e}")
+
+        # 路径2: 旧默认路径（GRAPH_DB_DIR / {subject}_v1_graph）
+        # 这是 _graph_store_cache 中 GraphStore(key) 无 db_path 时使用的路径
+        try:
+            graph_db_path_old = GRAPH_DB_DIR / f"{subject_id}_v1_graph"
+            if graph_db_path_old.exists():
+                store = GraphStore(subject_id, db_path=str(graph_db_path_old))
+                store.delete_all()
+                print(f"[SubjectDelete] GraphStore(旧路径) 已删除: {graph_db_path_old}")
+        except Exception as e:
+            print(f"[SubjectDelete] GraphStore(旧路径) 删除失败（非阻塞）: {e}")
 
         # 2. 删除 VectorStore 数据库文件
         try:

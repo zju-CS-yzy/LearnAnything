@@ -49,7 +49,7 @@
       </div>
 
       <!-- 画布 + 图例 -->
-      <div class="canvas-wrapper">
+      <div class="canvas-wrapper" :style="canvasWrapperStyle">
         <div ref="cyContainer" class="cy-container"></div>
 
         <div class="legend">
@@ -243,6 +243,13 @@ const tooltipVisible = ref(false)
 const tooltipNode = ref(null)
 const tooltipPosition = ref({ x: 0, y: 0 })
 let tooltipTimer = null
+
+// 画布区域动态样式：避让右侧 absolute 定位的 NodeDetailPanel
+const canvasWrapperStyle = computed(() => {
+  // NodeDetailPanel 有节点时宽 300px，空状态时宽 200px
+  const panelWidth = selectedNode.value ? 300 : 200
+  return { marginRight: panelWidth + 'px' }
+})
 
 // ========== 初始化 Cytoscape ==========
 function initCy() {
@@ -1193,6 +1200,7 @@ watch(currentSubject, () => {
   display: flex;
   overflow: hidden;
   position: relative;
+  min-width: 0;
 }
 
 /* 工具栏 */
@@ -1200,7 +1208,6 @@ watch(currentSubject, () => {
   position: absolute;
   top: 12px;
   left: 12px;
-  right: 320px;
   z-index: 10;
   display: flex;
   align-items: center;
@@ -1210,12 +1217,17 @@ watch(currentSubject, () => {
   border: 1px solid var(--border-color, #e0e0e0);
   border-radius: 8px;
   box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+  width: max-content;
+  flex-shrink: 0;
 }
 
 .toolbar-group {
   display: flex;
   align-items: center;
   gap: 6px;
+  flex-shrink: 0;
+  flex-wrap: nowrap;
+  white-space: nowrap;
 }
 
 .search-input {

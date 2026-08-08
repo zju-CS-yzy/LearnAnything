@@ -214,6 +214,32 @@ class AskResponse(BaseModel):
     current_topic: Optional[str] = None  # LA-044: 当前话题
 
 
+# LA-UI-001: 统一聊天入口请求模型
+class ChatSendRequest(BaseModel):
+    """
+    统一聊天入口请求。
+
+    替代原有的 /api/ask、/api/quiz、/api/evaluate/start 等独立端点，
+    通过 IntentClassifier 自动识别意图并路由到合适的 Agent。
+    """
+    content: str = Field(..., description="用户输入内容", min_length=1)
+    subject: str = Field("generic", description="学科标识")
+    user_id: Optional[str] = Field(None, description="用户ID（可选）")
+    session_id: Optional[str] = Field(None, description="会话ID（可选）")
+    agent_target: Optional[str] = Field(
+        None,
+        description="显式指定Agent（可选）：tutor|quiz|coach|job。不传时由IntentClassifier自动识别"
+    )
+    shared_context: Optional[Dict[str, Any]] = Field(
+        None,
+        description="共享上下文（可选）：{selected_concept, current_view, ...}"
+    )
+    user_theta: Optional[float] = Field(
+        None, ge=0.0, le=1.0,
+        description="用户能力水平 0.0~1.0（可选，用于个性化讲解深度）"
+    )
+
+
 # LA-044-#3: 用户状态 API 模型
 class UserStateUpdateRequest(BaseModel):
     """用户状态更新请求"""
@@ -749,6 +775,210 @@ def test_llm_connection(request: LLMTestRequest):
         )
 
 
+# ========== LLM-ROBUST-11: Token 用量统计 API ==========
+
+class TokenUsageStatsResponse(BaseModel):
+    """Token 用量统计响应"""
+    year_month: str
+    total_requests: int
+    total_prompt_tokens: int
+    total_completion_tokens: int
+    total_tokens: int
+    total_cost: float
+    avg_latency_ms: float
+    fallback_count: int
+    error_count: int
+    budget: float
+    budget_warning_threshold: float
+    budget_used_ratio: float
+
+class TokenUsageDailyItem(BaseModel):
+    """每日用量条目"""
+    date: str
+    requests: int
+    tokens: int
+    cost: float
+
+class TokenUsageModelItem(BaseModel):
+    """按模型用量条目"""
+    model: str
+    requests: int
+    tokens: int
+    cost: float
+
+class TokenUsageLogsResponse(BaseModel):
+    """用量日志响应"""
+    logs: List[Dict[str, Any]]
+
+@app.get("/api/llm/usage/stats", response_model=TokenUsageStatsResponse)
+def get_token_usage_stats(year_month: Optional[str] = None):
+    """
+    LLM-ROBUST-11: 获取 Token 用量统计。
+    
+    返回指定月份的用量汇总，包含成本估算和预算使用情况。
+    """
+    from core.token_usage_tracker import get_usage_tracker
+    
+    tracker = get_usage_tracker()
+    stats = tracker.get_monthly_stats(year_month)
+    budget = tracker.get_budget()
+    
+    budget_used_ratio = 0.0
+    if budget["monthly_budget"] > 0:
+        budget_used_ratio = round(stats.total_cost / budget["monthly_budget"], 4)
+    
+    return TokenUsageStatsResponse(
+        year_month=year_month or "current",
+        total_requests=stats.total_requests,
+        total_prompt_tokens=stats.total_prompt_tokens,
+        total_completion_tokens=stats.total_completion_tokens,
+        total_tokens=stats.total_tokens,
+        total_cost=stats.total_cost,
+        avg_latency_ms=stats.avg_latency_ms,
+        fallback_count=stats.fallback_count,
+        error_count=stats.error_count,
+        budget=budget["monthly_budget"],
+        budget_warning_threshold=budget["warning_threshold"],
+        budget_used_ratio=budget_used_ratio,
+    )
+
+@app.get("/api/llm/usage/daily", response_model=List[TokenUsageDailyItem])
+def get_token_usage_daily(days: int = 7):
+    """
+    LLM-ROBUST-11: 获取最近 N 天的每日用量。
+    """
+    from core.token_usage_tracker import get_usage_tracker
+    
+    tracker = get_usage_tracker()
+    daily = tracker.get_daily_stats(days)
+    return [TokenUsageDailyItem(**item) for item in daily]
+
+@app.get("/api/llm/usage/models", response_model=List[TokenUsageModelItem])
+def get_token_usage_models(days: int = 30):
+    """
+    LLM-ROBUST-11: 按模型分组统计用量。
+    """
+    from core.token_usage_tracker import get_usage_tracker
+    
+    tracker = get_usage_tracker()
+    models = tracker.get_model_stats(days)
+    return [TokenUsageModelItem(**item) for item in models]
+
+class TokenBudgetRequest(BaseModel):
+    """预算设置请求"""
+    monthly_budget: float = Field(ge=0, description="月度预算上限（元），0 表示无限制")
+    warning_threshold: float = Field(ge=0, le=1, default=0.8, description="告警阈值（0~1）")
+
+class TokenBudgetResponse(BaseModel):
+    """预算设置响应"""
+    success: bool
+    monthly_budget: float
+    warning_threshold: float
+
+@app.post("/api/llm/usage/budget", response_model=TokenBudgetResponse)
+def set_token_budget(request: TokenBudgetRequest):
+    """
+    LLM-ROBUST-11: 设置月度预算。
+    
+    设置 Token 用量月度预算上限和告警阈值。
+    """
+    from core.token_usage_tracker import get_usage_tracker
+    
+    tracker = get_usage_tracker()
+    tracker.set_budget(request.monthly_budget, request.warning_threshold)
+    
+    return TokenBudgetResponse(
+        success=True,
+        monthly_budget=request.monthly_budget,
+        warning_threshold=request.warning_threshold,
+    )
+
+@app.get("/api/llm/usage/budget", response_model=TokenBudgetResponse)
+def get_token_budget():
+    """
+    LLM-ROBUST-11: 获取当前预算配置。
+    """
+    from core.token_usage_tracker import get_usage_tracker
+    
+    tracker = get_usage_tracker()
+    budget = tracker.get_budget()
+    
+    return TokenBudgetResponse(
+        success=True,
+        monthly_budget=budget["monthly_budget"],
+        warning_threshold=budget["warning_threshold"],
+    )
+
+
+# ========== LLM-ROBUST-12: 慢请求监控 API ==========
+
+class SlowRequestItem(BaseModel):
+    """慢请求条目"""
+    timestamp: float
+    model: str
+    provider: str
+    request_type: str
+    latency_ms: int
+    prompt_tokens: int
+    completion_tokens: int
+    error: Optional[str] = None
+
+class SlowRequestStatsResponse(BaseModel):
+    """慢请求统计响应"""
+    total: int
+    slow_count: int
+    slow_ratio: float
+    avg_latency_ms: float
+    max_latency_ms: int
+    threshold_ms: int
+
+class SlowRequestModelBreakdownItem(BaseModel):
+    """模型耗时统计条目"""
+    model: str
+    count: int
+    avg_latency_ms: float
+    slow_count: int
+
+@app.get("/api/llm/slow-requests", response_model=List[SlowRequestItem])
+def get_slow_requests(limit: int = 20):
+    """
+    LLM-ROBUST-12: 获取慢请求列表。
+    
+    返回超过阈值（默认 5 秒）的慢请求记录。
+    """
+    from core.llm_client import get_slow_request_monitor
+    
+    monitor = get_slow_request_monitor()
+    requests = monitor.get_slow_requests(limit)
+    return [SlowRequestItem(**r) for r in requests]
+
+@app.get("/api/llm/slow-requests/stats", response_model=SlowRequestStatsResponse)
+def get_slow_request_stats():
+    """
+    LLM-ROBUST-12: 获取慢请求统计。
+    
+    返回请求耗时汇总统计，包括慢请求比例、平均/最大延迟。
+    """
+    from core.llm_client import get_slow_request_monitor
+    
+    monitor = get_slow_request_monitor()
+    stats = monitor.get_stats()
+    return SlowRequestStatsResponse(**stats)
+
+@app.get("/api/llm/slow-requests/models", response_model=List[SlowRequestModelBreakdownItem])
+def get_slow_request_model_breakdown():
+    """
+    LLM-ROBUST-12: 按模型分组的耗时统计。
+    
+    帮助识别哪个模型响应最慢。
+    """
+    from core.llm_client import get_slow_request_monitor
+    
+    monitor = get_slow_request_monitor()
+    breakdown = monitor.get_model_breakdown()
+    return [SlowRequestModelBreakdownItem(**item) for item in breakdown]
+
+
 # ========== LA-052: 认证 API ==========
 
 @app.post("/api/auth/register", response_model=AuthResponse)
@@ -1062,6 +1292,254 @@ def ask_stream(
             "X-Accel-Buffering": "no",  # 禁用 Nginx 缓冲
         },
     )
+
+
+# ========== LA-UI-001: 统一聊天入口 ==========
+
+@app.post("/api/chat/send")
+def chat_send(
+    request: ChatSendRequest,
+    x_user_id: Optional[str] = Header(None, alias="X-User-ID"),
+    authorization: Optional[str] = Header(None),
+):
+    """
+    LA-UI-001: 统一聊天入口（非流式）。
+
+    替代原有的 /api/ask，支持：
+    - 显式 agent_target 路由
+    - IntentClassifier 自动意图识别
+    - 多 Agent 联合回答（返回结构化任务列表）
+
+    返回字段与 /api/ask 兼容，新增 multi_agent / execution_mode / agent_tasks。
+    """
+    # LA-051: 获取真实用户身份
+    effective_user_id = get_current_user_id(x_user_id, authorization)
+    if effective_user_id in ("anonymous", "default") and request.user_id and request.user_id not in ("anonymous", "default"):
+        effective_user_id = request.user_id
+
+    # LA-044-FIX: 从 UserStateStore 读取 theta
+    user_theta = request.user_theta
+    if user_theta is None and effective_user_id not in ("anonymous", "default"):
+        try:
+            store = _get_isolated_state_store(effective_user_id)
+            subject_id = f"{request.subject}_v1"
+            state = store.get_full_user_state(effective_user_id, subject_id)
+            user_theta = state.get("profile", {}).get("global_theta")
+        except Exception as e:
+            print(f"[LA-UI-001] /api/chat/send: 读取 theta 失败: {e}")
+
+    print(f"[API] LA-UI-001 /api/chat/send: content={request.content[:60]}..., subject={request.subject}, "
+          f"agent_target={request.agent_target}, user={effective_user_id}")
+
+    # LA-051: 权限感知的 store
+    graph_store = _get_accessible_graph_store(request.subject, effective_user_id)
+    vector_store = _get_accessible_vector_store(request.subject, effective_user_id)
+
+    coordinator = Coordinator(
+        collection_name=f"{request.subject}_v1",
+        top_k=5,
+        user_theta=user_theta,
+        graph_store=graph_store,
+        vector_store=vector_store,
+    )
+
+    # LA-050-HISTORY-FIX: 注入用户隔离 DialogContextManager
+    if effective_user_id not in ("anonymous", "default"):
+        from core.user_context import UserContext
+        ctx = UserContext(effective_user_id)
+        coordinator._dialog_manager = ctx.dialog_manager
+        print(f"[LA-050-HISTORY-FIX] chat_send: 注入用户隔离 DialogContextManager | user={effective_user_id}")
+
+    result = coordinator.handle(
+        query=request.content,
+        user_id=effective_user_id,
+        session_id=request.session_id,
+        user_theta=user_theta,
+        agent_target=request.agent_target,
+    )
+
+    # 提取媒体资源和引用来源
+    agent_result = result.get("result", {})
+    metadata = agent_result.get("metadata", {}) if isinstance(agent_result, dict) else {}
+    media = metadata.get("media") if isinstance(metadata, dict) else None
+    sources = metadata.get("sources") if isinstance(metadata, dict) else None
+
+    # LA-044-#3: 对话结束后自动保存用户状态
+    _save_user_state_after_dialog_chat(effective_user_id, request, result)
+
+    return {
+        "question": request.content,
+        "answer": result.get("text", ""),
+        "intent": result.get("intent", {}),
+        "agent": result.get("agent", ""),
+        "duration_ms": result.get("monitoring", {}).get("total_duration_ms", 0),
+        "query_id": result.get("monitoring", {}).get("query_id", ""),
+        "session_id": result.get("session_id", request.session_id),
+        "media": media,
+        "sources": sources,
+        "current_topic": _get_session_topic(result.get("session_id", request.session_id)),
+        # LA-UI-001: 新增多 Agent 字段
+        "multi_agent": result.get("multi_agent", False),
+        "execution_mode": result.get("execution_mode", "sequential"),
+        "agent_tasks": result.get("agent_tasks", []),
+    }
+
+
+@app.post("/api/chat/send/stream")
+def chat_send_stream(
+    request: ChatSendRequest,
+    x_user_id: Optional[str] = Header(None, alias="X-User-ID"),
+    authorization: Optional[str] = Header(None),
+):
+    """
+    LA-UI-001: 统一聊天入口（SSE 流式）。
+
+    SSE 格式与 /api/ask/stream 兼容，新增多 Agent 支持：
+        event: meta
+        data: {"intent": ..., "agent": ..., "multi_agent": true, "execution_mode": "sequential"}
+
+        event: chunk
+        data: {"text": "..."}
+
+        event: card          # 新增：卡片类型输出（题目卡、评测结果卡）
+        data: {"type": "question_card", ...}
+
+        event: done
+        data: {}
+
+    多 Agent 场景下，meta 事件会发送多次（每个 Agent 开始前），
+    前端通过 agent 字段区分不同 Agent 的输出。
+    """
+    async def event_generator():
+        effective_user_id = get_current_user_id(x_user_id, authorization)
+        if effective_user_id in ("anonymous", "default") and request.user_id and request.user_id not in ("anonymous", "default"):
+            effective_user_id = request.user_id
+
+        # LA-044-FIX: 从 UserStateStore 读取 theta
+        user_theta = request.user_theta
+        if user_theta is None and effective_user_id not in ("anonymous", "default"):
+            try:
+                store = _get_isolated_state_store(effective_user_id)
+                subject_id = f"{request.subject}_v1"
+                state = store.get_full_user_state(effective_user_id, subject_id)
+                user_theta = state.get("profile", {}).get("global_theta")
+            except Exception:
+                pass
+
+        # LA-051: 权限感知的 store
+        subject = request.subject
+        graph_store = _get_accessible_graph_store(subject, effective_user_id)
+        vector_store = _get_accessible_vector_store(subject, effective_user_id)
+
+        coordinator = Coordinator(
+            collection_name=f"{subject}_v1",
+            top_k=5,
+            user_theta=user_theta,
+            graph_store=graph_store,
+            vector_store=vector_store,
+        )
+
+        # LA-050-HISTORY-FIX: 注入用户隔离 DialogContextManager
+        if effective_user_id not in ("anonymous", "default"):
+            from core.user_context import UserContext
+            ctx = UserContext(effective_user_id)
+            coordinator._dialog_manager = ctx.dialog_manager
+
+        result = coordinator.handle(
+            query=request.content,
+            user_id=effective_user_id,
+            session_id=request.session_id,
+            user_theta=user_theta,
+            agent_target=request.agent_target,
+        )
+
+        intent = result.get("intent", {})
+        agent_name = result.get("agent", "")
+        query_id = result.get("monitoring", {}).get("query_id", "")
+        answer_text = result.get("text", "")
+        response_session_id = result.get("session_id", request.session_id)
+        is_multi_agent = result.get("multi_agent", False)
+        execution_mode = result.get("execution_mode", "sequential")
+        agent_tasks = result.get("agent_tasks", [])
+
+        # 提取媒体资源和引用来源
+        agent_result = result.get("result", {})
+        metadata = agent_result.get("metadata", {}) if isinstance(agent_result, dict) else {}
+        media = metadata.get("media") if isinstance(metadata, dict) else None
+        sources = metadata.get("sources") if isinstance(metadata, dict) else None
+
+        # 发送元数据事件
+        meta = json.dumps({
+            "intent": intent,
+            "agent": agent_name,
+            "query_id": query_id,
+            "question": request.content,
+            "media": media,
+            "sources": sources,
+            "current_topic": _get_session_topic(response_session_id),
+            "session_id": response_session_id,
+            # LA-UI-001: 新增多 Agent 字段
+            "multi_agent": is_multi_agent,
+            "execution_mode": execution_mode,
+            "agent_tasks": agent_tasks,
+        }, ensure_ascii=False)
+        yield f"event: meta\ndata: {meta}\n\n"
+
+        # 将回答分段流式发送（与 /api/ask/stream 一致）
+        if answer_text:
+            paragraphs = answer_text.split('\n\n')
+            for para in paragraphs:
+                para = para.strip()
+                if not para:
+                    continue
+                if len(para) > 200:
+                    sentences = re.split(r'([。！？.!?]\s*)', para)
+                    buffer = ""
+                    for s in sentences:
+                        buffer += s
+                        if len(buffer) >= 80 or s.strip() and s.strip()[-1] in '。！？.!?':
+                            chunk_data = json.dumps({"text": buffer}, ensure_ascii=False)
+                            yield f"event: chunk\ndata: {chunk_data}\n\n"
+                            buffer = ""
+                            await asyncio.sleep(0.03)
+                    if buffer:
+                        chunk_data = json.dumps({"text": buffer}, ensure_ascii=False)
+                        yield f"event: chunk\ndata: {chunk_data}\n\n"
+                else:
+                    chunk_data = json.dumps({"text": para + '\n\n'}, ensure_ascii=False)
+                    yield f"event: chunk\ndata: {chunk_data}\n\n"
+                    await asyncio.sleep(0.05)
+        else:
+            err_data = json.dumps({"text": "抱歉，未能生成回答。"}, ensure_ascii=False)
+            yield f"event: chunk\ndata: {err_data}\n\n"
+
+        # 发送完成事件
+        yield f"event: done\ndata: {{}}\n\n"
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+# LA-UI-001: chat_send 专用的用户状态保存辅助函数
+# （复用 _save_user_state_after_dialog 的逻辑，但适配 ChatSendRequest）
+def _save_user_state_after_dialog_chat(user_id: str, request: ChatSendRequest, result: Dict[str, Any]):
+    """LA-UI-001: 对话结束后自动保存用户状态（与 _save_user_state_after_dialog 等效）。"""
+    from dataclasses import dataclass
+
+    @dataclass
+    class FakeAskRequest:
+        subject: str
+        user_theta: Optional[float] = None
+
+    fake_req = FakeAskRequest(subject=request.subject, user_theta=request.user_theta)
+    _save_user_state_after_dialog(user_id, fake_req, result)
 
 
 @app.post("/api/quiz", response_model=QuizResponse)
@@ -3037,16 +3515,21 @@ def get_image(
     """
     提供学科知识库中的图片文件访问。
     LA-051-STRUCT: 使用新目录结构（学科内聚）
+    LA-060-FIX: 修复图片路径解析，支持跨用户目录查找
     
     路径: /api/images/<subject>/<filename>
     """
-    from config.settings import get_subject_images_dir, get_subject_thumbnails_dir
+    from config.settings import get_subject_images_dir, get_subject_thumbnails_dir, USERS_KB_DIR
     effective_user_id = get_current_user_id(x_user_id, authorization)
     
     # 安全检查：防止目录遍历
     safe_filename = Path(filename).name
     
-    # LA-051-STRUCT: 优先查找用户私有目录
+    # LA-060-FIX: 先获取学科信息，确定 owner_id
+    subj = _get_subject_anywhere(subject, effective_user_id)
+    owner_id = subj.get("owner_id") if subj else None
+    
+    # 1. 优先查找当前登录用户的私有目录
     if effective_user_id != "default":
         ctx = _get_user_context_from_header(effective_user_id)
         user_img_dir = ctx.get_user_images_dir(subject)
@@ -3059,7 +3542,24 @@ def get_image(
         if user_thumb.exists():
             return FileResponse(str(user_thumb))
     
-    # Fallback: 共享目录（新结构）
+    # 2. LA-060-FIX: 查找学科 owner 的私有目录（图片可能存储在 owner 目录中）
+    if owner_id and owner_id != "system" and owner_id != effective_user_id:
+        try:
+            from core.user_context import UserContext
+            owner_ctx = UserContext(owner_id)
+            owner_img_dir = owner_ctx.get_user_images_dir(subject)
+            owner_img = owner_img_dir / safe_filename
+            if owner_img.exists():
+                return FileResponse(str(owner_img))
+            
+            owner_thumb_dir = owner_ctx.get_user_thumbnails_dir(subject)
+            owner_thumb = owner_thumb_dir / safe_filename
+            if owner_thumb.exists():
+                return FileResponse(str(owner_thumb))
+        except Exception as e:
+            print(f"[get_image] 查找 owner 目录失败: {e}")
+    
+    # 3. Fallback: 共享目录（新结构）
     share_img_dir = get_subject_images_dir(subject)
     img_path = share_img_dir / safe_filename
     if img_path.exists():
@@ -3069,6 +3569,21 @@ def get_image(
     thumb_path = share_thumb_dir / safe_filename
     if thumb_path.exists():
         return FileResponse(str(thumb_path))
+    
+    # 4. LA-060-FIX: 最后尝试遍历所有用户的私有目录（兜底）
+    try:
+        if USERS_KB_DIR.exists():
+            for user_dir in USERS_KB_DIR.iterdir():
+                if not user_dir.is_dir():
+                    continue
+                user_img = user_dir / subject / "media" / "images" / safe_filename
+                if user_img.exists():
+                    return FileResponse(str(user_img))
+                user_thumb = user_dir / subject / "media" / "thumbnails" / safe_filename
+                if user_thumb.exists():
+                    return FileResponse(str(user_thumb))
+    except Exception as e:
+        print(f"[get_image] 遍历用户目录失败: {e}")
     
     raise HTTPException(status_code=404, detail=f"图片不存在: {filename}")
 

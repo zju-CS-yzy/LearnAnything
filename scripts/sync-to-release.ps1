@@ -17,11 +17,11 @@ $ReleaseDir = "D:\MyCS\AI\Project\LearnAnything"
 
 # 核心目录（从 Dev 复制到 Release）
 # LA-051-STRUCT-FIX: 移除 subjects（Dev 中已删除）
+# SECURITY-FIX: 移除 config（API 密钥不纳入 Release，Release 单独维护脱敏模板）
 $CoreDirs = @(
     "agents",
     "app",
     "core",
-    "config",
     "interfaces",
     "tests",
     "web",

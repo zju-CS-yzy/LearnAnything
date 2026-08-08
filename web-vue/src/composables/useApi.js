@@ -363,17 +363,135 @@ export async function apiReviewChange(changeId, approve, note = '') {
   })
 }
 
-// ========== LLM-ROBUST: 诊断 API ==========
+// ========== LLM-ROBUST-11: Token 用量追踪 API ==========
 
-// 获取 LLM 诊断信息（配置快照 + Key 池状态）
-export async function apiLLMDiagnostic() {
-  return fetchApi('/api/llm/diagnostic')
+// 获取月度用量统计
+export async function apiGetTokenUsageStats(yearMonth = null) {
+  const params = new URLSearchParams()
+  if (yearMonth) params.append('year_month', yearMonth)
+  return fetchApi(`/api/llm/usage/stats?${params.toString()}`)
 }
 
-// 测试 LLM 连接
-export async function apiLLMTest(provider = null, message = 'Hello, this is a connection test.') {
-  return fetchApi('/api/llm/test', {
+// 获取每日用量统计
+export async function apiGetTokenUsageDaily(days = 7) {
+  return fetchApi(`/api/llm/usage/daily?days=${days}`)
+}
+
+// 获取按模型分组统计
+export async function apiGetTokenUsageModels(days = 30) {
+  return fetchApi(`/api/llm/usage/models?days=${days}`)
+}
+
+// 设置预算
+export async function apiSetTokenBudget(monthlyBudget, warningThreshold = 0.8) {
+  return fetchApi('/api/llm/usage/budget', {
     method: 'POST',
-    body: JSON.stringify({ provider, message }),
+    body: JSON.stringify({ monthly_budget: monthlyBudget, warning_threshold: warningThreshold }),
   })
+}
+
+// 获取预算配置
+export async function apiGetTokenBudget() {
+  return fetchApi('/api/llm/usage/budget')
+}
+
+// ========== LLM-ROBUST-12: 慢请求监控 API ==========
+
+// 获取慢请求列表
+export async function apiGetSlowRequests(limit = 20) {
+  return fetchApi(`/api/llm/slow-requests?limit=${limit}`)
+}
+
+// 获取慢请求统计
+export async function apiGetSlowRequestStats() {
+  return fetchApi('/api/llm/slow-requests/stats')
+}
+
+// 获取按模型分组的慢请求统计
+export async function apiGetSlowRequestModels() {
+  return fetchApi('/api/llm/slow-requests/models')
+}
+
+// ========== LA-UI-001: 统一聊天入口 API ==========
+
+/**
+ * LA-UI-001: 统一聊天入口（非流式）
+ * 替代原有的 /api/ask，支持 agent_target 显式指定 + IntentClassifier 自动识别
+ */
+export async function apiChatSend(content, subject = 'generic', options = {}) {
+  const {
+    user_id = null,
+    session_id = null,
+    agent_target = null,
+    shared_context = null,
+    user_theta = null,
+  } = options
+
+  const effectiveUserId = user_id || getXUserId()
+
+  return fetchApi('/api/chat/send', {
+    method: 'POST',
+    body: JSON.stringify({
+      content,
+      subject,
+      user_id: effectiveUserId,
+      session_id,
+      agent_target,
+      shared_context,
+      user_theta,
+    }),
+  })
+}
+
+/**
+ * LA-UI-001: 统一聊天入口（SSE 流式）
+ * SSE 格式与 /api/ask/stream 兼容，新增 multi_agent / execution_mode / agent_tasks
+ */
+export async function* apiChatSendStream(content, subject = 'generic', options = {}) {
+  const {
+    user_id = null,
+    session_id = null,
+    agent_target = null,
+    shared_context = null,
+    user_theta = null,
+  } = options
+
+  const effectiveUserId = user_id || getXUserId()
+
+  const resp = await fetch(`${API_BASE}/api/chat/send/stream`, {
+    method: 'POST',
+    headers: authHeaders(),
+    body: JSON.stringify({
+      content,
+      subject,
+      user_id: effectiveUserId,
+      session_id,
+      agent_target,
+      shared_context,
+      user_theta,
+    }),
+  })
+
+  if (!resp.ok) {
+    const text = await resp.text()
+    throw new Error(`HTTP ${resp.status}: ${text}`)
+  }
+
+  const reader = resp.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) break
+
+    buffer += decoder.decode(value, { stream: true })
+    const lines = buffer.split('\n\n')
+    buffer = lines.pop() || ''
+
+    for (const line of lines) {
+      if (!line.trim()) continue
+      yield parseSSE(line)
+    }
+  }
 }

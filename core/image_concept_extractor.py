@@ -654,10 +654,11 @@ class ImageConceptExtractor:
     def _update_all_media_refs(self, chunks: List[Dict[str, Any]], rename_map: Dict[str, str]):
         """
         统一更新所有 chunk 中的图片路径引用。
-        处理 image_refs 和 media_refs 两种路径存储位置。
+        处理 image_refs、media_refs 以及 concepts 中的 media_refs 三种路径存储位置。
+        LA-035-P27-fix: 修复 concept 级别 media_refs 未被更新的问题，导致知识图谱节点引用旧文件名。
         """
         for chunk in chunks:
-            # 更新 image_refs
+            # 1. 更新 image_refs
             for ref in chunk.get("metadata", {}).get("image_refs", []):
                 old_rel = ref.get("relative_path", "")
                 if old_rel in rename_map:
@@ -672,7 +673,7 @@ class ImageConceptExtractor:
                         new_name = Path(new_rel).name
                         ref["thumbnail_path"] = str(ref["thumbnail_path"]).replace(old_name, new_name)
             
-            # 更新 media_refs
+            # 2. 更新 chunk 级别的 media_refs
             for ref in chunk.get("metadata", {}).get("media_refs", []):
                 if ref.get("type") != "image":
                     continue
@@ -688,6 +689,24 @@ class ImageConceptExtractor:
                         old_name = Path(old_rel).name
                         new_name = Path(new_rel).name
                         ref["thumbnail_path"] = str(ref["thumbnail_path"]).replace(old_name, new_name)
+            
+            # LA-035-P27-fix: 3. 更新 concepts 中的 media_refs（知识图谱节点引用）
+            for concept in chunk.get("metadata", {}).get("concepts", []):
+                for ref in concept.get("media_refs", []):
+                    if ref.get("type") != "image":
+                        continue
+                    old_rel = ref.get("relative_path", "")
+                    if old_rel in rename_map:
+                        new_rel = rename_map[old_rel]
+                        ref["relative_path"] = new_rel
+                        if "path" in ref:
+                            old_name = Path(old_rel).name
+                            new_name = Path(new_rel).name
+                            ref["path"] = str(ref["path"]).replace(old_name, new_name)
+                        if "thumbnail_path" in ref:
+                            old_name = Path(old_rel).name
+                            new_name = Path(new_rel).name
+                            ref["thumbnail_path"] = str(ref["thumbnail_path"]).replace(old_name, new_name)
 
     def _create_pseudo_chunk(
         self,

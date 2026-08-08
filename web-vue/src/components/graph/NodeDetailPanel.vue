@@ -212,8 +212,12 @@
  * 显示选中节点的基本信息、概念分解、语义关联
  */
 
-import { computed, ref } from 'vue'
+import { computed, ref, inject } from 'vue'
 import { renderLatex } from '../../utils/latex.js'
+
+// LA-051-FIX: 注入学科状态，用于图片路径回退
+const subjectState = inject('subjectState')
+const currentSubject = computed(() => subjectState?.currentSubject?.value || '')
 
 const props = defineProps({
   node: { type: Object, default: null },
@@ -301,19 +305,41 @@ const mediaRefs = computed(() => {
 const hasMedia = computed(() => mediaRefs.value.length > 0)
 
 function getImageUrl(ref) {
-  if (!ref || !ref.path) return ''
+  if (!ref || !ref.path) {
+    console.warn('[NodeDetailPanel] getImageUrl: ref or path missing', ref)
+    return ''
+  }
   const path = ref.path
   const filename = path.split('/').pop().split('\\').pop()
-  // LA-035-P26: 从路径中查找 _v1_images 来提取学科名，兼容绝对路径和相对路径
+  
+  // LA-051-FIX: 兼容新旧目录结构的图片路径解析
+  // 策略1: 如果 ref 中有 subject 字段，直接使用
+  if (ref.subject) {
+    return `${window.location.origin}/api/images/${ref.subject}/${filename}`
+  }
+  
+  // 策略2: 旧格式路径包含 _v1_images
   const idx = path.indexOf('_v1_images')
   if (idx !== -1) {
     const before = path.substring(0, idx)
     const sepIdx = Math.max(before.lastIndexOf('/'), before.lastIndexOf('\\'))
     const subject = sepIdx !== -1 ? before.substring(sepIdx + 1) : before
-    return `${window.location.origin}/api/images/${subject.replace('_v1_images', '')}/${filename}`
+    const cleanSubject = subject.replace('_v1_images', '').replace(/\\/g, '/')
+    return `${window.location.origin}/api/images/${cleanSubject}/${filename}`
   }
-  const subject = path.split('/')[0]?.replace('_v1_images', '') || 'generic'
-  return `${window.location.origin}/api/images/${subject}/${filename}`
+  
+  // 策略3: 新格式路径包含 knowledge_base/Share/<subject>/media/images/
+  const shareMatch = path.match(/knowledge_base[\\/]Share[\\/]([^\\/]+)[\\/]media[\\/]images/)
+  if (shareMatch) {
+    return `${window.location.origin}/api/images/${shareMatch[1]}/${filename}`
+  }
+  
+  // 策略4: 回退到当前选中学科
+  const fallbackSubject = currentSubject.value || 'generic'
+  console.warn('[NodeDetailPanel] getImageUrl: 无法从路径解析学科，回退到当前学科', {
+    path, filename, fallbackSubject
+  })
+  return `${window.location.origin}/api/images/${fallbackSubject}/${filename}`
 }
 
 function openImageModal(ref) {
@@ -404,6 +430,10 @@ function relationLabel(relation) {
 @import 'katex/dist/katex.min.css';
 
 .info-panel {
+  position: absolute;
+  right: 0;
+  top: 0;
+  bottom: 0;
   width: 300px;
   border-left: 1px solid var(--border-color, #e0e0e0);
   background: var(--bg-card, #fff);
