@@ -170,66 +170,9 @@ class GraphBuilder:
             chunk_type_counts[ct] = chunk_type_counts.get(ct, 0) + 1
         print(f"[GraphBuilder] 向量存储中所有 chunk 类型分布: {chunk_type_counts}")
         
-        # 检查是否有图片相关的 chunk — 放宽识别条件
-        # LA-052 FIX: 排除已带 VLM 描述的 image_pseudo chunks（避免重复调用 VLM）
-        image_chunks = []
-        for c in all_chunks:
-            chunk_type = c.get("metadata", {}).get("chunk_type", "")
-            # 跳过已处理的 image_pseudo chunks（已有 VLM 描述）
-            if chunk_type == "image_pseudo":
-                continue
-            if chunk_type in ("image", "text_image") or c.get("metadata", {}).get("image_refs", []):
-                image_chunks.append(c)
-        
-        print(f"[GraphBuilder] 找到 {len(image_chunks)} 个需要 VLM 描述的图片 chunk (排除了 image_pseudo)")
-        for ic in image_chunks[:3]:
-            ic_meta = ic.get("metadata", {})
-            print(f"  - {ic['id']}: type={ic_meta.get('chunk_type')}, text_len={len(ic.get('text', ''))}, has_media_refs={bool(ic_meta.get('media_refs'))}, image_refs_count={len(ic_meta.get('image_refs', []))}")
-        
-        # LA-035-P11: 对图片 chunk 调用 VLM 生成描述，使其可提取概念
-        if image_chunks:
-            print(f"[GraphBuilder] 为 {len(image_chunks)} 个图片 chunk 生成 VLM 描述...")
-            from core.vlm_client import VLMClient
-            vlm = VLMClient()
-            
-            if vlm.available:
-                for chunk in image_chunks:
-                    chunk_meta = chunk.get("metadata", {})
-                    img_refs = chunk_meta.get("image_refs", []) or chunk_meta.get("media_refs", [])
-                    
-                    if not img_refs:
-                        print(f"[GraphBuilder] [WARN] 图片 chunk 无图片引用: {chunk['id']}")
-                        continue
-                    
-                    # 构建完整路径（取第一个图片）
-                    from config.settings import KNOWLEDGE_BASE_DIR
-                    img_path = img_refs[0].get("path", "")
-                    if not img_path:
-                        print(f"[GraphBuilder] [WARN] 图片 chunk 无 path: {chunk['id']}")
-                        continue
-                    
-                    full_path = KNOWLEDGE_BASE_DIR / img_path
-                    
-                    if not full_path.exists():
-                        print(f"[GraphBuilder] [WARN] 图片文件不存在: {full_path}")
-                        continue
-                    
-                    try:
-                        # 调用 VLM 生成描述
-                        description = vlm.analyze_image(str(full_path), task="describe")
-                        
-                        if description and description.strip():
-                            # 将 VLM 描述附加到 chunk text 中
-                            chunk["text"] = f"[图片内容]\n{description}\n\n[原始占位] {chunk.get('text', '')}"
-                            chunk["metadata"]["vlm_description"] = description
-                            print(f"[GraphBuilder] [OK] 图片 chunk VLM 描述生成成功: {chunk['id']}, desc_len={len(description)}")
-                        else:
-                            print(f"[GraphBuilder] [WARN] 图片 chunk VLM 描述为空: {chunk['id']}")
-                    
-                    except Exception as e:
-                        print(f"[GraphBuilder] [ERR] 图片 chunk VLM 描述生成失败 {chunk['id']}: {e}")
-            else:
-                print(f"[GraphBuilder] [WARN] VLM 不可用，跳过图片 chunk 描述生成")
+        # LA-052: ImageConceptExtractor 在导入阶段已为所有图片生成 VLM 描述并创建 image_pseudo chunk。
+        # GraphBuilder 不需要再次调用 VLM，image_pseudo chunk 的 text 已包含描述，可直接提取概念。
+        # 原始 image chunk 的 text 通常为空，会被跳过，这是预期行为（避免重复提取同一张图片）。
         
         child_chunks = [c for c in all_chunks if c.get("metadata", {}).get("type", "child") != "parent"]
 

@@ -34,6 +34,8 @@ _USER_DATA_DIR = DATA_ROOT
 _USERS_DB_PATH = USERS_DB_PATH
 _USERS_DIR = USERS_DIR
 
+SYSTEM_ROLES = {"admin", "user"}
+
 
 class UserManager:
     """
@@ -77,6 +79,14 @@ class UserManager:
             conn.execute("ALTER TABLE users ADD COLUMN password_hash TEXT")
         except sqlite3.OperationalError:
             pass  # 字段已存在
+        try:
+            conn.execute("ALTER TABLE users ADD COLUMN system_role TEXT NOT NULL DEFAULT 'user'")
+        except sqlite3.OperationalError:
+            pass  # 字段已存在
+        conn.execute(
+            "UPDATE users SET system_role = 'user' "
+            "WHERE system_role IS NULL OR system_role NOT IN ('admin', 'user')"
+        )
         conn.commit()
         conn.close()
 
@@ -134,8 +144,7 @@ class UserManager:
 
         # 创建目录
         user_dir.mkdir(parents=True, exist_ok=True)
-        (kb_dir / "vector_db").mkdir(parents=True, exist_ok=True)
-        (kb_dir / "graph_db").mkdir(parents=True, exist_ok=True)
+        # LA-051-DIR-FIX: 不再创建旧式 vector_db/graph_db 目录，学科使用内聚路径
         (kb_dir / "cache").mkdir(parents=True, exist_ok=True)
 
         # 初始化 user_states.db（创建空表结构，与当前结构一致）
@@ -265,15 +274,30 @@ class UserManager:
         """初始化用户私有学科数据库"""
         conn = sqlite3.connect(str(db_path))
 
-        # 学科表
+        # 学科表（ENG-P1-NEW: 与 core.subject_manager._ensure_table 保持一致，
+        # 避免旧 schema 缺列导致 create_subject 报 OperationalError）
         conn.execute('''
             CREATE TABLE IF NOT EXISTS subjects (
                 id TEXT PRIMARY KEY,
                 name TEXT NOT NULL,
                 description TEXT,
                 keywords TEXT,
-                is_private INTEGER DEFAULT 1,
-                created_at TEXT
+                created_at TEXT,
+                document_count INTEGER DEFAULT 0,
+                raw_files_count INTEGER DEFAULT 0,
+                owner_id TEXT,
+                visibility TEXT DEFAULT 'public',
+                updated_at TEXT
+            )
+        ''')
+        conn.execute('''
+            CREATE TABLE IF NOT EXISTS subject_documents (
+                id TEXT PRIMARY KEY,
+                subject_id TEXT NOT NULL,
+                source_name TEXT,
+                source_path TEXT,
+                chunk_count INTEGER DEFAULT 0,
+                imported_at TEXT
             )
         ''')
 
@@ -346,6 +370,7 @@ class UserManager:
             "display_name": display_name or username,
             "avatar": avatar,
             "created_at": now,
+            "system_role": "user",
         }
 
     def get_user(self, user_id: str) -> Optional[dict]:
@@ -368,6 +393,7 @@ class UserManager:
             "created_at": row["created_at"],
             "last_active_at": row["last_active_at"],
             "preferences": json.loads(row["preferences"] or "{}"),
+            "system_role": row["system_role"],
         }
 
     def get_user_by_username(self, username: str) -> Optional[dict]:
@@ -390,7 +416,63 @@ class UserManager:
             "created_at": row["created_at"],
             "last_active_at": row["last_active_at"],
             "preferences": json.loads(row["preferences"] or "{}"),
+            "system_role": row["system_role"],
         }
+
+    # ── 系统级角色 ──
+
+    def get_system_role(self, user_id: str) -> Optional[str]:
+        """Return the application-wide role for a user."""
+        conn = sqlite3.connect(str(self.users_db))
+        cursor = conn.cursor()
+        cursor.execute("SELECT system_role FROM users WHERE user_id = ?", (user_id,))
+        row = cursor.fetchone()
+        conn.close()
+        return row[0] if row else None
+
+    def is_system_admin(self, user_id: str) -> bool:
+        """Check whether the user is an application administrator."""
+        return self.get_system_role(user_id) == "admin"
+
+    def count_system_admins(self) -> int:
+        """Return the number of application administrators."""
+        conn = sqlite3.connect(str(self.users_db))
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM users WHERE system_role = 'admin'")
+        count = int(cursor.fetchone()[0])
+        conn.close()
+        return count
+
+    def set_system_role(self, user_id: str, role: str) -> bool:
+        """Set an application-wide role while protecting the last admin."""
+        normalized = role.strip().lower()
+        if normalized not in SYSTEM_ROLES:
+            raise ValueError(f"Unsupported system role: {role}")
+
+        current_role = self.get_system_role(user_id)
+        if current_role is None:
+            raise ValueError(f"User does not exist: {user_id}")
+        if normalized == "admin":
+            conn = sqlite3.connect(str(self.users_db))
+            cursor = conn.cursor()
+            cursor.execute("SELECT password_hash FROM users WHERE user_id = ?", (user_id,))
+            row = cursor.fetchone()
+            conn.close()
+            if not row or not row[0]:
+                raise ValueError("A password-authenticated account is required for administrators")
+        if current_role == "admin" and normalized != "admin" and self.count_system_admins() <= 1:
+            raise ValueError("Cannot demote the last system administrator")
+
+        conn = sqlite3.connect(str(self.users_db))
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE users SET system_role = ? WHERE user_id = ?",
+            (normalized, user_id),
+        )
+        updated = cursor.rowcount > 0
+        conn.commit()
+        conn.close()
+        return updated
 
     # ── LA-052: 密码认证 ──
 
@@ -409,7 +491,7 @@ class UserManager:
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
         cursor.execute(
-            "SELECT user_id, username, display_name, password_hash FROM users WHERE username = ?",
+            "SELECT user_id, username, display_name, password_hash, system_role FROM users WHERE username = ?",
             (username,)
         )
         row = cursor.fetchone()
@@ -428,6 +510,7 @@ class UserManager:
                 "user_id": row["user_id"],
                 "username": row["username"],
                 "display_name": row["display_name"],
+                "system_role": row["system_role"],
             }
         return None
 
@@ -550,6 +633,7 @@ class UserManager:
                 "avatar": r["avatar"],
                 "created_at": r["created_at"],
                 "last_active_at": r["last_active_at"],
+                "system_role": r["system_role"],
             }
             for r in rows
         ]
@@ -587,6 +671,9 @@ class UserManager:
 
         警告：此操作不可恢复！
         """
+        if self.is_system_admin(user_id) and self.count_system_admins() <= 1:
+            raise ValueError("Cannot delete the last system administrator")
+
         # 1. 删除用户目录
         user_dir = self.users_dir / user_id
         if user_dir.exists():

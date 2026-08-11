@@ -277,7 +277,7 @@ def build_test_vector_store(chunks: List[Dict[str, Any]], collection_name: str) 
     # 先创建临时对象以获取 db_path，然后立即关闭连接
     temp_store = VectorStore(collection_name)
     db_path = temp_store._db_path
-    temp_store._conn.close()  # 关闭连接后才能删除文件
+    temp_store.close()  # 关闭连接后才能删除文件
     del temp_store
     
     # 清理旧数据

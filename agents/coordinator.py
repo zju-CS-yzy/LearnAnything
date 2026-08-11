@@ -37,11 +37,14 @@ class Coordinator:
         result = coordinator.handle("给我出几道化学题")
     """
 
-    def __init__(self, collection_name: str = "learnanything_v1", top_k: int = 5, enabled_intents: List[str] = None, graph_store=None, vector_store=None, user_theta: Optional[float] = None):
+    def __init__(self, collection_name: str = "learnanything_v1", top_k: int = 5, enabled_intents: List[str] = None, graph_store=None, vector_store=None, user_theta: Optional[float] = None, user_id: Optional[str] = None):
         self.collection_name = collection_name
         self.top_k = top_k
         self.enabled_intents = enabled_intents or ["concept", "quiz", "job", "evaluate"]
         self.user_theta = user_theta
+        self._graph_store = graph_store
+        self._vector_store = vector_store
+        self._user_id = user_id
 
         self._intent_router = IntentRouter()
         # LA-UI-001: 新增 LLM 意图识别器，用于无@前缀时的智能Agent选择和多Agent任务拆分
@@ -62,8 +65,16 @@ class Coordinator:
         self._message_bus = MessageBus(enable_audit=True)
 
         # Lazy initialization of agents (pass message_bus)
-        self._agents["concept"] = TutorAgent(collection_name=collection_name, top_k=top_k, message_bus=self._message_bus, user_theta=user_theta)
-        self._agents["quiz"] = QuizAgent(collection_name=collection_name, top_k=top_k, message_bus=self._message_bus)
+        self._agents["concept"] = TutorAgent(
+            collection_name=collection_name,
+            top_k=top_k,
+            message_bus=self._message_bus,
+            user_theta=user_theta,
+            graph_store=self._graph_store,
+            vector_store=self._vector_store,  # LA-051-RET-FIX: 权限感知检索
+            user_id=user_id,
+        )
+        self._agents["quiz"] = QuizAgent(collection_name=collection_name, top_k=top_k, message_bus=self._message_bus, vector_store=self._vector_store)
         self._agents["evaluate"] = CoachAgent(collection_name=collection_name, top_k=top_k, message_bus=self._message_bus)
         self._agents["job"] = HeadhunterAgent(message_bus=self._message_bus)
 
@@ -73,8 +84,6 @@ class Coordinator:
         # P0-INT-1: lazy initialization of P0 modules (avoid immediate database connection)
         # P0-QUIZ-fix: support external shared GraphStore instance to avoid KuzuDB repeated connections / file locking
         # LA-051: support external vector_store for permission-aware data access
-        self._graph_store = graph_store
-        self._vector_store = vector_store
         self._retriever = None
         self._builder = None
         self._assembler = None
@@ -83,7 +92,7 @@ class Coordinator:
         # 阶段 1: 延迟初始化 DialogContextManager
         self._dialog_manager = None
 
-    def handle(self, query: str, filters: Optional[Dict[str, Any]] = None, user_id: Optional[str] = None, session_id: Optional[str] = None, user_theta: Optional[float] = None, agent_target: Optional[str] = None) -> Dict[str, Any]:
+    def handle(self, query: str, filters: Optional[Dict[str, Any]] = None, user_id: Optional[str] = None, session_id: Optional[str] = None, user_theta: Optional[float] = None, agent_target: Optional[str] = None, eval_mode: Optional[str] = None) -> Dict[str, Any]:
         """
         处理用户查询的统一入口。
         阶段 1: 新增对话上下文管理（会话持久化、指代解析、历史注入）。
@@ -93,6 +102,7 @@ class Coordinator:
 
         Args:
             agent_target: 前端解析的显式Agent目标（可选），如 "tutor" | "quiz" | "coach" | "job"
+            eval_mode: LA-UI-001 M2 群聊测评模式（可选）：generate|bank|mixed，仅 Coach 生效
 
         Returns:
             {
@@ -107,6 +117,8 @@ class Coordinator:
                 "execution_mode": str,    # LA-UI-001: sequential | parallel | mixed
             }
         """
+        # LA-UI-001 M2: 测评模式暂存，_execute_single 注入 Coach Agent
+        self._current_eval_mode = eval_mode
         start_time = time.time()
         monitor = get_monitor()
         query_id = monitor.start_query(query, user_id=user_id, session_id=session_id)
@@ -345,6 +357,22 @@ class Coordinator:
         print(f"[Coordinator]    - topic_chain: {self._dialog_manager.get_topic_chain(sid)[:5]}")
         print(f"{'='*60}\n")
 
+        # LA-UI-001-FIX: 多Agent时，使用 execution_result 中已构建的执行结果 agent_tasks
+        # 单Agent时，从 intent_result 构建原始任务定义
+        if is_multi_agent and execution_result.get("agent_tasks"):
+            final_agent_tasks = execution_result["agent_tasks"]
+            print(f"[Coordinator] LA-UI-001: 使用执行结果中的 agent_tasks ({len(final_agent_tasks)} 条)")
+        else:
+            final_agent_tasks = [
+                {
+                    "agent": t.agent,
+                    "task": t.task,
+                    "sub_query": t.sub_query,
+                    "priority": t.priority,
+                }
+                for t in intent_result.agent_tasks
+            ]
+
         return {
             "question": query,
             "text": answer_text,
@@ -359,15 +387,7 @@ class Coordinator:
             "session_id": sid,
             "multi_agent": is_multi_agent,
             "execution_mode": intent_result.execution_mode,
-            "agent_tasks": [
-                {
-                    "agent": t.agent,
-                    "task": t.task,
-                    "sub_query": t.sub_query,
-                    "priority": t.priority,
-                }
-                for t in intent_result.agent_tasks
-            ],
+            "agent_tasks": final_agent_tasks,
         }
 
     # ==================== LA-UI-001: Agent名称映射 ====================
@@ -414,6 +434,17 @@ class Coordinator:
             agent_name = "concept"
             agent = self._agents["concept"]
 
+        # LA-UI-001 M2: 测评模式注入（generate/bank/mixed）——实例级包装。
+        # Coordinator 每请求新建，Agent 实例不跨请求共享，包装安全。
+        _eval_mode = getattr(self, "_current_eval_mode", None)
+        if agent_name == "evaluate" and _eval_mode in ("generate", "bank", "mixed"):
+            _orig_handle = agent.handle
+            def _handle_with_eval_mode(q, _h=_orig_handle, _m=_eval_mode, **kw):
+                kw.setdefault("eval_mode", _m)
+                return _h(q, **kw)
+            agent.handle = _handle_with_eval_mode
+            print(f"[Coordinator] LA-UI-001 M2: Coach 测评模式 = {_eval_mode}")
+
         # 使用任务的 sub_query 作为实际查询（已从用户输入中提取）
         actual_query = task.sub_query or resolved_query
 
@@ -426,6 +457,15 @@ class Coordinator:
 
                 # 提取主题
                 topic = self._extract_topic_from_query(actual_query)
+                # LA-UI-001-FIX: 如果提取的主题不明确（为空/太短/含模糊词），使用对话上下文的当前话题
+                if dialog_context and dialog_context.current_topic:
+                    is_vague = (
+                        not topic or len(topic) < 3
+                        or any(w in topic.lower() for w in ["上面", "讨论", "继续", "它", "这个", "那个"])
+                    )
+                    if is_vague:
+                        topic = dialog_context.current_topic
+                        print(f"[Coordinator] LA-UI-001: 主题不明确('{actual_query[:30]}...')，使用当前话题: {topic}")
                 print(f"[Coordinator] 提取主题: {topic}")
                 seed_concepts = retriever.resolve([topic])
 
@@ -440,8 +480,20 @@ class Coordinator:
                     graph_context = assembler.assemble(subgraph, budget=budget)
                     print(f"[Coordinator] 组装上下文: {graph_context.token_count} tokens")
 
+                    # LA-UI-001-FIX: 提取题目数量（如"出3道题" → 3）
+                    n_questions = self._extract_question_count(actual_query)
+                    if n_questions:
+                        print(f"[Coordinator] LA-UI-001: 提取题目数量: {n_questions}")
+                    
+                    # 构建传给 QuizAgent 的 kwargs
+                    agent_kwargs = {
+                        'graph_context': graph_context,
+                    }
+                    if n_questions:
+                        agent_kwargs['n_questions'] = n_questions
+
                     agent_result = agent.handle(actual_query, context=dialog_context, filters=filters,
-                                                graph_context=graph_context, user_theta=user_theta)
+                                                user_theta=user_theta, **agent_kwargs)
                 else:
                     # LA-040-P2-QUIZ-FIX: seed_concepts 为空时，尝试文本检索兜底
                     print(f"[Coordinator] LA-040-P2-QUIZ-FIX: 无匹配概念，尝试文本检索兜底")
@@ -449,22 +501,93 @@ class Coordinator:
                                                                   budget=ContextBudget(max_tokens=2000, max_nodes=15))
                     if graph_context and graph_context.text:
                         print(f"[Coordinator] LA-040-P2-QUIZ-FIX: 文本检索兜底成功，{graph_context.token_count} tokens")
+                        
+                        # LA-UI-001-FIX: 同样提取题目数量
+                        n_questions = self._extract_question_count(actual_query)
+                        agent_kwargs = {
+                            'graph_context': graph_context,
+                        }
+                        if n_questions:
+                            agent_kwargs['n_questions'] = n_questions
+                        
                         agent_result = agent.handle(actual_query, context=dialog_context, filters=filters,
-                                                    graph_context=graph_context, user_theta=user_theta)
+                                                    user_theta=user_theta, **agent_kwargs)
                     else:
                         print(f"[Coordinator] 文本检索兜底也失败，回退到旧方式")
+                        
+                        # LA-UI-001-FIX: 同样提取题目数量
+                        n_questions = self._extract_question_count(actual_query)
+                        agent_kwargs = {}
+                        if n_questions:
+                            agent_kwargs['n_questions'] = n_questions
+                        
                         agent_result = agent.handle(actual_query, context=dialog_context, filters=filters,
-                                                    user_theta=user_theta)
+                                                    user_theta=user_theta, **agent_kwargs)
             except Exception as e:
                 print(f"[Coordinator] P0 模块调用失败，回退到旧模式: {e}")
                 import traceback
                 traceback.print_exc()
-                agent_result = agent.handle(actual_query, context=dialog_context, filters=filters, user_theta=user_theta)
+                
+                # LA-UI-001-FIX: 同样提取题目数量
+                n_questions = self._extract_question_count(actual_query)
+                agent_kwargs = {}
+                if n_questions:
+                    agent_kwargs['n_questions'] = n_questions
+                
+                agent_result = agent.handle(actual_query, context=dialog_context, filters=filters, 
+                                            user_theta=user_theta, **agent_kwargs)
         else:
             # 非 quiz/concept/evaluate 意图，原方式执行
             agent_result = agent.handle(actual_query, context=dialog_context, filters=filters, user_theta=user_theta)
 
         # 保存 Agent 回复到对话历史
+        # LA-UI-001-FIX: 特殊处理不同 Agent 的输出格式，确保内容能被后续 Agent 正确理解
+        agent_content = ""
+        if isinstance(agent_result, dict):
+            # QuizAgent: 题目内容在 questions 字段，text 通常为空
+            if agent_name == "quiz" and agent_result.get("questions"):
+                questions = agent_result["questions"]
+                lines = [f"已生成 {len(questions)} 道题目:"]
+                for i, q in enumerate(questions, 1):
+                    q_text = q.get("question", "")
+                    q_type = q.get("type", "")
+                    lines.append(f"\n【第{i}题】({q_type})")
+                    lines.append(q_text)
+                    if q.get("options"):
+                        for opt in q["options"]:
+                            lines.append(f"  {opt}")
+                    if q.get("answer"):
+                        lines.append(f"答案: {q['answer']}")
+                    if q.get("explanation"):
+                        lines.append(f"解析: {q['explanation'][:200]}")
+                agent_content = "\n".join(lines)
+            # CoachAgent: 评测结果需要格式化保存
+            elif agent_name == "evaluate":
+                result = agent_result.get("result", agent_result)
+                if isinstance(result, dict):
+                    score = result.get("score", "")
+                    total = result.get("total_score", "")
+                    accuracy = result.get("accuracy", "")
+                    theta = result.get("irt_theta", "")
+                    lines = ["评测完成。"]
+                    if score != "":
+                        lines.append(f"得分: {score}/{total}")
+                    if accuracy != "":
+                        lines.append(f"正确率: {accuracy}")
+                    if theta != "":
+                        lines.append(f"能力估计(IRT θ): {theta}")
+                    weak = result.get("weak_areas", [])
+                    if weak:
+                        lines.append(f"薄弱领域: {', '.join(weak)}")
+                    agent_content = "\n".join(lines)
+                else:
+                    agent_content = str(result)
+            # TutorAgent / 其他: 使用 text 字段
+            else:
+                agent_content = agent_result.get("text", "")
+        else:
+            agent_content = str(agent_result)
+
         agent_metadata = {}
         if isinstance(agent_result, dict) and agent_result.get("metadata"):
             meta = agent_result["metadata"]
@@ -472,12 +595,17 @@ class Coordinator:
                 agent_metadata["sources"] = meta["sources"]
             if meta.get("media"):
                 agent_metadata["media"] = meta["media"]
+        # LA-UI-001 M1: 题卡数据随消息持久化，历史会话可恢复 QuestionCard 渲染
+        if isinstance(agent_result, dict) and agent_result.get("questions"):
+            agent_metadata["questions"] = agent_result["questions"]
+            if agent_result.get("topic"):
+                agent_metadata["topic"] = agent_result["topic"]
 
         self._dialog_manager.save_message(
             session_id=sid,
             turn_number=turn_number,
             role="agent",
-            content=agent_result.get("text", "") if isinstance(agent_result, dict) else str(agent_result),
+            content=agent_content,
             agent_name=agent.agent_name,
             intent=agent_name,
             metadata=agent_metadata if agent_metadata else None
@@ -494,72 +622,112 @@ class Coordinator:
                             dialog_context, filters, user_theta,
                             sid: str, turn_number: int) -> Dict[str, Any]:
         """
-        串行执行多Agent任务：按优先级依次调用Agent，中间结果传递给后续Agent。
+        串行执行多Agent任务：按优先级依次调用Agent，中间结果通过对话历史传递。
 
-        适用场景：任务有先后依赖，如"先评测再出题"。
-        执行逻辑：
-          1. 按 priority 排序任务
-          2. 依次执行每个任务
-          3. 将前置 Agent 的结果存入 shared_results，供后续 Agent 使用
-          4. 最终返回最后一个 Agent 的结果（或聚合结果）
+        LA-UI-001-FIX: 不再污染 sub_query，而是将前置Agent结果保存到共享对话历史，
+        后续Agent通过 dialog_context 自然获取前面步骤的上下文。
+
+        适用场景：任务有先后依赖，如"先讲解再出题"。
         """
         print(f"[Coordinator] LA-UI-001: 开始串行执行 {len(intent_result.agent_tasks)} 个Agent任务")
 
         # 按优先级排序（priority 越小优先级越高）
         sorted_tasks = sorted(intent_result.agent_tasks, key=lambda t: t.priority)
 
-        # 存储各Agent的执行结果，供后续依赖的Agent使用
+        # 存储各Agent的执行结果
         shared_results: Dict[str, Dict[str, Any]] = {}
-        last_result: Dict[str, Any] = {}
+        all_results: List[Dict[str, Any]] = []
+
+        # 当前上下文（会在每个Agent执行后重建，包含前面的历史）
+        current_context = dialog_context
 
         for i, task in enumerate(sorted_tasks):
-            print(f"[Coordinator] LA-UI-001: 串行执行 Step {i+1}/{len(sorted_tasks)}: agent={task.agent}, task={task.task}")
+            print(f"[Coordinator] LA-UI-001: 串行执行 Step {i+1}/{len(sorted_tasks)}: agent={task.agent}")
 
-            # 如果有依赖，检查前置Agent是否已完成
+            # 依赖检查
             if task.depends_on:
                 for dep in task.depends_on:
                     if dep not in shared_results:
                         print(f"[Coordinator] LA-UI-001: 警告 - 依赖的Agent '{dep}' 尚未执行")
 
-            # 构建传递给当前Agent的上下文（包含前置Agent结果）
-            task_context = dialog_context
-            if task.depends_on and shared_results:
-                # 将前置结果注入 sub_query 或 metadata
-                dep_summaries = []
-                for dep in task.depends_on:
-                    if dep in shared_results:
-                        dep_res = shared_results[dep]
-                        dep_text = dep_res.get("text", "") if isinstance(dep_res, dict) else str(dep_res)
-                        dep_summaries.append(f"[{dep}] 结果: {dep_text[:200]}...")
+            # 执行单Agent任务（使用当前上下文，包含前面的历史）
+            single_result = self._execute_single(
+                task, resolved_query, current_context,
+                filters, user_theta, sid, turn_number
+            )
 
-                if dep_summaries:
-                    # 修改 sub_query，追加前置结果摘要
-                    enhanced_sub_query = task.sub_query + "\n\n【前置分析结果】\n" + "\n".join(dep_summaries)
-                    # 创建临时任务副本（不改变原始任务）
-                    task = AgentTask(
-                        agent=task.agent,
-                        task=task.task,
-                        sub_query=enhanced_sub_query,
-                        priority=task.priority,
-                        depends_on=task.depends_on,
-                        estimated_output=task.estimated_output,
-                    )
-                    print(f"[Coordinator] LA-UI-001: 已注入前置结果到 sub_query")
+            agent_name = single_result.get("agent", task.agent)
+            agent_result = single_result.get("result", {})
 
-            # 执行单Agent任务
-            single_result = self._execute_single(task, resolved_query, task_context,
-                                                  filters, user_theta, sid, turn_number)
+            # LA-UI-001-FIX: _execute_single 内部已通过 save_message(role="agent") 保存结果
+            # 无需在此重复保存，避免历史会话中出现重复消息
+            shared_results[task.agent] = agent_result
+            all_results.append(single_result)
 
-            # 保存结果到共享池
-            shared_results[task.agent] = single_result.get("result", {})
-            last_result = single_result
+            # 重建上下文，让后续Agent能看到前面的历史
+            current_context = self._dialog_manager.build_context(sid)
+            print(f"[Coordinator] LA-UI-001: 上下文已重建，历史消息数更新")
 
-            print(f"[Coordinator] LA-UI-001: Step {i+1} 完成: agent={single_result.get('agent')}")
+            print(f"[Coordinator] LA-UI-001: Step {i+1} 完成: agent={agent_name}")
 
-        # 串行执行返回最后一个Agent的结果
-        # TODO: 未来可扩展为返回聚合结果（所有Agent的结果列表）
-        print(f"[Coordinator] LA-UI-001: 串行执行全部完成，返回最后结果 from {last_result.get('agent')}")
-        return last_result
+        # LA-UI-001-FIX: 返回聚合结果，包含所有步骤的摘要
+        # 这样前端可以展示每个Agent的独立输出
+        final_result = all_results[-1] if all_results else {"agent": "unknown", "result": {"text": "所有串行任务均失败"}}
+
+        # 构建多Agent聚合输出（用于前端展示多消息）
+        if len(all_results) > 1:
+            multi_agent_output = []
+            for res in all_results:
+                agent_name = res.get("agent", "unknown")
+                result_data = res.get("result", {})
+                
+                # LA-UI-001-FIX: 提取 text，对 QuizAgent 特殊处理（原始 text 可能为空）
+                if isinstance(result_data, dict):
+                    text = result_data.get("text", "")
+                    questions = result_data.get("questions", [])
+                    # QuizAgent: 若 text 为空但有 questions，生成默认文本
+                    if not text and questions and agent_name in ("quiz", "QuizAgent"):
+                        text = f"已生成 {len(questions)} 道题目，请作答："
+                    # LA-UI-001 M1: 有 questions 时由前端 QuestionCard 渲染题目，
+                    # text 只保留引导段（首段），避免与卡片重复展示
+                    elif text and questions:
+                        text = text.split("\n\n")[0].strip()
+                else:
+                    text = str(result_data)
+                    questions = []
+                
+                # 构建 metadata，确保 questions 被传递
+                metadata = {}
+                if isinstance(result_data, dict):
+                    metadata = result_data.get("metadata", {}) or {}
+                    # 如果原始 result 中有 questions，注入 metadata
+                    if questions:
+                        metadata["questions"] = questions
+                        # LA-UI-001 M1: 携带出题主题，供 QuestionCard 显示与保存题库
+                        if result_data.get("topic"):
+                            metadata["topic"] = result_data["topic"]
+                    if result_data.get("sources"):
+                        metadata["sources"] = result_data["sources"]
+                    if result_data.get("media"):
+                        metadata["media"] = result_data["media"]
+                
+                multi_agent_output.append({
+                    "agent": agent_name,
+                    "text": text,
+                    "metadata": metadata,
+                })
+
+            # 注入 multi_agent 标记到最终结果，前端可据此展示多条消息
+            final_result["multi_agent"] = True
+            final_result["agent_tasks"] = multi_agent_output
+            print(f"[Coordinator] LA-UI-001: 串行执行全部完成，返回聚合结果（{len(all_results)} 个Agent）")
+            for item in multi_agent_output:
+                print(f"[Coordinator] LA-UI-001:   → {item['agent']}: text_len={len(item['text'])}, "
+                      f"questions={len(item['metadata'].get('questions', []))}")
+        else:
+            print(f"[Coordinator] LA-UI-001: 串行执行全部完成，返回单结果 from {final_result.get('agent')}")
+
+        return final_result
 
     # ==================== LA-UI-001: 多Agent并行执行 ====================
 
@@ -797,6 +965,53 @@ class Coordinator:
         if not topic:
             topic = query
         return topic
+
+    def _extract_question_count(self, query: str) -> Optional[int]:
+        """
+        从用户查询中提取题目数量。
+
+        支持模式：
+          - "出3道题" -> 3
+          - "给我出5题" -> 5
+          - "出10道面试题" -> 10
+          - "出3-5道题" -> 5 (取最大值)
+          - "出几道题" / "出一些题" -> None (不明确)
+        """
+        import re
+        q = query.strip()
+
+        # 模式 1: "出N道题" / "出N题" / "N道题"
+        patterns = [
+            r'出\s*(\d+)\s*道\s*题',
+            r'出\s*(\d+)\s*题',
+            r'(\d+)\s*道\s*题',
+            r'(\d+)\s*题',
+            r'来\s*(\d+)\s*道',
+            r'给\s*我\s*(\d+)\s*道',
+        ]
+        for pattern in patterns:
+            m = re.search(pattern, q, re.IGNORECASE)
+            if m:
+                count = int(m.group(1))
+                # 限制合理范围
+                if 1 <= count <= 50:
+                    return count
+                print(f"[Coordinator] 提取到题目数量 {count} 超出范围，使用默认")
+                return None
+
+        # 模式 2: "3-5道题" -> 取最大值
+        m = re.search(r'(\d+)\s*[-~到]\s*(\d+)\s*道', q)
+        if m:
+            return int(m.group(2))
+
+        # 模式 3: 英文 "N questions"
+        m = re.search(r'(\d+)\s*questions?', q, re.IGNORECASE)
+        if m:
+            count = int(m.group(1))
+            if 1 <= count <= 50:
+                return count
+
+        return None
 
     # ==================== P0-INT-6: 消息总线 ====================
 

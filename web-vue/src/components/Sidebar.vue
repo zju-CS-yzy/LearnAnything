@@ -68,6 +68,7 @@
       <!-- LA-DEPLOY-FEAT: 设置入口，随时可重新配置 API Key -->
       <div class="nav-divider"></div>
       <div
+        v-if="isSystemAdmin"
         class="nav-item settings-item"
         @click="$emit('open-settings')"
         :title="collapsed ? settingsItem.label : ''"
@@ -117,6 +118,7 @@
           <div class="user-info">
             <span class="user-name">{{ currentUserDisplay }}</span>
             <span class="user-id">{{ currentUserId }}</span>
+            <span v-if="isSystemAdmin" class="admin-badge">系统管理员</span>
           </div>
           <span class="user-toggle">▼</span>
         </div>
@@ -218,7 +220,7 @@ const props = defineProps({
 defineEmits(['switch-view', 'toggle-sidebar', 'open-settings'])
 
 // ====== LA-050-Phase5 + LA-052: 用户管理 ======
-const { currentUser, xUserId, isLoggedIn, loginWithPassword, register, logout, switchUser, userList, getAuthHeaders } = useUser()
+const { currentUser, xUserId, isLoggedIn, isSystemAdmin, loginWithPassword, register, logout, switchUser, userList, getAuthHeaders } = useUser()
 
 const showUserPanel = ref(false)
 const showLoginDialog = ref(false)
@@ -378,7 +380,7 @@ async function deleteSubject() {
 }
 
 // 导航菜单项（LA-UI-001: 移除"智能对话"，ChatView 已常驻右侧）
-const navItems = [
+const baseNavItems = [
   { id: 'graph', icon: '🕸️', label: '知识图谱' },
   { id: 'quiz', icon: '📝', label: '出题' },
   { id: 'evaluate', icon: '📊', label: '评测' },
@@ -387,6 +389,10 @@ const navItems = [
   { id: 'knowledge', icon: '🗂️', label: '知识库' },
   { id: 'monitor', icon: '📡', label: '监控' },
 ]
+
+const navItems = computed(() =>
+  baseNavItems.filter(item => item.id !== 'monitor' || isSystemAdmin.value)
+)
 
 const settingsItem = { id: 'settings', icon: '⚙️', label: '设置' }
 
@@ -981,6 +987,17 @@ window.addEventListener('chat-session-started', (e) => {
 .user-id {
   font-size: var(--font-size-xs);
   color: var(--text-muted);
+}
+
+.admin-badge {
+  align-self: flex-start;
+  margin-top: 2px;
+  padding: 1px 5px;
+  border-radius: 999px;
+  background: rgba(245, 158, 11, 0.16);
+  color: #b45309;
+  font-size: 10px;
+  font-weight: 600;
 }
 
 .user-toggle {

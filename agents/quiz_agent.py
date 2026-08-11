@@ -209,11 +209,12 @@ class QuizAgent(BaseAgent):
     def agent_name(self) -> str:
         return "QuizAgent"
 
-    def __init__(self, collection_name: str = "learnanything_v1", subject: str = "generic", top_k: int = 5, message_bus=None):
+    def __init__(self, collection_name: str = "learnanything_v1", subject: str = "generic", top_k: int = 5, message_bus=None, vector_store=None):
         self.collection_name = collection_name
         self.subject = subject
         self.top_k = top_k
-        self._vector_store = None
+        # LA-051-RET-FIX: Coordinator 注入的权限感知 VectorStore（私有学科不再回退 Share）
+        self._vector_store = vector_store
         self._embedding = EmbeddingManager()
         self._rewriter = QueryRewriter()
         self._llm = LLMClient()
@@ -270,22 +271,27 @@ class QuizAgent(BaseAgent):
         # P1-FIX: 从 kwargs 读取 question_types（前端传入或默认配置）
         question_types = kwargs.get("question_types")
 
-        # 阶段 1: 对话上下文注入（用于自适应出题）
-        if context is not None and hasattr(context, 'to_prompt_context'):
-            print(f"[QuizAgent] 阶段1: 对话上下文注入，当前轮次={context.turn_number}")
+        # 阶段 1: 对话上下文注入（使用基类统一方法）
+        history_text = self.get_history_text(context, max_turns=5)
+        if history_text:
+            print(f"[QuizAgent] 阶段1: 对话上下文注入，当前轮次={context.turn_number}, 历史={len(history_text)} 字符")
             # 如果对话中有当前话题，优先使用
             if context.current_topic and not kwargs.get("topic"):
                 kwargs = dict(kwargs)
                 kwargs["topic"] = context.current_topic
+        else:
+            print(f"[QuizAgent] 阶段1: 无对话历史（新会话）")
 
         # P0-INT-2: 如果提供了 graph_context，使用 P0 图谱上下文出题
         if graph_context is not None and graph_context.text:
             print(f"[QuizAgent] P0-INT-2: 使用 P0 图谱上下文出题，token={graph_context.token_count}")
-            return self._generate_questions_with_context(query, n_questions, graph_context, question_types=question_types)
+            # LA-UI-001: 从 kwargs 获取 topic_override（来自 context.current_topic）
+            topic_override = kwargs.get("topic", "")
+            return self._generate_questions_with_context(query, n_questions, graph_context, question_types=question_types, history_text=history_text, topic_override=topic_override)
 
         # 回退：旧方式直接检索 chunks
         print(f"[QuizAgent] 回退到旧方式出题（无图谱上下文）")
-        return self._generate_questions_old(query, n_questions, filters, question_types=question_types)
+        return self._generate_questions_old(query, n_questions, filters, question_types=question_types, history_text=history_text)
 
     def _extract_topic(self, query: str) -> str:
         """从用户查询中提取核心主题"""
@@ -303,9 +309,22 @@ class QuizAgent(BaseAgent):
 
     # ==================== P0-INT-2: 使用图谱上下文出题（多题型支持）====================
 
-    def _generate_questions_with_context(self, query: str, n_questions: int, graph_context: GraphContext, question_types: Optional[List[str]] = None) -> Dict[str, Any]:
-        """P0-INT-2: 使用 ContextAssembler 组装的上下文生成题目（支持多题型）"""
+    def _generate_questions_with_context(self, query: str, n_questions: int, graph_context: GraphContext, question_types: Optional[List[str]] = None, history_text: str = "", topic_override: str = "") -> Dict[str, Any]:
+        """P0-INT-2: 使用 ContextAssembler 组装的上下文生成题目（支持多题型）
+        
+        LA-UI-001-FIX: 
+        - 新增 history_text 参数，注入对话历史保持上下文连贯。
+        - 新增 topic_override 参数，当 query 含模糊词时使用外部提供的主题。
+        """
         topic = self._extract_topic(query)
+        # LA-UI-001-FIX: 如果提取的主题含模糊词，使用外部传入的主题
+        if topic_override and (
+            not topic or len(topic) < 3
+            or any(w in topic.lower() for w in ["上面", "讨论", "继续", "它", "这个", "那个", "基于"])
+        ):
+            topic = topic_override
+            print(f"[QuizAgent] LA-UI-001: 主题含模糊词，使用外部主题: {topic}")
+        
         config = self._get_subject_config()
         # P1-FIX: 如果没有指定题型，使用配置中启用的题型
         if question_types is None:
@@ -335,7 +354,7 @@ class QuizAgent(BaseAgent):
 
         # 优先使用 LLM 生成题目（多题型）
         questions = self._generate_questions_llm_from_context(
-            context_text, n_questions, topic, question_types, user_theta, weak_areas
+            context_text, n_questions, topic, question_types, user_theta, weak_areas, history_text=history_text
         )
 
         if not questions:
@@ -418,8 +437,11 @@ class QuizAgent(BaseAgent):
             return "\n".join(matched[:20]) + "\n" + context_text[:2000]
         return context_text
 
-    def _generate_questions_llm_from_context(self, context_text: str, n_questions: int, topic: str, question_types: List[str], user_theta: float = 0.0, weak_areas: List[str] = None) -> List[Dict[str, Any]]:
-        """使用 graph_context.text 替代 chunks 作为 LLM prompt 上下文，支持多题型混合生成"""
+    def _generate_questions_llm_from_context(self, context_text: str, n_questions: int, topic: str, question_types: List[str], user_theta: float = 0.0, weak_areas: List[str] = None, history_text: str = "") -> List[Dict[str, Any]]:
+        """使用 graph_context.text 替代 chunks 作为 LLM prompt 上下文，支持多题型混合生成
+        
+        LA-UI-001-FIX: 新增 history_text 参数，注入对话历史。
+        """
         if not self._llm.available or not context_text:
             return []
 
@@ -436,12 +458,16 @@ class QuizAgent(BaseAgent):
             weak_areas_hint = f"\n\n用户薄弱环节: {', '.join(weak_areas)}。请优先针对这些薄弱环节出题。"
 
         # P1-FIX: 构建混合题型 prompt
-        prompt = self._build_mixed_prompt(
+        base_prompt = self._build_mixed_prompt(
             n_questions=n_questions,
             context_text=context_text,
             topic=topic,
             question_types=question_types,
+            history_text=history_text,  # LA-UI-001: 传入对话历史
         ) + difficulty_hint + weak_areas_hint
+
+        # LA-UI-001: 基类方法已不需要额外注入，_build_mixed_prompt 内部已处理
+        prompt = base_prompt
 
         try:
             result = self._llm.chat_json(
@@ -477,11 +503,11 @@ class QuizAgent(BaseAgent):
 
     # ==================== P1: 多题型混合生成 Prompt 构建 ====================
 
-    def _build_mixed_prompt(self, n_questions: int, context_text: str, topic: str, question_types: List[str]) -> str:
+    def _build_mixed_prompt(self, n_questions: int, context_text: str, topic: str, question_types: List[str], history_text: str = "") -> str:
         """构建多题型混合生成的 LLM prompt
 
-        根据 question_types 列表，动态组合各题型模板，生成一次 LLM 调用。
-        自动分配每类题型数量（尽量均匀分布）。
+        LA-UI-001-FIX: 新增 history_text 参数。当用户要求"基于上面的讨论"出题时，
+        将对话历史作为参考资料加入 prompt，并明确指示 LLM 基于历史内容出题。
         """
         # 过滤有效题型
         valid_types = [t for t in question_types if t in QUIZ_PROMPT_TEMPLATES]
@@ -493,18 +519,33 @@ class QuizAgent(BaseAgent):
         if len(valid_types) == 1:
             type_counts[valid_types[0]] = n_questions
         else:
-            # 单选题优先多分配（如果有）
             base = n_questions // len(valid_types)
             remainder = n_questions % len(valid_types)
             for i, t in enumerate(valid_types):
                 type_counts[t] = base + (1 if i < remainder else 0)
 
+        # LA-UI-001: 判断是否有有意义的对话历史
+        has_meaningful_history = bool(history_text and len(history_text) > 50)
+
         # 构建 prompt 头部
-        parts = [
-            f"你是一个专业的教育出题专家。请基于以下「知识片段」，生成 {n_questions} 道关于「{topic}」的高质量题目。",
-            "",
+        if has_meaningful_history:
+            # 用户有对话历史，强调基于历史出题
+            parts = [
+                f"你是一个专业的教育出题专家。用户要求基于之前的讨论内容出题。",
+                f"请综合参考「对话历史」和「知识片段」，生成 {n_questions} 道关于「{topic}」的高质量题目。",
+                "【重要】用户明确要求'基于上面的讨论'，请优先从「对话历史」中提取具体讨论点来出题，",
+                "「知识片段」作为补充参考。题目应针对之前讨论的具体内容，而非泛泛的主题概念。",
+                "",
+            ]
+        else:
+            parts = [
+                f"你是一个专业的教育出题专家。请基于以下「知识片段」，生成 {n_questions} 道关于「{topic}」的高质量题目。",
+                "",
+            ]
+
+        parts.extend([
             "## 题型分布",
-        ]
+        ])
         for t, count in type_counts.items():
             label = {
                 "single_choice": "单选题",
@@ -526,9 +567,17 @@ class QuizAgent(BaseAgent):
             parts.append(QUIZ_PROMPT_TEMPLATES[t])
             parts.append("")
 
-        # 添加知识片段
+        # LA-UI-001: 先放对话历史（如果有），再放知识片段
+        if has_meaningful_history:
+            parts.extend([
+                "## 对话历史（用户要求基于此出题，请优先参考）",
+                "",
+                history_text,
+                "",
+            ])
+
         parts.extend([
-            "## 知识片段",
+            "## 知识片段（补充参考）",
             "",
             context_text,
             "",
@@ -595,8 +644,11 @@ class QuizAgent(BaseAgent):
 
     # ==================== 旧方式出题（回退）====================
 
-    def _generate_questions_old(self, query: str, n_questions: int = 5, filters: Optional[Dict[str, Any]] = None, question_types: List[str] = None) -> Dict[str, Any]:
-        """P0-INT-2: 原 handle 逻辑提取为独立方法（回退路径，支持多题型）"""
+    def _generate_questions_old(self, query: str, n_questions: int = 5, filters: Optional[Dict[str, Any]] = None, question_types: List[str] = None, history_text: str = "") -> Dict[str, Any]:
+        """P0-INT-2: 原 handle 逻辑提取为独立方法（回退路径，支持多题型）
+        
+        LA-UI-001-FIX: 新增 history_text 参数，注入对话历史。
+        """
         topic = self._extract_topic(query)
 
         config = self._get_subject_config()
@@ -607,6 +659,11 @@ class QuizAgent(BaseAgent):
 
         store = self._get_vector_store()
         retrieved = store.query(topic, n_results=max(n_questions * 4, 24))
+
+        # LA-UI-001-FIX: 如果有对话历史，追加到检索结果中
+        if history_text:
+            retrieved.insert(0, {"text": f"【对话历史】\n{history_text}", "source": "dialog_history", "chunk_id": "history"})
+            print(f"[QuizAgent] 旧路径: 对话历史已追加到检索结果 ({len(history_text)} 字符)")
 
         questions = self._generate_questions_llm(retrieved, n_questions, topic, question_types=question_types)
 

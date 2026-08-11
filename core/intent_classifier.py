@@ -102,6 +102,15 @@ INTENT_CLASSIFICATION_PROMPT = """你是一个智能意图识别器，负责分�
 3. 如果用户请求涉及多个Agent的能力，拆分为多个任务
 4. 评估任务之间是否有依赖关系，确定执行顺序
 
+## 关键词映射规则（结合语义判断，不要机械套用）
+- 用户请求"对自己"进行评测/摸底（如"评测我"、"考考我"、"测测我的水平"、"摸底"）→ coach
+- "评测"、"评估"、"诊断"等词若只是讨论主题中的普通名词（如"解释一下风险评估"），按知识讲解处理 → tutor
+- "出题"、"来道题"、"测试一下" → quiz
+- "讲解"、"解释一下"、"什么是"、"怎么理解" → tutor
+- "面试"、"求职"、"职业规划" → job
+
+注意：如果用户说"评测...并出题"，这是复合意图，应拆分为 coach + quiz，且 coach 优先（因为评测结果可用于指导出题）。
+
 ## 输出格式
 必须返回严格的JSON格式，不要包含任何其他文本：
 {
@@ -229,8 +238,17 @@ class IntentClassifier:
                 reason=f"用户显式@了 {agent} Agent",
             )
         
-        # 3. 如果有多个显式Agent，需要LLM进行任务拆分
-        # 4. 如果没有显式Agent，需要LLM识别意图
+        # 3. 关键词强信号预处理（无显式@时）
+        # 如果查询包含强信号词，在上下文中标记倾向，帮助LLM正确识别
+        if not explicit_agents:
+            forced_hint = self._detect_forced_intent(query)
+            if forced_hint:
+                context = dict(context)
+                context["forced_intent_hint"] = forced_hint
+                print(f"[IntentClassifier] 关键词意图检测: {forced_hint}")
+        
+        # 4. 如果有多个显式Agent，需要LLM进行任务拆分
+        # 5. 如果没有显式Agent，需要LLM识别意图
         return self._llm_classify(query, context, explicit_agents)
     
     def classify_simple(self, query: str) -> str:
@@ -281,6 +299,72 @@ class IntentClassifier:
         cleaned = re.sub(r'@\w+\s*', '', query)
         return cleaned.strip()
     
+    def _detect_forced_intent(self, query: str) -> str:
+        """
+        关键词意图信号检测（INTENT-P2-1 修复版）。
+
+        分两档，避免"解释一下风险评估"这类讲解请求被"评估"二字误判：
+        - 强信号：动作明确指向"对用户本人"的评测/出题/求职，高置信，
+          提示中给出明确建议；
+        - 弱信号：该词可能只是讨论主题中的普通名词（如"风险评估"
+          "绩效评估"），提示中仅作倾向性参考，最终由 LLM 结合语义判断。
+
+        Returns:
+            str: 意图提示文本（可多行合并），无匹配时返回空字符串
+        """
+        q = query.lower()
+        hints = []
+
+        def _hit(keywords):
+            return next((kw for kw in keywords if kw in q), None)
+
+        # ---- 强信号 ----
+
+        # coach：明确指向"测我/考我"这类对用户本人的评测动作。
+        # 注："考考"涵盖"考考我"，统一归 coach（不再与 quiz 表重复）。
+        kw = _hit(['考考', '测测', '评测我', '评估我', '诊断我', '考我',
+                   '测一下我', '摸摸底', '摸底', '我的水平', '掌握程度'])
+        if kw:
+            hints.append(
+                f"检测到强信号词'{kw}'：用户在请求对其本人进行能力评测，"
+                f"应使用 coach Agent（能力评测）")
+
+        # quiz：明确的出题动作（含"出3道题/出几道题"这类数量词插入的变体）
+        kw = _hit(['出题', '来道题', '来几道题', '测试题', '练习题'])
+        if not kw and re.search(r'出[^，。,.]{0,4}道题', q):
+            kw = '出…道题'
+        if kw:
+            hints.append(
+                f"检测到强信号词'{kw}'：用户在请求出题，"
+                f"应使用 quiz Agent（出题）")
+
+        # job：明确的求职动作
+        kw = _hit(['面试', '求职', '职业规划', '简历', '应聘'])
+        if kw:
+            hints.append(
+                f"检测到强信号词'{kw}'：用户在咨询求职相关事宜，"
+                f"应使用 job Agent")
+
+        # ---- 弱信号（可能是主题名词，仅供 LLM 参考）----
+
+        # coach 弱信号："评测/评估/诊断/测一下"常出现在讲解类问题中
+        kw = _hit(['评测', '评估', '诊断', '测一下'])
+        if kw:
+            hints.append(
+                f"检测到关键词'{kw}'：用户可能想进行能力评测（coach），"
+                f"但'{kw}'也可能只是讨论主题中的普通名词（如“风险评估”）。"
+                f"请判断：若用户在请求对自己进行评测/摸底，使用 coach；"
+                f"若只是在询问包含该词的知识概念，按语义选择（通常为 tutor）")
+
+        # quiz 弱信号："测试一下"（与提示词规则对齐；可能是出题也可能是评测）
+        kw = _hit(['测试一下'])
+        if kw:
+            hints.append(
+                f"检测到关键词'测试一下'：用户可能想要练习题（quiz），"
+                f"也可能想评测水平（coach），请结合语义判断")
+
+        return "\n".join(hints)
+    
     def _build_prompt(self, query: str, context: Dict[str, Any], explicit_agents: List[str]) -> str:
         """构建LLM提示词"""
         # 构建上下文信息
@@ -301,11 +385,15 @@ class IntentClassifier:
         if explicit_agents:
             explicit_str = f"用户显式@了: {', '.join(explicit_agents)}"
         
+        # LA-UI-001-FIX / INTENT-P2-1: 关键词意图提示（分强/弱档，弱档仅供 LLM 参考）
+        forced_hint = context.get("forced_intent_hint", "")
+        forced_str = f"\n## 关键词意图提示（请结合语义最终判断）\n{forced_hint}\n" if forced_hint else ""
+        
         prompt = f"""{self._prompt_template}
 
 ## 当前上下文
 {ctx_str}
-{explicit_str}
+{explicit_str}{forced_str}
 
 ## 用户输入
 {query}
@@ -353,12 +441,21 @@ class IntentClassifier:
             shared_topic = response.get("shared_topic", "")
             reasoning = response.get("reasoning", "")
             
+            # LA-UI-001-FIX: 调试日志 — 打印原始LLM响应
+            print(f"[IntentClassifier] LLM原始响应: primary_intent={primary_intent}, "
+                  f"tasks_count={len(agent_tasks_raw)}, mode={execution_mode}")
+            for i, tr in enumerate(agent_tasks_raw):
+                print(f"[IntentClassifier]   task[{i}]: agent={tr.get('agent')}, "
+                      f"sub_query={tr.get('sub_query', '')[:50]}, "
+                      f"depends_on={tr.get('depends_on', [])}")
+            
             # 验证并构建 AgentTask 列表
             agent_tasks = []
             for task_raw in agent_tasks_raw:
                 agent = task_raw.get("agent", "tutor")
                 # 验证agent名称合法性
                 if agent not in ('tutor', 'quiz', 'coach', 'job'):
+                    print(f"[IntentClassifier] 警告: 非法agent名称'{agent}'，兜底为tutor")
                     agent = 'tutor'  # 兜底
                 
                 task = AgentTask(
@@ -373,19 +470,28 @@ class IntentClassifier:
             
             # 如果没有解析到任务，创建默认任务
             if not agent_tasks:
+                print(f"[IntentClassifier] 警告: LLM未返回agent_tasks，创建默认单任务")
                 agent_tasks = [AgentTask(
                     agent=primary_intent if primary_intent != 'mixed' else 'tutor',
                     task=query,
                     sub_query=query,
                 )]
             
-            return IntentResult(
+            result = IntentResult(
                 primary_intent=primary_intent,
                 agent_tasks=agent_tasks,
                 execution_mode=execution_mode,
                 shared_topic=shared_topic,
                 reasoning=reasoning,
             )
+            
+            # LA-UI-001-FIX: 调试日志 — 打印最终解析结果
+            print(f"[IntentClassifier] 解析完成: primary={result.primary_intent}, "
+                  f"tasks={len(result.agent_tasks)}, mode={result.execution_mode}")
+            for t in result.agent_tasks:
+                print(f"[IntentClassifier]   → {t.agent}: {t.sub_query[:60]} (dep={t.depends_on})")
+            
+            return result
             
         except Exception as e:
             print(f"[IntentClassifier] 解析响应失败: {e}，回退到关键词匹配")

@@ -53,14 +53,20 @@ class QueryCache:
             )
         """)
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_accessed_at ON query_cache(accessed_at)")
+        # CACHE-P1-1: scope 列（user_id:collection），旧库自动迁移
+        cols = {row[1] for row in cursor.execute("PRAGMA table_info(query_cache)").fetchall()}
+        if "scope" not in cols:
+            cursor.execute("ALTER TABLE query_cache ADD COLUMN scope TEXT NOT NULL DEFAULT ''")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_scope ON query_cache(scope)")
         conn.commit()
         conn.close()
 
     def _normalize(self, query: str) -> str:
         return ' '.join(query.lower().split())
 
-    def _hash(self, query: str) -> str:
-        return hashlib.md5(self._normalize(query).encode()).hexdigest()
+    def _hash(self, query: str, scope: str = "") -> str:
+        # CACHE-P1-1: scope 参与哈希，同一 query 在不同用户/学科下互不可见
+        return hashlib.md5(f"{scope}::{self._normalize(query)}".encode()).hexdigest()
 
     def _cosine(self, a: List[float], b: List[float]) -> float:
         a_arr = np.array(a)
@@ -90,14 +96,14 @@ class QueryCache:
             conn.commit()
 
     def get(self, query_text: str, query_embedding: Optional[List[float]] = None,
-            similarity_threshold: float = 0.95) -> Optional[Dict[str, Any]]:
+            similarity_threshold: float = 0.95, scope: str = "") -> Optional[Dict[str, Any]]:
         conn = sqlite3.connect(str(self.db_path))
         try:
             self._cleanup(conn)
             cursor = conn.cursor()
-            query_hash = self._hash(query_text)
+            query_hash = self._hash(query_text, scope)
 
-            # 精确匹配
+            # 精确匹配（scope 已参与哈希，天然隔离）
             cursor.execute(
                 "SELECT result_json, access_count, query_text FROM query_cache WHERE query_hash = ?",
                 (query_hash,)
@@ -112,9 +118,9 @@ class QueryCache:
                 conn.commit()
                 return {'result': json.loads(result_json), 'hit_type': 'exact', 'cached_query': cached_text}
 
-            # 语义相似匹配
+            # 语义相似匹配（仅在同 scope 内扫描）
             if query_embedding is not None:
-                cursor.execute("SELECT query_hash, query_text, embedding_blob, result_json FROM query_cache")
+                cursor.execute("SELECT query_hash, query_text, embedding_blob, result_json FROM query_cache WHERE scope = ?", (scope,))
                 for row in cursor.fetchall():
                     cached_hash, cached_text, embedding_blob, result_json = row
                     if embedding_blob:
@@ -132,19 +138,19 @@ class QueryCache:
         finally:
             conn.close()
 
-    def set(self, query_text: str, query_embedding: Optional[List[float]], result: Any) -> None:
+    def set(self, query_text: str, query_embedding: Optional[List[float]], result: Any, scope: str = "") -> None:
         conn = sqlite3.connect(str(self.db_path))
         try:
             self._lru_evict(conn)
             cursor = conn.cursor()
-            query_hash = self._hash(query_text)
+            query_hash = self._hash(query_text, scope)
             embedding_blob = json.dumps(query_embedding) if query_embedding else None
             now = time.time()
             cursor.execute(
                 """INSERT OR REPLACE INTO query_cache
-                   (query_hash, query_text, embedding_blob, result_json, created_at, accessed_at, access_count, hit_type)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-                (query_hash, query_text, embedding_blob, json.dumps(result), now, now, 1, 'exact')
+                   (query_hash, query_text, embedding_blob, result_json, created_at, accessed_at, access_count, hit_type, scope)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (query_hash, query_text, embedding_blob, json.dumps(result), now, now, 1, 'exact', scope)
             )
             conn.commit()
         finally:

@@ -9,7 +9,7 @@ const TOKEN_KEY = 'la_auth_token'  // LA-052: token 存储
 const USER_CHANGE_EVENT = 'la-user-changed'
 
 // 默认本地用户（LA-052-A: 替代 anonymous，无需密码）
-const DEFAULT = { user_id: 'default', username: 'default', display_name: '本地用户' }
+const DEFAULT = { user_id: 'default', username: 'default', display_name: '本地用户', system_role: 'user' }
 
 /**
  * 用户管理 Composable
@@ -136,6 +136,10 @@ export function useUser() {
     return _currentUser.value?.user_id === 'default'
   })
 
+  const isSystemAdmin = computed(() => {
+    return !!_authToken.value && _currentUser.value?.system_role === 'admin'
+  })
+
   const xUserId = computed(() => _currentUser.value?.user_id || 'default')
 
   // LA-052: 密码登录
@@ -154,6 +158,7 @@ export function useUser() {
       user_id: data.user_id,
       username: data.username,
       display_name: data.display_name || data.username,
+      system_role: data.system_role || 'user',
       login_at: new Date().toISOString(),
     }
     saveUser(user)
@@ -183,6 +188,7 @@ export function useUser() {
       user_id: data.user_id,
       username: data.username,
       display_name: data.display_name || data.username,
+      system_role: data.system_role || 'user',
       login_at: new Date().toISOString(),
     }
     saveUser(user)
@@ -206,6 +212,7 @@ export function useUser() {
     }
     saveToken('')
     saveUser({ ...DEFAULT })
+    _sessionLogin.value = false
   }
 
   // 旧登录方式（兼容）
@@ -215,6 +222,7 @@ export function useUser() {
       user_id,
       username,
       display_name: display_name || username,
+      system_role: 'user',
       login_at: new Date().toISOString(),
     }
     saveUser(user)
@@ -256,6 +264,7 @@ export function useUser() {
     currentUser,
     isLoggedIn,
     isAuthenticated,  // LA-055-FIX: 当前会话认证状态
+    isSystemAdmin,
     authToken,
     xUserId,
     loginWithPassword,

@@ -56,6 +56,8 @@ import KnowledgeBaseView from './KnowledgeBaseView.vue'
 import GraphView from './graph/GraphView.vue'
 import LLMMonitorView from './LLMMonitorView.vue'
 
+const emit = defineEmits(['open-settings'])
+
 // 视图组件映射（chat 视图不再占用主区域，右侧常驻 ChatView 负责）
 const viewComponents = {
   quiz: QuizView,
@@ -145,8 +147,7 @@ function onResizeMouseDown(e) {
 }
 
 function openSettings() {
-  // 通过事件冒泡到 App.vue 处理
-  window.dispatchEvent(new CustomEvent('app-open-settings'))
+  emit('open-settings')
 }
 
 // 提供学科状态给子组件（App.vue 会注入）

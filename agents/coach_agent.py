@@ -140,13 +140,85 @@ class CoachAgent(BaseAgent):
         return self._llm_client
 
     def handle(self, query: str, context: Optional[Any] = None, n_questions: int = 5, filters: Optional[Dict[str, Any]] = None, **kwargs) -> Dict[str, Any]:
-        """生成评测题目（阶段 1：支持对话上下文）。"""
+        """生成评测题目（阶段 1：支持对话上下文）。
+
+        LA-UI-001 M2: 支持 eval_mode 测评模式（与评测页 /api/evaluate/start 对齐）：
+        - generate（默认）: LLM 实时生成新题
+        - bank: 从已确认题库随机抽题（不消耗 LLM）
+        - mixed: 一半题库 + 一半新题
+        """
         topic = self._extract_topic(query)
 
         config = self._get_subject_config()
         subject_name = config.get("name", "当前学科")
         question_types = list(config.get("question_types", {}).keys())
+        eval_mode = kwargs.get("eval_mode") or "generate"
 
+        # ---------- 题库抽题 / 混合模式 ----------
+        if eval_mode in ("bank", "mixed"):
+            from core.quiz_bank import random_questions as qb_random
+            subject = config.get("subject", "generic")
+
+            if eval_mode == "bank":
+                bank_qs = qb_random(count=n_questions, subject=subject, topic=topic, is_approved=True)
+                if not bank_qs:
+                    # 放宽 topic 再试一次（topic 匹配是 LIKE，可能过严）
+                    bank_qs = qb_random(count=n_questions, subject=subject, topic=None, is_approved=True)
+                if not bank_qs:
+                    return {
+                        "text": f"【能力评测】\n\n题库中暂无「{topic}」相关的已确认题目。\n\n"
+                                f"建议：先用「出新题」模式测评，或先在出题界面/群聊中生成题目并保存到题库。",
+                        "questions": [],
+                        "topic": topic,
+                        "eval_mode": "bank",
+                        "subject_config": {
+                            "subject": config.get("subject", "generic"),
+                            "name": subject_name,
+                            "question_types": question_types,
+                        },
+                    }
+                questions = bank_qs
+                gen_count = 0
+            else:  # mixed
+                bank_count = n_questions // 2
+                bank_qs = qb_random(count=bank_count, subject=subject, topic=topic, is_approved=True)
+                gen_count = n_questions - len(bank_qs)
+                gen_qs = []
+                if gen_count > 0:
+                    quiz_agent = self._get_quiz_agent()
+                    quiz_result = quiz_agent.handle(topic + " 评测题", context=context,
+                                                    n_questions=gen_count, filters=filters)
+                    gen_qs = quiz_result.get("questions", [])
+                questions = list(bank_qs) + gen_qs
+
+            # 重新编号（题库题目 id 为 UUID 字符串，统一为序号便于作答对应）
+            for i, q in enumerate(questions):
+                q["id"] = i + 1
+
+            mode_label = "题库抽题" if eval_mode == "bank" else f"混合（{len(questions) - gen_count} 道题库题 + {gen_count} 道新题）"
+            instructions = f"""【能力评测】（{mode_label}）
+
+本次评测包含 {len(questions)} 道题目，涵盖「{topic}」相关知识。
+学科领域：{subject_name}
+
+答题说明：
+1. 请在下方测评选题卡中逐题作答
+2. 完成后点击「提交测评」，系统将自动评分并记录到测评历史
+3. 答题时间建议不超过 {len(questions) * 3} 分钟"""
+
+            return {
+                "text": instructions,
+                "questions": questions,
+                "topic": topic,
+                "eval_mode": eval_mode,
+                "subject_config": {
+                    "subject": config.get("subject", "generic"),
+                    "name": subject_name,
+                    "question_types": question_types,
+                },
+            }
+
+        # ---------- 默认：出新题 ----------
         quiz_agent = self._get_quiz_agent()
         # 阶段 1: 传递 context 给 QuizAgent（如果 QuizAgent 支持）
         quiz_result = quiz_agent.handle(topic + " 评测题", context=context, n_questions=n_questions, filters=filters)
@@ -158,16 +230,15 @@ class CoachAgent(BaseAgent):
 涉及题型：{', '.join(question_types) if question_types else '单选题、简答题'}
 
 答题说明：
-1. 请按题目要求作答
-2. 完成后提交答案，系统将自动评分
-3. 答题时间建议不超过 {n_questions * 3} 分钟
-
-请回答以下题目："""
+1. 请在下方测评选题卡中逐题作答
+2. 完成后点击「提交测评」，系统将自动评分并记录到测评历史
+3. 答题时间建议不超过 {n_questions * 3} 分钟"""
 
         return {
-            "text": instructions + "\n\n" + quiz_result.get("text", ""),
+            "text": instructions,
             "questions": quiz_result.get("questions", []),
             "topic": topic,
+            "eval_mode": "generate",
             "subject_config": {
                 "subject": config.get("subject", "generic"),
                 "name": subject_name,
@@ -204,8 +275,14 @@ class CoachAgent(BaseAgent):
             score_per_q = DEFAULT_QUESTION_SCORE
             max_score += score_per_q
 
+            # EVAL-SCORE-FIX: 未作答（空答案）直接判 0 分，不进入评分路由。
+            # 此前空答案会进入 LLM 评分（_score_subjective_llm/_score_calculation/
+            # _score_coding），LLM 看到参考答案后可能给空答案打出满分，
+            # 出现"未作答却判正确"的严重误判。
+            if not str(ua or "").strip():
+                result = {"score": 0, "is_correct": False, "feedback": "未作答。"}
             # 按题型路由评分方法
-            if qtype in ("single_choice", "multiple_choice", "true_false"):
+            elif qtype in ("single_choice", "multiple_choice", "true_false"):
                 result = self._score_objective(q, ua, score_per_q)
             elif qtype == "fill_blank":
                 result = self._score_fill_blank(q, ua, score_per_q)

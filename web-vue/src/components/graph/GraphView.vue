@@ -48,7 +48,8 @@
         </div>
       </div>
 
-      <!-- 画布 + 图例 -->
+      <!-- 画布 + 图例 + 详情面板（M3-LAYOUT: 工具栏下方的独立行） -->
+      <div class="graph-body">
       <div class="canvas-wrapper" :style="canvasWrapperStyle">
         <div ref="cyContainer" class="cy-container"></div>
 
@@ -99,7 +100,9 @@
         @expand="expandNeighbors"
         @focus="focusNode"
         @navigate-to-chunk="navigateToChunk"
+        @share="handleShareNode"
       />
+      </div>
     </div>
 
     <!-- 概念表格 -->
@@ -168,6 +171,8 @@ import NodeDetailPanel from './NodeDetailPanel.vue'
 import BuildOptions from './BuildOptions.vue'
 import ConceptTable from './ConceptTable.vue'
 import GraphNodeTooltip from './GraphNodeTooltip.vue'
+import { withMediaAuth } from '../../utils/media.js'
+import { busOn } from '../../utils/eventBus.js'
 
 cytoscape.use(cola)
 cytoscape.use(dagre)
@@ -243,6 +248,7 @@ const tooltipVisible = ref(false)
 const tooltipNode = ref(null)
 const tooltipPosition = ref({ x: 0, y: 0 })
 let tooltipTimer = null
+let offGraphCommand = null  // LA-UI-001 M4: 图谱命令监听解绑函数
 
 // 画布区域动态样式：避让右侧 absolute 定位的 NodeDetailPanel
 const canvasWrapperStyle = computed(() => {
@@ -250,6 +256,40 @@ const canvasWrapperStyle = computed(() => {
   const panelWidth = selectedNode.value ? 300 : 200
   return { marginRight: panelWidth + 'px' }
 })
+
+// LA-UI-001 M4-FIX2: 节点激活统一入口——
+// tap 点击与 M4 命令联动共用同一路径（完整详情 + 关联加载 + 邻接高亮）
+function activateNode(node) {
+  const nodeType = node.data('type') || ''
+  selectedNode.value = {
+    id: node.id(),
+    label: node.data('label'),
+    type: nodeType,
+    chunk_type: node.data('type'),
+    source: node.data('source'),
+    page_number: node.data('page_number'),
+    heading_path: node.data('heading_path') || '',
+    text: node.data('text') || '',
+    description: node.data('description') || '',
+    parent_hint: node.data('parent_hint') || '',
+    source_chunks: node.data('source_chunks') || '',
+    source_refs: node.data('source_refs') || [],
+    // LA-035: 图片节点字段
+    image_path: node.data('image_path') || '',
+    thumbnail_path: node.data('thumbnail_path') || '',
+    width: node.data('width') || 0,
+    height: node.data('height') || 0,
+    // LA-035-P11: 多媒体引用（详情面板显示）
+    media_refs: node.data('media_refs') || [],
+  }
+  if (isChunkNodeType(nodeType)) {
+    loadConcepts(node.id())
+  } else {
+    selectedNodeConcepts.value = []
+    loadConceptNodeLinks(node.id())
+  }
+  highlightNeighbors(node)
+}
 
 // ========== 初始化 Cytoscape ==========
 function initCy() {
@@ -268,36 +308,7 @@ function initCy() {
 
   // 事件绑定
   cy.on('tap', 'node', (e) => {
-    const node = e.target
-    const nodeType = node.data('type') || ''
-    selectedNode.value = {
-      id: node.id(),
-      label: node.data('label'),
-      type: nodeType,
-      chunk_type: node.data('type'),
-      source: node.data('source'),
-      page_number: node.data('page_number'),
-      heading_path: node.data('heading_path') || '',
-      text: node.data('text') || '',
-      description: node.data('description') || '',
-      parent_hint: node.data('parent_hint') || '',
-      source_chunks: node.data('source_chunks') || '',
-      source_refs: node.data('source_refs') || [],
-      // LA-035: 图片节点字段
-      image_path: node.data('image_path') || '',
-      thumbnail_path: node.data('thumbnail_path') || '',
-      width: node.data('width') || 0,
-      height: node.data('height') || 0,
-      // LA-035-P11: 多媒体引用（详情面板显示）
-      media_refs: node.data('media_refs') || [],
-    }
-    if (isChunkNodeType(nodeType)) {
-      loadConcepts(node.id())
-    } else {
-      selectedNodeConcepts.value = []
-      loadConceptNodeLinks(node.id())
-    }
-    highlightNeighbors(node)
+    activateNode(e.target)
   })
 
   // LA-035-P10: 鼠标悬停显示预览卡片
@@ -480,7 +491,7 @@ function getChunkImageUrl(imagePath) {
     const sepIdx = Math.max(before.lastIndexOf('/'), before.lastIndexOf('\\'))
     const subject = sepIdx !== -1 ? before.substring(sepIdx + 1) : before
     const filename = imagePath.substring(imagePath.lastIndexOf('/') + 1).split('\\').pop()
-    return `${window.location.origin}/api/images/${subject.replace('_v1_images', '')}/${filename}`
+    return withMediaAuth(`${window.location.origin}/api/images/${subject.replace('_v1_images', '')}/${filename}`)
   }
   return ''
 }
@@ -1087,6 +1098,8 @@ async function confirmBuild(options) {
           paradigm: options.paradigm,
           force_rebuild: options.forceRebuild,
           with_semantic: options.withSemantic,
+          with_dedupe: options.withDedupe,
+          granularity: options.granularity,
           llm_provider: options.llmProvider === 'auto' ? null : options.llmProvider,
         }),
       }
@@ -1113,6 +1126,19 @@ function showConceptDetail(concept) {
   showConceptModal.value = true
 }
 
+// LA-UI-001 M3: 节点分享到群聊（左→右）
+function handleShareNode(node) {
+  if (!node) return
+  const detail = {
+    title: node.label || (node.text || '').slice(0, 30) || node.id,
+    preview: node.description || (node.text || '').slice(0, 200),
+    conceptType: node.type || '',
+    data: { node_id: node.id, concept_type: node.type || '' },
+    sourceView: 'graph',
+  }
+  window.dispatchEvent(new CustomEvent('share-to-chat', { detail }))
+}
+
 function navigateToChunk(chunkId) {
   // LA-035-P19: 切换到文档树视图并高亮指定 chunk
   if (!cy) return
@@ -1135,13 +1161,62 @@ function navigateToChunk(chunkId) {
   })
 }
 
+// LA-UI-001 M4: 图谱命令处理（CommandExecutor → graph-command，设计文档 §3.2）
+function handleGraphCommand(payload) {
+  if (!payload || payload.action !== 'highlight_nodes') return
+  highlightNodesByCommand(payload)
+}
+
+function highlightNodesByCommand(payload) {
+  const ids = payload.node_ids || []
+  const labels = (payload.labels || []).map(l => String(l).toLowerCase()).filter(Boolean)
+
+  const tryMatch = () => {
+    if (!cy) return 0
+    const matches = cy.nodes().filter(n => {
+      if (ids.includes(n.id())) return true
+      const label = (n.data('label') || '').toLowerCase()
+      if (!label) return false
+      // 概念名匹配：等值或互为子串（label 可能被截断）
+      return labels.some(q => label === q || label.includes(q) || q.includes(label))
+    })
+    if (!matches.length) return 0
+    cy.nodes().unselect()
+    matches.select()
+    const first = matches[0]
+    // LA-UI-001 M4-FIX2: 与点击节点走完全相同的激活路径
+    // （完整详情/关联加载/邻接高亮），并只聚焦首节点（多节点 fit 会拉低缩放）
+    activateNode(first)
+    cy.animate({ fit: { eles: first, padding: 100 }, duration: 500 })
+    console.log('[GraphView] M4 命令高亮节点:', matches.length)
+    return matches.length
+  }
+
+  if (tryMatch() > 0) return
+  // 当前视图未命中（如概念节点在文档树视图不可见）：切到概念视图后轮询重试
+  if (viewMode.value !== 'concept') {
+    switchViewMode('concept')
+    let attempts = 0
+    const timer = setInterval(() => {
+      attempts += 1
+      if (tryMatch() > 0 || attempts >= 10) clearInterval(timer)
+    }, 300)
+  }
+}
+
 // ========== 生命周期 ==========
 onMounted(() => {
   initCy()
   loadAllNodes()
+  // LA-UI-001 M4: 注册图谱命令监听
+  offGraphCommand = busOn('graph-command', handleGraphCommand)
 })
 
 onUnmounted(() => {
+  if (offGraphCommand) {
+    offGraphCommand()
+    offGraphCommand = null
+  }
   if (cy) {
     cy.destroy()
     cy = null
@@ -1198,6 +1273,7 @@ watch(currentSubject, () => {
 .graph-container {
   flex: 1;
   display: flex;
+  flex-direction: column;
   overflow: hidden;
   position: relative;
   min-width: 0;
@@ -1205,10 +1281,10 @@ watch(currentSubject, () => {
 
 /* 工具栏 */
 .toolbar {
-  position: absolute;
-  top: 12px;
-  left: 12px;
-  z-index: 10;
+  /* M3-LAYOUT: 常驻顶栏，宽度随分隔栏伸缩，内部组件均匀填满 */
+  margin: 12px 12px 8px;
+  align-self: stretch;
+  justify-content: space-between;
   display: flex;
   align-items: center;
   gap: 12px;
@@ -1217,7 +1293,6 @@ watch(currentSubject, () => {
   border: 1px solid var(--border-color, #e0e0e0);
   border-radius: 8px;
   box-shadow: 0 2px 8px rgba(0,0,0,0.1);
-  width: max-content;
   flex-shrink: 0;
 }
 
@@ -1250,6 +1325,15 @@ watch(currentSubject, () => {
 }
 
 /* 画布 */
+/* M3-LAYOUT: 工具栏下方的画布行，面板 absolute 定位于此 */
+.graph-body {
+  flex: 1;
+  display: flex;
+  position: relative;
+  min-height: 0;
+  overflow: hidden;
+}
+
 .canvas-wrapper {
   flex: 1;
   position: relative;

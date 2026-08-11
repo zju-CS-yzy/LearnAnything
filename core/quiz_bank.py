@@ -6,6 +6,7 @@
 """
 
 import json
+import re
 import sqlite3
 import uuid
 from datetime import datetime
@@ -274,6 +275,31 @@ def batch_save_questions(
         qid = save_question(q, subject, topic, is_approved)
         ids.append(qid)
     return ids
+
+
+# ---------- LA-UI-001: 重复题目检测 ----------
+
+def normalize_question_text(text: Any) -> str:
+    """题干归一化：去全部空白 + 小写，用于跨批次的重复判定。"""
+    return re.sub(r"\s+", "", str(text or "")).lower()
+
+
+def get_existing_question_texts(subject: str = "generic") -> set:
+    """返回该学科题库中所有题目的归一化题干集合（重复检测用）。"""
+    conn = _get_conn()
+    try:
+        rows = conn.execute(
+            "SELECT question FROM question_bank WHERE subject = ?", (subject,)
+        ).fetchall()
+        return {normalize_question_text(r[0]) for r in rows}
+    finally:
+        conn.close()
+
+
+def check_duplicate_questions(question_texts: List[str], subject: str = "generic") -> List[bool]:
+    """逐题检查是否已存在于题库（按归一化题干精确匹配），返回与输入等长的布尔列表。"""
+    existing = get_existing_question_texts(subject)
+    return [normalize_question_text(t) in existing for t in question_texts]
 
 
 def get_question(qid: str) -> Optional[Dict[str, Any]]:

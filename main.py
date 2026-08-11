@@ -200,6 +200,17 @@ def main():
     def global_exception_handler(exc_type, exc_value, exc_traceback):
         print("[FATAL] 未捕获异常:")
         print("".join(_traceback.format_exception(exc_type, exc_value, exc_traceback)))
+        # 写入日志文件以便排查
+        try:
+            log_path = Path.home() / ".learnanything" / "crash.log"
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(log_path, 'a', encoding='utf-8') as f:
+                f.write(f"\n{'='*60}\n")
+                f.write(f"Crash at {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+                f.write("".join(_traceback.format_exception(exc_type, exc_value, exc_traceback)))
+            print(f"[FATAL] 崩溃日志已保存到: {log_path}")
+        except Exception:
+            pass
         sys.__excepthook__(exc_type, exc_value, exc_traceback)
 
     sys.excepthook = global_exception_handler
@@ -240,6 +251,7 @@ def main():
         window.load_url(FRONTEND_URL)
     else:
         error_detail = backend_thread.error or "后端未启动，可能原因：端口被占用 / 依赖缺失 / 知识库路径错误"
+        print(f"[Desktop] 后端启动超时: {error_detail}")
         window.status_label.setText("❌ 后端启动超时")
         window.status_label.setStyleSheet("QLabel { background-color: #e74c3c; color: white; padding: 8px; }")
         show_error_dialog("后端启动失败", f"后端服务启动超时。\n\n{error_detail}", _traceback.format_exc())
@@ -248,7 +260,11 @@ def main():
         print("[Desktop] 应用关闭")
 
     app.aboutToQuit.connect(on_app_exit)
-    sys.exit(app.exec_())
+    
+    # 进入主事件循环
+    exit_code = app.exec_()
+    print(f"[Desktop] 退出码: {exit_code}")
+    sys.exit(exit_code)
 
 
 if __name__ == "__main__":

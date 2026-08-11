@@ -69,6 +69,30 @@
                   <span class="dot">.</span><span class="dot">.</span><span class="dot">.</span>
                 </span>
               </div>
+              <!-- LA-UI-001 M1/M2: 卡片消息分发（按 msg.type） -->
+              <QuestionCard
+                v-if="msg.type === 'question_card' && msg.questions && msg.questions.length"
+                :questions="msg.questions"
+                :subject="currentSubject"
+                :topic="msg.topic || currentTopic"
+                :mode="msg.mode || 'quiz'"
+                :eval-session-id="msg.evalSessionId || ''"
+                :dialog-session-id="sessionId"
+                @eval-result="handleEvalResult"
+              />
+              <ConceptCard
+                v-else-if="msg.type === 'concept_card'"
+                :title="msg.title || ''"
+                :preview="msg.preview || ''"
+                :concept-type="msg.conceptType || ''"
+                :actions="msg.actions || []"
+                @action="handleCardAction(msg, $event)"
+              />
+              <ResultCard
+                v-else-if="msg.type === 'result_card' && msg.result"
+                :result="msg.result"
+                :topic="msg.topic || ''"
+              />
               <!-- 引用来源（LA-047 扩展） -->
               <div class="message-sources" v-if="msg.sources && msg.sources.length">
                 <div class="sources-title">📎 引用来源</div>
@@ -119,6 +143,21 @@
           <span class="at-option-alias">@{{ agent.id }}</span>
         </div>
       </div>
+      <!-- LA-UI-001 M2: Coach 测评模式选择浮层（@coach 后弹出） -->
+      <div v-if="evalModeDropdownVisible" class="at-dropdown eval-mode-dropdown">
+        <div class="eval-mode-title">选择测评模式</div>
+        <div
+          v-for="mode in evalModeOptions"
+          :key="mode.id"
+          class="at-option"
+          :class="{ selected: evalMode === mode.id }"
+          @click="selectEvalMode(mode.id)"
+        >
+          <span class="at-option-icon">{{ mode.icon }}</span>
+          <span class="at-option-label">{{ mode.label }}</span>
+          <span class="at-option-alias">{{ mode.desc }}</span>
+        </div>
+      </div>
       <!-- LA-UI-001: 输入框高亮显示层 -->
       <div class="input-highlight-wrapper">
         <div v-if="highlightedInput" class="input-highlight" v-html="highlightedInput"></div>
@@ -153,10 +192,20 @@
         <span v-if="isStreaming" class="streaming-hint">正在生成回答...</span>
         <span v-else-if="activeAgent !== 'auto'" class="agent-hint">
           💡 当前默认 Agent: <strong>{{ getAgentLabel(activeAgent) }}</strong>
+          <!-- LA-UI-001 M2: Coach 测评模式指示 chip（点击可重新选择） -->
+          <span v-if="coachTargeted" class="eval-mode-chip" @click="toggleEvalModeDropdown">
+            {{ currentEvalModeLabel }} ▾
+          </span>
           <span class="hint-sep">|</span>
           当前学科: {{ currentSubjectName }}
         </span>
-        <span v-else>当前学科: {{ currentSubjectName }} | 输入 @ 选择 Agent</span>
+        <span v-else>
+          <!-- LA-UI-001 M2: 输入框 @coach 时也显示测评模式 chip -->
+          <span v-if="coachTargeted" class="eval-mode-chip" @click="toggleEvalModeDropdown">
+            {{ currentEvalModeLabel }} ▾
+          </span>
+          当前学科: {{ currentSubjectName }} | 输入 @ 选择 Agent
+        </span>
       </div>
     </div>
   </div>
@@ -166,8 +215,14 @@
 import { ref, nextTick, onMounted, inject, computed } from 'vue'
 import { marked } from 'marked'
 // LA-UI-001: 使用新的统一入口 API
-import { apiChatSendStream } from '../composables/useApi.js'
+import { apiChatSendStream, apiChatShare } from '../composables/useApi.js'
+import { executeCommand } from '../utils/commandExecutor.js'
 import { useUser } from '../composables/useUser.js'
+import { withMediaAuth } from '../utils/media.js'
+// LA-UI-001 M1: 卡片消息组件
+import QuestionCard from './chat/QuestionCard.vue'
+import ConceptCard from './chat/ConceptCard.vue'
+import ResultCard from './chat/ResultCard.vue'
 
 // LA-050-Phase5: 当前用户（用于对话用户隔离）
 const { currentUser, getAuthHeaders } = useUser()
@@ -231,6 +286,91 @@ function getAgentLabel(agentId) {
   return tab ? tab.label : agentId
 }
 
+// LA-UI-001 M1: 卡片动作按钮 → 自动发送对应 @ 命令（设计文档 §3.3）
+function handleCardAction(msg, act) {
+  const title = msg.title || msg.topic || ''
+  const actionMap = {
+    ask_tutor: `@tutor 请详细解释「${title}」`,
+    ask_quiz: `@quiz 请围绕「${title}」出 3 道题`,
+    ask_evaluate: `@coach 评测一下我对「${title}」的掌握`,
+  }
+  const text = actionMap[act?.action]
+  if (text) {
+    sendMessage(text)
+  }
+}
+
+// LA-UI-001 M2: 群聊测评提交完成 → 追加 ResultCard 结果卡片消息
+function handleEvalResult(result) {
+  messages.value.push({
+    id: Date.now() + Math.random(),
+    role: 'ai',
+    type: 'result_card',
+    agent: 'CoachAgent',
+    text: '',
+    time: new Date().toLocaleTimeString(),
+    result: result,
+    topic: currentTopic.value || '',
+    sources: [],
+    media: [],
+  })
+  scrollToBottom()
+  saveSession()
+}
+
+// LA-UI-001 M3: 概念卡默认动作（设计文档 §3.3）
+function defaultConceptActions() {
+  return [
+    { label: '详细解释', action: 'ask_tutor' },
+    { label: '相关题目', action: 'ask_quiz' },
+    { label: '能力评测', action: 'ask_evaluate' },
+  ]
+}
+
+// LA-UI-001 M3: 处理左→右分享（图谱节点等 → 群聊概念卡 + 持久化）
+async function handleShareToChat(detail) {
+  if (!detail.title) return
+  messages.value.push({
+    id: Date.now() + Math.random(),
+    role: 'user',
+    type: 'concept_card',
+    text: '',
+    title: detail.title,
+    preview: detail.preview || '',
+    conceptType: detail.conceptType || '',
+    actions: detail.actions || defaultConceptActions(),
+    time: new Date().toLocaleTimeString(),
+  })
+  scrollToBottom()
+  saveSession()
+
+  // 持久化到对话历史（失败不阻塞本地展示）
+  try {
+    const res = await apiChatShare({
+      session_id: sessionId.value || null,
+      subject: currentSubject.value,
+      card_type: 'concept',
+      title: detail.title,
+      preview: detail.preview || '',
+      data: detail.data || {},
+      source_view: detail.sourceView || 'graph',
+    })
+    // 采纳后端分配的 session_id（与 chat 流行为一致）
+    if (res.session_id && res.session_id !== sessionId.value) {
+      const oldSessionId = sessionId.value
+      sessionId.value = res.session_id
+      if (!oldSessionId || oldSessionId.startsWith('session_')) {
+        window.dispatchEvent(new CustomEvent('chat-session-created', {
+          detail: { sessionId: res.session_id }
+        }))
+      }
+      saveSession()
+    }
+  } catch (e) {
+    console.warn('[ChatView] 分享持久化失败（仅本地展示）:', e)
+  }
+}
+
 // 切换默认 Agent
 function switchAgent(agentId) {
   activeAgent.value = agentId
@@ -247,6 +387,8 @@ function switchAgent(agentId) {
       autoResize()
     })
   }
+  // LA-UI-001 M2: 切换到 Coach 时弹出测评模式选择浮层
+  evalModeDropdownVisible.value = (agentId === 'coach')
   console.log('[ChatView] LA-UI-001: 切换默认 Agent ->', agentId)
 }
 
@@ -334,10 +476,10 @@ const atAgentOptions = computed(() => agentTabs.filter(t => t.id !== 'auto'))
 const highlightedInput = computed(() => {
   const text = inputText.value
   if (!text) return ''
-  // 匹配 @tutor、@quiz、@coach
+  // 匹配 @tutor、@quiz、@coach（含可选 <测评模式> 标签）
   return text.replace(
-    /@(tutor|quiz|coach)\b/g,
-    '<span class="at-highlight">@$1</span>'
+    /@(tutor|quiz|coach)(<[^>]+>)?/g,
+    '<span class="at-highlight">@$1$2</span>'
   )
 })
 
@@ -429,10 +571,57 @@ function selectAtAgent(agentId) {
   // LA-UI-001-FIX: @弹窗选择不修改 activeAgent，仅影响当前消息输入框
   // activeAgent 只由标签栏点击（switchAgent）控制
 
+  // LA-UI-001 M2: @coach 后弹出测评模式选择浮层
+  if (agentId === 'coach') {
+    evalModeDropdownVisible.value = true
+  }
+
   nextTick(() => {
     inputRef.value?.focus()
     autoResize()
   })
+}
+
+// ========== LA-UI-001 M2: Coach 测评模式选择 ==========
+
+const evalModeOptions = [
+  { id: 'generate', label: '出新题', icon: '✨', desc: 'LLM 实时生成新题目' },
+  { id: 'bank', label: '题库抽题', icon: '📚', desc: '从已确认题库随机抽取' },
+  { id: 'mixed', label: '混合模式', icon: '🔀', desc: '一半题库 + 一半新题' },
+]
+const evalMode = ref('generate')
+const evalModeDropdownVisible = ref(false)
+
+// 当前输入是否以 Coach 为目标（@coach 前缀或标签栏选中 Coach）
+const coachTargeted = computed(() =>
+  activeAgent.value === 'coach' || /^@coach\b/i.test(inputText.value)
+)
+
+const currentEvalModeLabel = computed(() => {
+  const m = evalModeOptions.find(x => x.id === evalMode.value)
+  return m ? `测评模式: ${m.label}` : '测评模式'
+})
+
+function selectEvalMode(modeId) {
+  evalMode.value = modeId
+  evalModeDropdownVisible.value = false
+  // LA-UI-001 M2: 将测评模式写入输入框 @coach<模式> 前缀，作为可见的选择记录
+  const modeLabel = evalModeOptions.find(x => x.id === modeId)?.label || ''
+  if (modeLabel) {
+    const prefixMatch = inputText.value.match(/^@coach(?:<[^>]*>)?\s*/i)
+    if (prefixMatch) {
+      inputText.value = `@coach<${modeLabel}> ` + inputText.value.slice(prefixMatch[0].length)
+    } else if (activeAgent.value === 'coach') {
+      // 标签栏选中的 Coach：输入框无 @coach 前缀时补上
+      inputText.value = `@coach<${modeLabel}> ` + inputText.value
+    }
+    nextTick(autoResize)
+  }
+  nextTick(() => inputRef.value?.focus())
+}
+
+function toggleEvalModeDropdown() {
+  evalModeDropdownVisible.value = !evalModeDropdownVisible.value
 }
 
 // 隐藏 @浮层
@@ -475,7 +664,7 @@ mediaRenderer.image = (href, title, text) => {
       src = prefix + pathPart.split('/').map(encodeURIComponent).join('/')
     }
   }
-  return `<img src="${src}" alt="${text || ''}" title="${title || ''}" class="chat-inline-image" loading="lazy" onerror="this.style.display='none';this.parentNode.classList.add('img-error')" />`
+  return `<img src="${withMediaAuth(src)}" alt="${text || ''}" title="${title || ''}" class="chat-inline-image" loading="lazy" onerror="this.style.display='none';this.parentNode.classList.add('img-error')" />`
 }
 
 function renderMarkdown(text) {
@@ -504,9 +693,15 @@ function encodeMediaPath(path) {
 }
 
 // LA-049: 打开媒体大图预览
+// LA-MEDIA-UNIFY: 优先使用后端已解析的统一 URL
 function openMediaModal(media) {
-  const src = `/api/media/${media.path}`
-  window.open(src, '_blank')
+  let src
+  if (media.url) {
+    src = media.url.startsWith('http') ? media.url : media.url
+  } else {
+    src = `/api/media/${media.path}`
+  }
+  window.open(withMediaAuth(src), '_blank')
 }
 
 function autoResize() {
@@ -586,13 +781,23 @@ async function sendMessage(presetText = null) {
   // LA-UI-001: 从输入中提取 @命令，确定 agent_target
   let agentTarget = null
   let actualText = text
+  // LA-UI-001 M2: 测评模式标签（@coach<混合模式> 中的显式记录）
+  let evalModeFromTag = null
 
-  // 检查输入中是否有显式的 @agent
+  // 检查输入中是否有显式的 @agent（支持可选 <测评模式> 标签）
   // LA-UI-001-FIX: @命令只影响当前消息，不修改 activeAgent（避免锁定）
-  const atMatch = text.match(/^@(tutor|quiz|coach)\s+(.+)$/i)
+  const atMatch = text.match(/^@(tutor|quiz|coach)(?:<([^>]+)>)?\s+(.+)$/i)
   if (atMatch) {
     agentTarget = atMatch[1].toLowerCase()
-    actualText = atMatch[2]
+    actualText = atMatch[3]
+    // 解析 <测评模式> 标签 → eval_mode id
+    if (atMatch[2]) {
+      const modeOpt = evalModeOptions.find(m => m.label === atMatch[2].trim())
+      if (modeOpt) {
+        evalModeFromTag = modeOpt.id
+        evalMode.value = modeOpt.id  // 同步 chip 显示
+      }
+    }
     // NOTE: 不修改 activeAgent，@命令是临时覆盖，不是永久切换
   } else if (activeAgent.value !== 'auto') {
     // 用户通过标签栏显式选择了默认 Agent
@@ -621,6 +826,7 @@ async function sendMessage(presetText = null) {
   const userMsg = {
     id: Date.now(),
     role: 'user',
+    type: 'text',  // LA-UI-001 M1: 消息类型（text/question_card/concept_card/result_card）
     text: text,
     time: new Date().toLocaleTimeString(),
   }
@@ -629,6 +835,7 @@ async function sendMessage(presetText = null) {
   if (!presetText) {
     inputText.value = ''
     atDropdownVisible.value = false
+    evalModeDropdownVisible.value = false
     nextTick(autoResize)
   }
   scrollToBottom()
@@ -637,11 +844,14 @@ async function sendMessage(presetText = null) {
   const aiMsg = {
     id: Date.now() + 1,
     role: 'ai',
+    type: 'text',  // LA-UI-001 M1: 消息类型，含 questions 时改为 question_card
     text: '',
     agent: '',
     time: new Date().toLocaleTimeString(),
     sources: [],
     media: [],
+    questions: null,
+    topic: '',
   }
   messages.value.push(aiMsg)
 
@@ -652,6 +862,8 @@ async function sendMessage(presetText = null) {
       session_id: sessionId.value,
       agent_target: agentTarget,
       user_theta: userTheta.value,
+      // LA-UI-001 M2: Coach 测评模式（仅 Coach 目标时传递；<模式> 标签优先于 chip 状态）
+      eval_mode: agentTarget === 'coach' ? (evalModeFromTag || evalMode.value) : null,
     })
 
     for await (const { event, data } of stream) {
@@ -686,13 +898,73 @@ async function sendMessage(presetText = null) {
           currentTopic.value = data.current_topic
         }
 
-        // LA-UI-001: 多 Agent 提示
-        if (data.multi_agent && data.agent_tasks) {
-          console.log('[ChatView] LA-UI-001: 多 Agent 回答', data.execution_mode, data.agent_tasks)
+        // LA-UI-001 M1/M2: 单Agent卡片 — meta 携带 questions 时切换卡片渲染；
+        // card_mode='evaluate' 时为测评作答卡（M2），否则为测验题卡（M1）
+        if (!data.multi_agent && data.questions && data.questions.length) {
+          aiMsg.type = 'question_card'
+          aiMsg.questions = data.questions
+          aiMsg.topic = data.topic || ''
+          if (data.card_mode === 'evaluate' && data.eval_session_id) {
+            aiMsg.mode = 'evaluate'
+            aiMsg.evalSessionId = data.eval_session_id
+          }
+        }
+
+        // LA-UI-001: 多 Agent 消息渲染
+        if (data.multi_agent && data.agent_tasks && data.agent_tasks.length > 1) {
+          console.log('[ChatView] LA-UI-001: 多Agent回答，渲染', data.agent_tasks.length, '条消息')
+          const tasks = data.agent_tasks
+          // 第一个Agent的结果填充到已创建的 aiMsg
+          if (tasks[0]) {
+            aiMsg.agent = tasks[0].agent
+            aiMsg.text = tasks[0].text || ''
+            const meta0 = tasks[0].metadata || {}
+            if (meta0.questions && meta0.questions.length) {
+              aiMsg.type = 'question_card'
+              aiMsg.questions = meta0.questions
+              aiMsg.topic = meta0.topic || ''
+              // LA-UI-001 M2: 多Agent中的 Coach 测评卡
+              if (meta0.card_mode === 'evaluate' && meta0.eval_session_id) {
+                aiMsg.mode = 'evaluate'
+                aiMsg.evalSessionId = meta0.eval_session_id
+              }
+            }
+            // 顶层 media/sources 属于最后一个Agent的结果，第一个Agent应使用自己的
+            aiMsg.sources = meta0.sources || []
+            aiMsg.media = meta0.media || []
+          }
+          // 其余Agent的结果作为新消息追加
+          // 注意: role 必须是 'ai'(模板按 role === 'ai' 判定AI消息),且需要 id 作为 :key
+          for (let i = 1; i < tasks.length; i++) {
+            const task = tasks[i]
+            const taskMeta = task.metadata || {}
+            const hasQuestions = !!(taskMeta.questions && taskMeta.questions.length)
+            // LA-UI-001 M2: 多Agent中的 Coach 测评卡
+            const isEvalCard = hasQuestions && taskMeta.card_mode === 'evaluate' && !!taskMeta.eval_session_id
+            messages.value.push({
+              id: Date.now() + 1 + i,
+              role: 'ai',
+              type: hasQuestions ? 'question_card' : 'text',
+              agent: task.agent,
+              text: task.text || '',
+              time: new Date().toLocaleTimeString(),
+              questions: taskMeta.questions || null,
+              topic: taskMeta.topic || '',
+              mode: isEvalCard ? 'evaluate' : 'quiz',
+              evalSessionId: isEvalCard ? taskMeta.eval_session_id : '',
+              sources: taskMeta.sources || [],
+              media: taskMeta.media || [],
+            })
+            console.log('[ChatView] LA-UI-001: 追加Agent消息', task.agent, (task.text || '').slice(0, 50))
+          }
+          scrollToBottom()
         }
       } else if (event === 'chunk') {
         aiMsg.text += data.text || ''
         scrollToBottom()
+      } else if (event === 'command') {
+        // LA-UI-001 M4: Agent 返回的视图命令 → CommandExecutor 驱动左侧视图
+        executeCommand(data)
       } else if (event === 'error') {
         aiMsg.text += '\n\n[错误] ' + (data.error || '未知错误')
       }
@@ -752,15 +1024,62 @@ async function loadSession(id) {
     })
     if (resp.ok) {
       const data = await resp.json()
-      const historyMessages = (data.messages || []).map(m => ({
-        id: Date.now() + Math.random(),
-        role: m.role === 'user' ? 'user' : 'ai',
-        text: m.content || '',
-        agent: m.role === 'agent' ? (m.agent || 'TutorAgent') : '',
-        time: m.time ? new Date(m.time).toLocaleTimeString() : new Date().toLocaleTimeString(),
-        sources: m.sources || [],
-        media: m.media || [],
-      }))
+      const historyMessages = (data.messages || []).map(m => {
+        // LA-UI-001 M3: 分享消息恢复为概念卡（动作按钮重建，不持久化 actions）
+        if (m.card && m.card.card_type) {
+          return {
+            id: Date.now() + Math.random(),
+            role: m.role === 'user' ? 'user' : 'ai',
+            type: 'concept_card',
+            text: '',
+            title: m.card.title || '',
+            preview: m.card.preview || '',
+            conceptType: (m.card.data || {}).concept_type || '',
+            actions: defaultConceptActions(),
+            time: m.time ? new Date(m.time).toLocaleTimeString() : new Date().toLocaleTimeString(),
+            sources: m.sources || [],
+            media: m.media || [],
+          }
+        }
+        // LA-UI-001 M2: 评测结果消息恢复为 ResultCard
+        if (m.eval_result) {
+          return {
+            id: Date.now() + Math.random(),
+            role: 'ai',
+            type: 'result_card',
+            agent: m.agent || 'CoachAgent',
+            text: '',
+            time: m.time ? new Date(m.time).toLocaleTimeString() : new Date().toLocaleTimeString(),
+            result: m.eval_result,
+            topic: m.topic || '',
+            sources: m.sources || [],
+            media: m.media || [],
+          }
+        }
+        // LA-UI-001 M1: 含 questions 的历史消息恢复为题卡渲染；
+        // DB content 保留完整题目文本（供 LLM 对话历史），展示层用引导语 + 卡片
+        const questions = m.questions || null
+        const hasCard = !!(questions && questions.length)
+        const topic = m.topic || ''
+        // LA-UI-001 M2: CoachAgent 的题卡恢复为测评卡（只读回顾——测评会话有 TTL，过期不可再提交）
+        const isCoachCard = hasCard && (m.agent === 'CoachAgent' || m.intent === 'evaluate')
+        return {
+          id: Date.now() + Math.random(),
+          role: m.role === 'user' ? 'user' : 'ai',
+          type: hasCard ? 'question_card' : 'text',
+          text: hasCard
+            ? `以下是 ${questions.length} 道关于「${topic || '相关知识点'}」的题目：`
+            : (m.content || ''),
+          agent: m.role === 'agent' ? (m.agent || 'TutorAgent') : '',
+          time: m.time ? new Date(m.time).toLocaleTimeString() : new Date().toLocaleTimeString(),
+          questions: hasCard ? questions : null,
+          topic: topic,
+          mode: isCoachCard ? 'evaluate' : 'quiz',
+          evalSessionId: '',  // 历史恢复的测评卡无有效会话，只读回顾
+          sources: m.sources || [],
+          media: m.media || [],
+        }
+      })
       
       sessionId.value = id
       sessionTitle.value = '历史会话'
@@ -839,6 +1158,10 @@ onMounted(() => {
   // LA-044: 监听新建会话事件（来自 Sidebar）
   window.addEventListener('create-new-chat-session', () => {
     createNewSession()
+  })
+  // LA-UI-001 M3: 监听左→右分享事件（图谱节点等 → 群聊概念卡）
+  window.addEventListener('share-to-chat', (e) => {
+    handleShareToChat(e.detail || {})
   })
 })
 </script>
@@ -1354,6 +1677,35 @@ onMounted(() => {
   padding: 4px;
   min-width: 160px;
   z-index: 100;
+}
+
+/* LA-UI-001 M2: Coach 测评模式浮层与指示 chip */
+.eval-mode-dropdown {
+  left: 12px;
+  bottom: calc(100% + 8px);
+  min-width: 220px;
+}
+
+.eval-mode-title {
+  font-size: 11px;
+  color: var(--text-muted);
+  padding: 6px 10px 4px;
+}
+
+.eval-mode-chip {
+  display: inline-block;
+  font-size: 11px;
+  color: var(--accent-primary);
+  background: var(--bg-active);
+  border: 1px solid var(--accent-primary);
+  border-radius: 10px;
+  padding: 1px 10px;
+  margin: 0 6px;
+  cursor: pointer;
+  user-select: none;
+}
+.eval-mode-chip:hover {
+  background: var(--bg-hover);
 }
 
 .at-option {

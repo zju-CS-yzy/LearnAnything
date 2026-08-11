@@ -13,11 +13,12 @@
 import hashlib
 import json
 import sqlite3
+import threading
 import numpy as np
 from pathlib import Path
 from typing import Dict, List, Optional, Any
 
-from config.settings import VECTOR_DB_DIR, DEFAULT_EMBEDDING_DIM
+from config.settings import VECTOR_DB_DIR, DEFAULT_EMBEDDING_DIM, get_subject_vector_db_path
 from core.embedding import EmbeddingManager
 
 
@@ -28,13 +29,42 @@ class VectorStore:
         self.collection_name = collection_name
         self.embedding_dim = embedding_dim
         self._embedding = EmbeddingManager()
-        # LA-050-Phase3: 支持自定义 db_path（用户隔离）
         if db_path:
             self._db_path = Path(db_path)
         else:
-            self._db_path = VECTOR_DB_DIR / f"{collection_name}.db"
-        self._conn = sqlite3.connect(str(self._db_path))
+            # LA-051-DIR-FIX: 默认使用学科内聚路径（Share/），替代旧扁平路径 VECTOR_DB_DIR
+            subject_id = collection_name.removesuffix("_v1")
+            self._db_path = get_subject_vector_db_path(subject_id)
+            print(f"[VectorStore] LA-051-DIR-FIX: 使用学科内聚路径 | {self._db_path}")
+        self._local = threading.local()
+        # 在创建线程中建立连接并确保表结构
         self._ensure_table()
+
+    @property
+    def _conn(self) -> sqlite3.Connection:
+        """线程本地连接（THREAD-SAFE-FIX）。
+
+        sqlite3 连接对象有线程亲和性（默认 check_same_thread=True）。
+        VectorStore 实例被跨请求/跨线程复用时（例如 SSE 流式接口在
+        线程池线程创建 store、在事件循环线程执行查询），会抛
+        "SQLite objects created in a thread can only be used in that
+        same thread"。改为每个线程使用自己的连接后彻底规避。
+        """
+        conn = getattr(self._local, "conn", None)
+        if conn is None:
+            conn = sqlite3.connect(str(self._db_path), timeout=30)
+            self._local.conn = conn
+        return conn
+
+    def close(self) -> None:
+        """关闭当前线程的连接（释放文件句柄，删除 db 文件前应先调用）。"""
+        conn = getattr(self._local, "conn", None)
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+            self._local.conn = None
 
     # ========== 内部表管理 ==========
 

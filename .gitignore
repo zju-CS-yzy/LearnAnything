@@ -1,84 +1,62 @@
-# ============================================
-# LearnAnything Project - Git Ignore
-# ============================================
-
-# ---- 构建产物 ----
-/dist/                          # PyInstaller 打包产物 (142MB+)
-/web/dist/                      # Vite 前端构建产物
+# Build artifacts
+/dist/
+/web/dist/
+/web-vue/dist/
 /build/
 
-# ---- 数据 & 大文件 ----
-/data
+# Local data and personal working state
+/data/
+/memory/
+/knowledge_base/*
+!/knowledge_base/.gitkeep
 
-# ---- 个人工作记录 ----
-/memory/                        # 每日工作日志（个人记录，不适合公开）
-
-# ---- 密钥 & 敏感文件 ----
-API.txt                         # API 密钥文档
-/config/api_config.ini          # 真实 API 密钥配置（本地保留，不上传）
+# Credentials and machine-local configuration
+API.txt
+/config/api_config.ini
+.env
+.env.*
 *.key
 *.pem
-.env
 
-# ---- 日志 & 临时文件 ----
+# Logs and temporary files
 *.log
 rebuild_log.txt
 /tmp/
 /temp/
-
-# ---- 测试数据库 & 临时数据 ----
 subjects.db
-test_kuzu
-test_kuzu_v2
+test_kuzu/
+test_kuzu_v2/
 
-# ---- 临时上传脚本 ----
-upload_pdfs.py
-upload_texts.py
-
-# ---- 依赖 ----
-/node_modules/                  # npm 依赖
-/venv/                          # Python 虚拟环境
+# Dependencies and virtual environments
+/node_modules/
+/web-vue/node_modules/
+/web-vue/package-lock.json
+/venv/
 /.venv/
 
-# ---- Python 缓存 ----
+# Python caches
 __pycache__/
 *.pyc
 *.pyo
 *.pyd
 .Python
+.pytest_cache/
 
-# ---- IDE & 编辑器 ----
+# Editors and operating-system files
 .vscode/
 .idea/
 *.swp
 *.swo
 *~
-
-# ---- 操作系统文件 ----
+*.bak
 .DS_Store
 Thumbs.db
 
-# ============================================
-# 以下目录应纳入版本控制（核心代码）
-# ============================================
-# /docs/           - 设计文档
-# /tests/          - 测试用例
-# /scripts/        - 有用的构建/部署脚本（非临时诊断脚本）
-# /web-vue/src/    - 前端源码
-# /app/            - 后端 API
-# /core/           - 核心算法
-# /config/         - 配置文件
-# /prompts/        - LLM 提示词模板
-# ============================================
-
-# ---- 临时诊断脚本（保留在本地，不提交）----
+# Dev-only helper scripts
 /scripts/diagnose_*.py
 /scripts/test_*.py
-/scripts/_*.py  # 下划线前缀的临时脚本
+/scripts/_*.py
 /scripts/replace_*.py
 /scripts/fix_*.py
 /scripts/check_*.py
 /scripts/deploy_*.py
-
-/web-vue/node_modules/
-/web-vue/package-lock.json

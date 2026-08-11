@@ -81,6 +81,12 @@
               :placeholder="apiKeyPlaceholder"
               :class="{ error: errors[currentFeature] }"
             />
+            <span
+              v-if="configuredFeatures[currentFeature] && !config[currentFeature].api_key"
+              class="hint configured-hint"
+            >
+              ✓ 已保存密钥；仅在需要更换时输入新值
+            </span>
             <span class="hint">{{ selectedProviderInfo.api_key_format }}</span>
             <span class="error-msg" v-if="errors[currentFeature]">{{ errors[currentFeature] }}</span>
           </div>
@@ -188,6 +194,7 @@
 
 <script setup>
 import { ref, reactive, computed, onMounted, watch } from 'vue'
+import { useUser } from '../composables/useUser.js'
 
 // LA-DEPLOY-FEAT: 按功能模块的 API 配置向导
 
@@ -196,6 +203,7 @@ const props = defineProps({
 })
 
 const emit = defineEmits(['update:modelValue', 'configured'])
+const { getAuthHeaders } = useUser()
 
 const showWizard = computed({
   get: () => props.modelValue,
@@ -271,6 +279,13 @@ const testResults = reactive({
 const testing = ref(false)
 const saving = ref(false)
 const hasAnyConfig = ref(false)
+const configuredFeatures = reactive({
+  llm: false,
+  llm_fallback: false,
+  vlm: false,
+  embedding: false,
+  mineru: false,
+})
 
 // 计算属性
 const availableProviders = computed(() => {
@@ -299,19 +314,29 @@ const featureDefaultModel = computed(() => {
 })
 
 const apiKeyPlaceholder = computed(() => {
+  if (configuredFeatures[currentFeature.value]) {
+    return '已配置；留空表示保持现有密钥'
+  }
   const info = selectedProviderInfo.value
   return info.api_key_format ? `格式: ${info.api_key_format}` : '请输入 API Key'
 })
 
 const canFinish = computed(() => {
   // LLM 和 Embedding 必须配置
-  return config.llm.api_key.trim() && config.embedding.api_key.trim()
+  const llmReady = config.llm.api_key.trim() || configuredFeatures.llm
+  const embeddingReady = config.embedding.api_key.trim() || configuredFeatures.embedding
+  return !!(llmReady && embeddingReady)
 })
 
 // 方法
 function selectProvider(pid) {
   const feat = currentFeature.value
+  const providerChanged = config[feat].provider && config[feat].provider !== pid
   config[feat].provider = pid
+  if (providerChanged) {
+    config[feat].api_key = ''
+    configuredFeatures[feat] = false
+  }
 
   // LA-ROBUST: 自动设置默认模型
   const defaults = {
@@ -342,7 +367,7 @@ function selectProvider(pid) {
 
 function getFeatureStatus(featId) {
   if (testResults[featId].status === 'success') return 'ok'
-  if (config[featId].api_key.trim()) return 'configured'
+  if (config[featId].api_key.trim() || configuredFeatures[featId]) return 'configured'
   return 'empty'
 }
 
@@ -356,7 +381,7 @@ async function testCurrentFeature() {
     return
   }
 
-  if (!cfg.api_key.trim()) {
+  if (!cfg.api_key.trim() && !configuredFeatures[feat]) {
     errors[feat] = '请先输入 API Key'
     testResults[feat] = { status: 'error', message: '请先输入 API Key' }
     return
@@ -375,10 +400,14 @@ async function testCurrentFeature() {
   try {
     const resp = await fetch(`/api/setup/test/${feat}`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
       body: JSON.stringify(testCfg)
     })
     const result = await resp.json()
+
+    if (!resp.ok) {
+      throw new Error(result.detail || result.message || `HTTP ${resp.status}`)
+    }
 
     if (result.success) {
       testResults[feat] = { status: 'success', message: `${result.message} (${result.latency_ms}ms)` }
@@ -393,6 +422,9 @@ async function testCurrentFeature() {
 }
 
 function applyRecommendation(scheme) {
+  for (const feat of features) {
+    configuredFeatures[feat.id] = false
+  }
   if (scheme === 'zhipu_deepseek') {
     // 智谱AI 负责 vlm + embedding，DeepSeek 负责 llm，Kimi 作为备用 llm
     config.llm = { provider: 'deepseek', api_key: '', base_url: '', model: 'deepseek-chat', enabled: true, custom_model: '' }
@@ -425,10 +457,14 @@ async function saveAndFinish() {
   try {
     const resp = await fetch('/api/setup/config', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
       body: JSON.stringify(config)
     })
     const result = await resp.json()
+
+    if (!resp.ok) {
+      throw new Error(result.detail || result.message || `HTTP ${resp.status}`)
+    }
 
     if (result.status === 'success') {
       emit('configured')
@@ -485,14 +521,18 @@ async function loadExistingConfig() {
     // LA-DEPLOY-FEAT: 如果有已有配置，加载到表单中（支持重新配置）
     if (hasAnyConfig.value) {
       try {
-        // 调用 config-raw 获取完整配置（含 API Key），用于预填充表单
-        const cfgResp = await fetch('/api/setup/config-raw')
+        // AUTH-P0-2: 只加载非敏感配置；密钥输入框始终留空。
+        const cfgResp = await fetch('/api/setup/config', { headers: getAuthHeaders() })
         const cfg = await cfgResp.json()
+        if (!cfgResp.ok) {
+          throw new Error(cfg.detail || `HTTP ${cfgResp.status}`)
+        }
         for (const feat of features) {
           const fid = feat.id
           if (cfg[fid]) {
             config[fid].provider = cfg[fid].provider || ''
-            config[fid].api_key = cfg[fid].api_key || ''  // 完整 key，密码框显示为星号
+            config[fid].api_key = ''
+            configuredFeatures[fid] = !!cfg[fid].configured
             config[fid].base_url = cfg[fid].base_url || ''
             config[fid].model = cfg[fid].model || ''
             config[fid].enabled = cfg[fid].enabled !== false
@@ -692,6 +732,11 @@ watch(currentFeature, (newFeat) => {
   font-size: 12px;
   color: #888;
   margin-top: 4px;
+}
+
+.configured-hint {
+  color: #15803d;
+  font-weight: 500;
 }
 
 .error-msg {

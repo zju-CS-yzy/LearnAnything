@@ -5,6 +5,10 @@
 > 项目路径: `D:\MyCS\AI\Project\LearnAnything\`  
 > 定位: AI驱动的通用知识学习系统，支持任意学科的RAG知识库+知识图谱+Agent协作
 
+> ⚠️ **阅读提示（2026-08-11）**：本文档为 2026-07-05 的 v1.0 历史主设计文档，正文不再维护。
+> 各功能的**当前实现状态**请以 `docs/leftover-problem.md`（遗留问题清单）与各专题设计文档
+> （design-trae-multiagent-chat、design-dialog-context、design-evaluation-visualization 等）为准。
+
 ---
 
 ## 目录

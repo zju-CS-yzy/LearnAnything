@@ -4,6 +4,7 @@ BM25 + 向量检索 + RRF 融合
 """
 
 import gc
+import hashlib
 import json
 import pickle
 import time
@@ -64,10 +65,19 @@ class HybridRetriever:
         self._vector_store = vector_store or VectorStore(collection_name)
         self._embedding = EmbeddingManager()
 
+    def _bm25_cache_paths(self) -> Tuple[Path, Path]:
+        """BM25-P1-1: 缓存文件名混入向量库路径哈希，
+        避免不同用户的同名私有学科共享/覆盖同一份 BM25 索引。"""
+        store_key = str(getattr(self._vector_store, "_db_path", "") or "")
+        tag = hashlib.md5(store_key.encode()).hexdigest()[:8] if store_key else "default"
+        return (
+            CACHE_DIR / f"bm25_{self.collection_name}_{tag}.pkl",
+            CACHE_DIR / f"bm25_{self.collection_name}_{tag}_ids.json",
+        )
+
     def _build_bm25_index(self):
         from rank_bm25 import BM25Okapi
-        cache_file = CACHE_DIR / f"bm25_{self.collection_name}.pkl"
-        ids_cache = CACHE_DIR / f"bm25_{self.collection_name}_ids.json"
+        cache_file, ids_cache = self._bm25_cache_paths()
 
         if self.use_cache and cache_file.exists() and ids_cache.exists():
             with open(cache_file, 'rb') as f:

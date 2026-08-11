@@ -877,7 +877,8 @@ class SemanticLinker:
         加载 "原始名称 → canonical ID" 映射表。
         由 ConceptDeduper 在去重后生成。
         """
-        mapping_path = KNOWLEDGE_BASE_DIR / f"{self.collection_name}_name_mapping.json"
+        # LA-051-DIR-FIX: 使用学科内聚路径（graph_store.data_dir）
+        mapping_path = self.graph_store.data_dir / "name_mapping.json"
         if not mapping_path.exists():
             return {}
 
@@ -1158,9 +1159,10 @@ class SemanticLinker:
         """
         从去重后的 CSV 文件读取概念完整信息。
 
-        CSV 文件路径: knowledge_base/{subject}_concepts.csv
+        CSV 文件路径: {graph_store.data_dir}/concepts.csv
         """
-        csv_path = KNOWLEDGE_BASE_DIR / f"{self.collection_name}_concepts.csv"
+        # LA-051-DIR-FIX: 使用学科内聚路径
+        csv_path = self.graph_store.data_dir / "concepts.csv"
         if not csv_path.exists():
             return {}
 

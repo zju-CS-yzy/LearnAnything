@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 import kuzu
 
-sys.path.insert(0, r"D:\MyCS\AI\Project\LearnAnything")
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 # Monkey-patch kuzu.Database to use small buffer pool for tests
 # 避免默认 8TB buffer pool 导致内存分配失败

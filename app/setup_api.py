@@ -10,20 +10,25 @@ Setup Wizard API — 首次启动配置向导 (LA-DEPLOY-FEAT)
     - mineru:    PDF 结构化解析
 """
 
+import ipaddress
+import json
 import os
 import requests
+import threading
 import time
-from pathlib import Path
+from datetime import datetime, timezone
 from typing import Dict, List, Optional
+from urllib.parse import urlparse
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
+from app.auth import require_admin
 from config.settings import (
-    AppConfig, FeatureConfig,
+    FeatureConfig,
     SUPPORTED_PROVIDERS, FEATURE_DEFAULT_MODELS,
-    API_CONFIG_PATH, update_config, reload_config,
-    is_first_run, check_all_features, is_feature_available,
+    DATA_ROOT, update_config, get_full_config,
+    is_first_run, check_all_features,
 )
 
 
@@ -31,22 +36,22 @@ from config.settings import (
 
 class FeatureConfigRequest(BaseModel):
     """单个功能模块配置请求"""
-    provider: str = Field(..., description="提供商ID")
-    api_key: str = Field(..., description="API Key")
-    base_url: str = Field("", description="Base URL（可选，留空使用提供商默认）")
-    model: str = Field("", description="模型名称（可选，留空使用功能默认）")
-    enabled: bool = Field(True, description="是否启用")
-    custom_model: str = Field("", description="自定义模型名称")
+    provider: Optional[str] = Field(None, description="提供商ID")
+    api_key: Optional[str] = Field(None, description="新 API Key；省略或留空表示保持原值")
+    base_url: Optional[str] = Field(None, description="Base URL")
+    model: Optional[str] = Field(None, description="模型名称")
+    enabled: Optional[bool] = Field(None, description="是否启用")
+    custom_model: Optional[str] = Field(None, description="自定义模型名称")
 
 
 class SetupConfigRequest(BaseModel):
     """完整配置请求"""
-    llm: FeatureConfigRequest
-    llm_fallback: Optional[FeatureConfigRequest] = None  # LLM-ROBUST: 备用 LLM
-    vlm: FeatureConfigRequest
-    embedding: FeatureConfigRequest
-    mineru: FeatureConfigRequest
-    mineru_cli_path: str = Field("", description="MinerU CLI 路径（可选）")
+    llm: Optional[FeatureConfigRequest] = None
+    llm_fallback: Optional[FeatureConfigRequest] = None
+    vlm: Optional[FeatureConfigRequest] = None
+    embedding: Optional[FeatureConfigRequest] = None
+    mineru: Optional[FeatureConfigRequest] = None
+    mineru_cli_path: Optional[str] = Field(None, description="MinerU CLI 路径")
 
 
 class TestResult(BaseModel):
@@ -63,7 +68,6 @@ class SetupStatus(BaseModel):
     """首次启动状态"""
     is_first_run: bool = Field(..., description="是否为首次启动")
     features_configured: Dict[str, bool] = Field(..., description="各功能配置状态")
-    config_path: str = Field(..., description="配置文件路径")
     required_features: List[str] = Field(default=["llm", "embedding"], description="必需功能")
 
 
@@ -85,6 +89,133 @@ class ProviderInfo(BaseModel):
 
 router = APIRouter(prefix="/api/setup", tags=["setup"])
 
+FEATURE_NAMES = ("llm", "llm_fallback", "vlm", "embedding", "mineru")
+AUDIT_LOG_PATH = DATA_ROOT / "logs" / "admin_audit.jsonl"
+_AUDIT_LOCK = threading.Lock()
+
+
+def _select_secret(candidate: Optional[str], current: str) -> str:
+    """Keep the stored secret when a client omits it or sends a legacy mask."""
+    if candidate is None:
+        return current
+    value = candidate.strip()
+    if not value or value == "***":
+        return current
+    return value
+
+
+def _validate_provider(feature: str, provider: str) -> None:
+    if feature == "mineru":
+        if provider not in ("", "mineru"):
+            raise HTTPException(status_code=400, detail="Unsupported MinerU provider")
+        return
+    if provider not in SUPPORTED_PROVIDERS:
+        raise HTTPException(status_code=400, detail=f"Unsupported provider: {provider}")
+    provider_feature = "llm" if feature == "llm_fallback" else feature
+    if provider_feature not in SUPPORTED_PROVIDERS[provider]["features"]:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Provider {provider} does not support {provider_feature}",
+        )
+
+
+def _resolve_base_url(provider: str, candidate: Optional[str], current: str) -> str:
+    if candidate is not None:
+        value = candidate.strip()
+        if value:
+            return value
+    if provider in SUPPORTED_PROVIDERS:
+        return SUPPORTED_PROVIDERS[provider]["default_base_url"]
+    return current.strip()
+
+
+def _validate_base_url(provider: str, base_url: str) -> None:
+    """Reject local/private targets and provider-host mismatches."""
+    parsed = urlparse(base_url)
+    allow_private = os.getenv("LEARNANYTHING_ALLOW_PRIVATE_API_ENDPOINTS") == "1"
+    allowed_schemes = {"https", "http"} if allow_private else {"https"}
+    if parsed.scheme.lower() not in allowed_schemes or not parsed.hostname:
+        raise HTTPException(status_code=400, detail="A valid HTTPS API base URL is required")
+    if parsed.username or parsed.password:
+        raise HTTPException(status_code=400, detail="API base URL must not contain credentials")
+
+    hostname = parsed.hostname.lower().rstrip(".")
+    if not allow_private:
+        if hostname == "localhost" or hostname.endswith((".localhost", ".local")):
+            raise HTTPException(status_code=400, detail="Private API endpoints are disabled")
+        try:
+            address = ipaddress.ip_address(hostname)
+        except ValueError:
+            address = None
+        if address and not address.is_global:
+            raise HTTPException(status_code=400, detail="Private API endpoints are disabled")
+
+    if provider in SUPPORTED_PROVIDERS and provider != "custom":
+        default_host = urlparse(SUPPORTED_PROVIDERS[provider]["default_base_url"]).hostname
+        if default_host and hostname != default_host.lower().rstrip("."):
+            raise HTTPException(
+                status_code=400,
+                detail="Use the custom provider for a non-standard API host",
+            )
+
+
+def _merge_feature_config(
+    feature: str,
+    current: FeatureConfig,
+    incoming: FeatureConfigRequest,
+) -> FeatureConfig:
+    provider = (incoming.provider if incoming.provider is not None else current.provider).strip()
+    _validate_provider(feature, provider)
+    new_key = (incoming.api_key or "").strip()
+    if provider != current.provider and (not new_key or new_key == "***"):
+        raise HTTPException(
+            status_code=400,
+            detail="A new API Key is required when changing provider",
+        )
+
+    if incoming.base_url is None and provider == current.provider:
+        base_url = current.base_url.strip()
+    else:
+        base_url = _resolve_base_url(provider, incoming.base_url, current.base_url)
+    if feature != "mineru":
+        _validate_base_url(provider, base_url)
+
+    model = (incoming.model if incoming.model is not None else current.model).strip()
+    defaults_feature = "llm" if feature == "llm_fallback" else feature
+    if not model:
+        model = FEATURE_DEFAULT_MODELS.get(defaults_feature, {}).get(provider, "")
+
+    return FeatureConfig(
+        provider=provider,
+        api_key=_select_secret(incoming.api_key, current.api_key),
+        base_url=base_url,
+        model=model,
+        enabled=current.enabled if incoming.enabled is None else incoming.enabled,
+        custom_model=(
+            incoming.custom_model
+            if incoming.custom_model is not None
+            else current.custom_model
+        ).strip(),
+    )
+
+
+def _write_audit_event(user_id: str, action: str, details: dict) -> None:
+    """Append a secret-free administrator audit event."""
+    record = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "user_id": user_id,
+        "action": action,
+        "details": details,
+    }
+    with _AUDIT_LOCK:
+        AUDIT_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with AUDIT_LOG_PATH.open("a", encoding="utf-8") as stream:
+            stream.write(json.dumps(record, ensure_ascii=False) + "\n")
+        try:
+            os.chmod(AUDIT_LOG_PATH, 0o600)
+        except OSError:
+            pass
+
 
 # ========== API 端点 ==========
 
@@ -95,7 +226,6 @@ async def get_setup_status():
     return SetupStatus(
         is_first_run=is_first_run(),
         features_configured=checks,
-        config_path=str(API_CONFIG_PATH),
     )
 
 
@@ -120,46 +250,14 @@ async def list_providers():
 
 
 @router.get("/config")
-async def get_config():
-    """获取当前配置（密钥脱敏）"""
-    from config.settings import get_full_config
-    cfg = get_full_config()
-    
-    def mask_key(key: str) -> str:
-        if len(key) <= 16:
-            return "***" if key else ""
-        return key[:8] + "..." + key[-4:]
-    
-    def serialize(fc: FeatureConfig) -> dict:
-        return {
-            "provider": fc.provider,
-            "api_key": mask_key(fc.api_key),
-            "base_url": fc.base_url,
-            "model": fc.model,
-            "enabled": fc.enabled,
-            "custom_model": fc.custom_model,
-        }
-    
-    return {
-        "llm": serialize(cfg.llm),
-        "llm_fallback": serialize(cfg.llm_fallback),
-        "vlm": serialize(cfg.vlm),
-        "embedding": serialize(cfg.embedding),
-        "mineru": serialize(cfg.mineru),
-        "mineru_cli_path": cfg.mineru_cli_path,
-    }
-
-
-@router.get("/config-raw")
-async def get_config_raw():
-    """获取当前完整配置（包含完整 API Key，仅本地应用使用）"""
-    from config.settings import get_full_config
+async def get_config(admin_user_id: str = Depends(require_admin)):
+    """获取当前配置；永不返回 API Key 内容。"""
     cfg = get_full_config()
 
     def serialize(fc: FeatureConfig) -> dict:
         return {
             "provider": fc.provider,
-            "api_key": fc.api_key,  # 完整 key，仅本地填充表单
+            "configured": bool(fc.api_key.strip()),
             "base_url": fc.base_url,
             "model": fc.model,
             "enabled": fc.enabled,
@@ -177,99 +275,83 @@ async def get_config_raw():
 
 
 @router.post("/config")
-async def save_config(request: SetupConfigRequest):
-    """保存完整配置"""
-    # 验证必填项
-    if not request.llm.api_key.strip():
-        raise HTTPException(status_code=400, detail="语言处理 (LLM) API Key 不能为空")
-    if not request.embedding.api_key.strip():
-        raise HTTPException(status_code=400, detail="文本向量化 (Embedding) API Key 不能为空")
-    
-    # 构建配置
-    def to_fc(req: FeatureConfigRequest) -> FeatureConfig:
-        # 如果 base_url 为空，使用提供商默认
-        base_url = req.base_url.strip()
-        if not base_url and req.provider in SUPPORTED_PROVIDERS:
-            base_url = SUPPORTED_PROVIDERS[req.provider]["default_base_url"]
-        
-        # 如果 model 为空，使用功能默认
-        model = req.model.strip()
-        if not model:
-            for feature, defaults in FEATURE_DEFAULT_MODELS.items():
-                if req.provider in defaults:
-                    # 这里需要外部传入 feature 名，简化处理
-                    pass
-        
-        return FeatureConfig(
-            provider=req.provider,
-            api_key=req.api_key.strip(),
-            base_url=base_url,
-            model=model,
-            enabled=req.enabled,
-            custom_model=req.custom_model.strip(),
-        )
-    
-    config = AppConfig(
-        llm=to_fc(request.llm),
-        llm_fallback=to_fc(request.llm_fallback) if request.llm_fallback else FeatureConfig(),
-        vlm=to_fc(request.vlm),
-        embedding=to_fc(request.embedding),
-        mineru=to_fc(request.mineru),
-        mineru_cli_path=request.mineru_cli_path.strip(),
-    )
-    
-    # 补充默认模型
-    for feature in ["llm", "vlm", "embedding"]:
-        fc: FeatureConfig = getattr(config, feature)
-        if not fc.model and fc.provider in FEATURE_DEFAULT_MODELS.get(feature, {}):
-            fc.model = FEATURE_DEFAULT_MODELS[feature][fc.provider]
-    
+async def save_config(
+    request: SetupConfigRequest,
+    admin_user_id: str = Depends(require_admin),
+):
+    """Partially update configuration without ever reading old keys to the client."""
+    config = get_full_config()
+    changed_features = []
+
+    for feature in FEATURE_NAMES:
+        incoming = getattr(request, feature)
+        if incoming is None:
+            continue
+        current = getattr(config, feature)
+        setattr(config, feature, _merge_feature_config(feature, current, incoming))
+        changed_features.append(feature)
+
+    if request.mineru_cli_path is not None:
+        config.mineru_cli_path = request.mineru_cli_path.strip()
+        changed_features.append("mineru_cli_path")
+
+    if not config.llm.api_key.strip():
+        raise HTTPException(status_code=400, detail="LLM API Key is required")
+    if not config.embedding.api_key.strip():
+        raise HTTPException(status_code=400, detail="Embedding API Key is required")
+
     update_config(config)
-    
+    _write_audit_event(admin_user_id, "config.update", {"features": changed_features})
+
     return {
         "status": "success",
-        "message": "配置已保存",
-        "config_path": str(API_CONFIG_PATH),
+        "message": "Configuration saved",
         "features": check_all_features(),
     }
 
 
 @router.post("/test/{feature}", response_model=TestResult)
-async def test_feature_api(feature: str, request: FeatureConfigRequest):
-    """测试单个功能模块的 API 连通性"""
-    if feature not in ["llm", "llm_fallback", "vlm", "embedding", "mineru"]:
-        raise HTTPException(status_code=400, detail=f"不支持的功能: {feature}")
-    
-    if not request.api_key.strip():
-        raise HTTPException(status_code=400, detail="API Key 不能为空")
-    
-    # 确定 base_url
-    base_url = request.base_url.strip()
-    if not base_url and request.provider in SUPPORTED_PROVIDERS:
-        base_url = SUPPORTED_PROVIDERS[request.provider]["default_base_url"]
-    
-    # 确定 model
-    model = request.model.strip()
-    if not model and feature in FEATURE_DEFAULT_MODELS:
-        model = FEATURE_DEFAULT_MODELS[feature].get(request.provider, "")
-    
-    # 执行测试
-    if feature == "llm" or feature == "llm_fallback":
-        return _test_llm(request.api_key, base_url, model)
+async def test_feature_api(
+    feature: str,
+    request: FeatureConfigRequest,
+    admin_user_id: str = Depends(require_admin),
+):
+    """Test one configured provider; only a system administrator may call it."""
+    if feature not in FEATURE_NAMES:
+        raise HTTPException(status_code=400, detail=f"Unsupported feature: {feature}")
+
+    current = getattr(get_full_config(), feature)
+    provider = (request.provider or current.provider).strip()
+    api_key = _select_secret(request.api_key, current.api_key)
+    base_url = _resolve_base_url(provider, request.base_url, current.base_url)
+    model = (request.model if request.model is not None else current.model).strip()
+    if not model:
+        defaults_feature = "llm" if feature == "llm_fallback" else feature
+        model = FEATURE_DEFAULT_MODELS.get(defaults_feature, {}).get(provider, "")
+
+    _validate_provider(feature, provider)
+    if feature != "mineru":
+        _validate_base_url(provider, base_url)
+    if not api_key:
+        raise HTTPException(status_code=400, detail="API Key is required")
+
+    if feature in ("llm", "llm_fallback"):
+        result = _test_llm(api_key, base_url, model)
     elif feature == "vlm":
-        return _test_vlm(request.api_key, base_url, model)
+        result = _test_vlm(api_key, base_url, model)
     elif feature == "embedding":
-        return _test_embedding(request.api_key, base_url, model)
-    elif feature == "mineru":
-        return _test_mineru(request.api_key)
-    
-    return TestResult(
-        feature=feature,
-        provider=request.provider,
-        model=model,
-        success=False,
-        message="未知错误",
+        result = _test_embedding(api_key, base_url, model)
+    else:
+        result = _test_mineru(api_key)
+
+    result.feature = feature
+    result.provider = provider
+    _write_audit_event(
+        admin_user_id,
+        "config.test",
+        {"feature": feature, "provider": provider, "success": result.success},
     )
+    return result
 
 
 # ========== 测试实现 ==========
@@ -297,7 +379,7 @@ def _test_llm(api_key: str, base_url: str, model: str) -> TestResult:
             "max_tokens": 10,
         }
         
-        resp = requests.post(url, headers=headers, json=payload, timeout=15)
+        resp = requests.post(url, headers=headers, json=payload, timeout=15, allow_redirects=False)
         latency = (time.time() - start) * 1000
         
         if resp.status_code == 200:
@@ -368,7 +450,7 @@ def _test_vlm(api_key: str, base_url: str, model: str) -> TestResult:
             "max_tokens": 10,
         }
         
-        resp = requests.post(url, headers=headers, json=payload, timeout=15)
+        resp = requests.post(url, headers=headers, json=payload, timeout=15, allow_redirects=False)
         latency = (time.time() - start) * 1000
         
         if resp.status_code == 200:
@@ -410,7 +492,7 @@ def _test_embedding(api_key: str, base_url: str, model: str) -> TestResult:
             "input": ["test"],
         }
         
-        resp = requests.post(url, headers=headers, json=payload, timeout=15)
+        resp = requests.post(url, headers=headers, json=payload, timeout=15, allow_redirects=False)
         latency = (time.time() - start) * 1000
         
         if resp.status_code == 200:

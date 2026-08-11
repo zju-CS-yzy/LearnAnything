@@ -121,6 +121,7 @@
 <script setup>
 import { computed } from 'vue'
 import { renderLatex } from '../../utils/latex.js'
+import { withMediaAuth } from '../../utils/media.js'
 
 const props = defineProps({
   visible: { type: Boolean, default: false },
@@ -246,12 +247,12 @@ function getMediaUrl(path) {
   if (path.startsWith('http')) return path
   // LA-035-P42-FIX: 如果路径已经是 /api/ 开头的 API 路径（如 /api/images/rag/xxx.png），直接加上 origin
   if (path.startsWith('/api/')) {
-    return `${window.location.origin}${path}`
+    return withMediaAuth(`${window.location.origin}${path}`)
   }
   // LA-035: Windows 路径反斜杠替换为正斜杠，确保 URL 正确
   const normalizedPath = path.replace(/\\/g, '/')
   // 本地路径：通过后端静态文件服务
-  return `${window.location.origin}/api/media/${encodeURIComponent(normalizedPath)}`
+  return withMediaAuth(`${window.location.origin}/api/media/${encodeURIComponent(normalizedPath)}`)
 }
 
 function onImageError(e) {

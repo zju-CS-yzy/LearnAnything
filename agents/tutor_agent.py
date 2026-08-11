@@ -24,9 +24,15 @@ class TutorAgent(BaseAgent):
     def agent_name(self) -> str:
         return "TutorAgent"
 
-    def __init__(self, collection_name: str = "learnanything_v1", top_k: int = 5, message_bus=None, user_theta: Optional[float] = None):
+    def __init__(self, collection_name: str = "learnanything_v1", top_k: int = 5, message_bus=None,
+                 user_theta: Optional[float] = None, graph_store=None, vector_store=None,
+                 user_id: Optional[str] = None):
         self.collection_name = collection_name
         self.top_k = top_k
+        # LA-IMG: 复用 Coordinator 注入的权限感知 GraphStore，避免私有学科回退到 Share。
+        self._graph_store = graph_store
+        self._vector_store = vector_store
+        self.user_id = user_id
         self._retriever = None
         self._reranker = None
         self._cache = QueryCache()
@@ -42,8 +48,14 @@ class TutorAgent(BaseAgent):
 
     def _get_retriever(self):
         if self._retriever is None:
-            self._retriever = HybridRetriever(self.collection_name)
+            # LA-051-RET-FIX: Coordinator 注入的权限感知 VectorStore 包装进
+            # HybridRetriever（保留 BM25 混合检索）；未注入时回退默认 Share 库。
+            self._retriever = HybridRetriever(self.collection_name, vector_store=self._vector_store)
         return self._retriever
+
+    def _cache_scope(self) -> str:
+        """CACHE-P1-1: 查询缓存按 用户+学科 隔离，防止跨用户/跨学科答案泄漏。"""
+        return f"{self.user_id or 'default'}:{self.collection_name}"
 
     def _get_reranker(self):
         if self._reranker is None:
@@ -87,14 +99,26 @@ class TutorAgent(BaseAgent):
         media_hint = ""
         if media:
             media_hint = "\n\n## 相关图片/公式资源（重要：请在回答中引用）\n"
-            media_hint += "以下是与该问题相关的图片，请在回答中讲到对应内容时，"
-            media_hint += "直接插入 markdown 图片语法 ![描述](路径) 来展示图片。"
-            media_hint += "不要只在末尾列出图片，要在正文中适当位置嵌入。\n\n"
+            media_hint += "以下是与该问题相关的图片资源。请根据图片的**内容类型**和**适用场景**，"
+            media_hint += "在回答的对应位置直接插入 markdown 图片语法 ![描述](路径)。\n"
+            media_hint += "【强制规则】\n"
+            media_hint += "- 流程图、架构图、示意图、工作流程图：在描述流程/架构时**必须**引用，文字描述后紧跟图片\n"
+            media_hint += "- 公式图片：在讲解公式时**必须**引用\n"
+            media_hint += "- 截图/示例图：在举例说明时引用\n"
+            media_hint += "- 图片不能只在末尾列出，要在正文中适当位置嵌入\n"
+            media_hint += "- 引用格式必须严格为 ![描述](/api/media/路径)\n\n"
+            
             for i, m in enumerate(media[:5], 1):  # 最多引用 5 张
-                media_hint += f"图片{i}: {m['caption']}\n"
-                media_hint += f"路径: /api/media/{m['path']}\n"
-                media_hint += f"引用示例: ![{m['caption']}](/api/media/{m['path']})\n\n"
-            print(f"[TutorAgent] LA-IMG: 媒体提示已生成 ({len(media_hint)} 字符)")
+                # LA-IMG-ENHANCE: 根据文件名和标题推断内容类型
+                content_type = _infer_image_content_type(m.get('caption', ''), m.get('filename', ''))
+                usage_hint = _get_image_usage_hint(content_type)
+                
+                media_hint += f"[图片{i}] {m['caption']}\n"
+                media_hint += f"  内容类型: {content_type}\n"
+                media_hint += f"  适用场景: {usage_hint}\n"
+                media_hint += f"  引用方式: ![{m['caption']}]({m['url'] or '/api/media/' + m['path']})\n\n"
+            
+            print(f"[TutorAgent] LA-IMG: 媒体提示已生成 ({len(media_hint)} 字符, {len(media)} 张图片)")
         else:
             print(f"[TutorAgent] LA-IMG: 无媒体资源")
 
@@ -161,15 +185,21 @@ class TutorAgent(BaseAgent):
             "2. 引用资料中的关键信息来支撑回答\n"
             "3. 使用适当的段落、列表和标题来组织内容\n"
             "4. 遇到专业术语时简要解释\n"
-            "5. 【重要】如果提供了图片资源，必须在回答正文中用 markdown 图片语法引用，"
-            "格式为 ![描述](/api/media/路径)。图片不能只在末尾列出，"
-            "要在讲解到对应内容时直接嵌入到段落中\n"
+            "5. 【图片引用规则 - 强制】如果提供了图片资源，你必须在回答中引用。具体要求：\n"
+            "   a) 流程图、架构图、工作原理图：在描述流程/架构/原理时，文字描述后**必须**紧跟图片引用\n"
+            "   b) 公式图片：在讲解公式时**必须**引用\n"
+            "   c) 对比图、示意图：在对比/说明时**必须**引用\n"
+            "   d) 引用格式严格为: ![图片描述](/api/media/路径)\n"
+            "   e) 图片必须在正文段落中嵌入，不能只在末尾罗列\n"
+            "   f) 先文字描述，再嵌入图片，让读者看到图对应什么内容\n"
+            "   g) 【错误示例】只在最后写'如下图所示'但不嵌入图片 → 这是不允许的\n"
+            "   h) 【正确示例】'该系统的工作流程如下：首先...然后... ![工作流程图](/api/media/xxx.png) 接着...'\n"
             "6. 如果资料不足以完全回答问题，诚实说明\n"
             "7. 如果提供了对话历史，请注意保持与上下文的连贯性"
             f"{personalization_hint}"
         )
 
-        user_prompt = f"{history_hint}用户问题：{query}{source_note}\n\n参考资料：\n{context}{media_hint}\n\n请生成回答："
+        user_prompt = f"{history_hint}用户问题：{query}{source_note}\n\n## 相关图片资源（回答时必须引用）\n{media_hint}\n\n参考资料：\n{context}\n\n请生成回答："
         
         # 记录最终 prompt 长度
         total_prompt_len = len(system_prompt) + len(user_prompt)
@@ -182,13 +212,20 @@ class TutorAgent(BaseAgent):
                 messages=messages,
                 system_prompt=system_prompt,
                 temperature=0.5,
-                max_tokens=4000,  # LLM-ROBUST: 从 1500 增加到 4000，避免回答被截断
+                max_tokens=4000,
             )
-            return answer
         except Exception as e:
             print(f"[TutorAgent] LLM 生成失败: {e}")
-            # 降级：返回原始上下文
             return "\n\n---\n\n".join(c.get("text", "")[:500] for c in context_chunks)
+
+        # LA-IMG-FIX: LLM 输出后处理 — 修正图片路径
+        if media:
+            original_answer = answer
+            answer = self._fix_image_paths(answer, media)
+            if answer != original_answer:
+                print(f"[TutorAgent] LA-IMG-FIX: 图片路径已修正")
+
+        return answer
 
     def handle(self, query: str, context: Optional[Any] = None, filters: Optional[Dict[str, Any]] = None, graph_context=None, user_theta: Optional[float] = None, **kwargs) -> Dict[str, Any]:
         """
@@ -261,20 +298,20 @@ class TutorAgent(BaseAgent):
         if hasattr(graph_context, 'subgraph') and graph_context.subgraph:
             for node in graph_context.subgraph.nodes:
                 context_chunks.append({
-                    "id": getattr(node, 'id', ''),
+                    # LA-UI-001 M4-FIX: ConceptNode 主键是 canonical_id（无 id 字段），
+                    # 修复图谱命令派生链路的节点 id 断裂
+                    "id": getattr(node, 'id', '') or getattr(node, 'canonical_id', ''),
                     "text": getattr(node, 'description', '') or getattr(node, 'name', ''),
                     "source": "knowledge_graph",
                     "concept": getattr(node, 'name', ''),
                 })
 
-        # 阶段 1 增强: 注入对话历史
-        history_text = ""
-        if context is not None and hasattr(context, 'to_prompt_context'):
-            history_text = context.to_prompt_context(max_turns=5)
-            if history_text:
-                print(f"[TutorAgent] 对话历史注入: {len(history_text)} 字符")
-            else:
-                print(f"[TutorAgent] 对话历史为空（新会话）")
+        # 阶段 1 增强: 注入对话历史（使用基类统一方法）
+        history_text = self.get_history_text(context, max_turns=5)
+        if history_text:
+            print(f"[TutorAgent] 对话历史注入: {len(history_text)} 字符")
+        else:
+            print(f"[TutorAgent] 对话历史为空（新会话）")
 
         # 生成回答
         print(f"[TutorAgent] 调用 LLM 生成回答...")
@@ -307,33 +344,29 @@ class TutorAgent(BaseAgent):
     def _collect_related_media(self, graph_context) -> List[Dict[str, Any]]:
         """LA-IMG: 从图谱上下文中收集关联的图片/公式资源
 
-        FIX-LA049:
-        1. 正确解析 source_chunks（支持 JSON 列表字符串、逗号分隔字符串、Python 列表）
-        2. 使用安全转义避免 Cypher 语法错误
-        3. 返回相对路径（学科名 + 文件名），避免 Windows 绝对路径问题
+        LA-MEDIA-UNIFY: 使用 core/media_resolver 统一解析路径，
+        返回标准化的媒体对象（含可直接访问的 url 字段）。
         """
         import json
         import ast
-        from pathlib import Path
 
         media = []
+        seen_media_urls = set()
         if not hasattr(graph_context, 'subgraph') or not graph_context.subgraph:
             return media
 
-        # FIX-LA049: 正确解析 source_chunks（支持多种格式）
+        # 收集所有 source_chunks 中的 chunk_id
         chunk_ids = set()
         for node in graph_context.subgraph.nodes:
             raw = getattr(node, 'source_chunks', None)
             if not raw:
                 continue
 
-            # 尝试多种解析方式
             ids = []
             if isinstance(raw, list):
                 ids = raw
             elif isinstance(raw, str):
                 raw = raw.strip()
-                # 尝试 JSON 解析
                 if raw.startswith('[') and raw.endswith(']'):
                     try:
                         ids = json.loads(raw)
@@ -343,7 +376,6 @@ class TutorAgent(BaseAgent):
                         except (ValueError, SyntaxError):
                             ids = [s.strip().strip("'\"") for s in raw[1:-1].split(',')]
                 else:
-                    # 逗号分隔字符串
                     ids = [s.strip() for s in raw.split(',') if s.strip()]
             elif hasattr(raw, '__iter__'):
                 ids = list(raw)
@@ -358,38 +390,21 @@ class TutorAgent(BaseAgent):
 
         # 通过 GraphStore 查询 chunk 详情
         try:
-            from core.graph_store import GraphStore
-            store = GraphStore(self.collection_name)
+            from core.media_resolver import resolve_media_path, resolve_media_list
+
+            store = self._graph_store
+            if store is None:
+                from core.graph_store import GraphStore
+                store = GraphStore(self.collection_name)
             store.init_schema()
             conn = store._ensure_db()
 
-            # FIX-LA049: 使用参数化方式构建 Cypher（避免引号注入）
-            # KùzuDB 不支持参数化查询，使用安全转义
             safe_ids = []
             for cid in chunk_ids:
-                # 转义单引号（Cypher 字符串中 ' 需要变成 ''）
                 safe_cid = str(cid).replace("'", "\\'")
                 safe_ids.append(f"'{safe_cid}'")
 
             id_str = ", ".join(safe_ids)
-            
-            # 调试：先查询所有 chunk 的类型分布
-            debug_cypher = f"""
-                MATCH (c:Chunk)
-                WHERE c.chunk_id IN [{id_str}]
-                RETURN c.chunk_id, c.chunk_type, c.thumbnail_path, c.image_path, c.media_refs
-            """
-            debug_result = conn.execute(debug_cypher)
-            debug_rows = []
-            while debug_result.has_next():
-                dr = debug_result.get_next()
-                debug_rows.append(f"  {dr[0][:40]}... type={dr[1]} thumb={'有' if dr[2] else '无'} img={'有' if dr[3] else '无'} media={'有' if dr[4] else '无'}")
-            if debug_rows:
-                print(f"[TutorAgent] LA-IMG: 调试 - source_chunks 详情:\n" + "\n".join(debug_rows))
-            else:
-                print(f"[TutorAgent] LA-IMG: 调试 - 未找到任何 chunk")
-            
-            # FIX-LA049: KùzuDB Cypher 列表字面量必须用方括号 []
             cypher = f"""
                 MATCH (c:Chunk)
                 WHERE c.chunk_id IN [{id_str}]
@@ -399,68 +414,59 @@ class TutorAgent(BaseAgent):
             result = conn.execute(cypher)
             while result.has_next():
                 row = result.get_next()
-                # FIX: 优先 thumbnail_path，其次 image_path，再次 media_refs
-                print(f"[TutorAgent] LA-IMG: row[2](thumb)={row[2]}, row[3](img)={row[3]}, row[5](media)={row[5] is not None}")
-                thumbnail = row[2] or row[3]  # thumbnail_path or image_path
-                if not thumbnail and row[5]:  # media_refs
+                chunk_id = row[0]
+                chunk_type = row[1]
+                heading = row[4] or "相关图片"
+
+                # 收集所有可能的路径来源
+                raw_media_refs = []
+                if row[5]:  # media_refs
                     try:
-                        import json
-                        media_refs_str = row[5]
-                        print(f"[TutorAgent] LA-IMG: 尝试解析 media_refs: {media_refs_str[:100]}...")
-                        media_refs = json.loads(media_refs_str)
-                        print(f"[TutorAgent] LA-IMG: 解析成功: {len(media_refs)} 个 media_ref")
-                        if media_refs and len(media_refs) > 0:
-                            first_ref = media_refs[0]
-                            print(f"[TutorAgent] LA-IMG: 第一个 media_ref: {first_ref}")
-                            # 调试：打印每个字段的值
-                            rp = first_ref.get('relative_path')
-                            p = first_ref.get('path')
-                            tp = first_ref.get('thumbnail_path')
-                            print(f"[TutorAgent] LA-IMG: relative_path='{rp}', path='{p}', thumbnail_path='{tp}'")
-                            # FIX: 优先使用 relative_path（相对路径），其次 path，最后 thumbnail_path
-                            thumbnail = rp or p or tp
-                            print(f"[TutorAgent] LA-IMG: 提取路径: {thumbnail}")
-                    except Exception as e:
-                        print(f"[TutorAgent] LA-IMG: media_refs 解析失败: {e}")
+                        media_refs_data = json.loads(row[5])
+                        if isinstance(media_refs_data, list):
+                            raw_media_refs.extend(media_refs_data)
+                    except Exception:
                         pass
-                if not thumbnail:
-                    print(f"[TutorAgent] LA-IMG: 跳过 - chunk {row[0][:30]}... 无图片路径")
+
+                # 也加入 thumbnail_path 和 image_path 作为备选
+                if row[2]:
+                    raw_media_refs.append({"path": row[2]})
+                if row[3]:
+                    raw_media_refs.append({"path": row[3]})
+
+                if not raw_media_refs:
                     continue
 
-                # FIX-LA049: 将绝对路径转换为相对路径
-                # 期望格式: {subject}_v1_images/{filename} 或 {subject}_v1_thumbnails/{filename}
-                path_str = str(thumbnail).replace('\\\\', '/').replace('\\', '/')
+                # LA-MEDIA-UNIFY: 使用统一解析器解析路径
+                subject = self.collection_name.replace('_v1', '')
+                resolved_list = resolve_media_list(raw_media_refs, subject=subject, user_id=self.user_id)
 
-                # 如果是绝对路径，提取最后两部分（学科文件夹 + 文件名）
-                if ':' in path_str or path_str.startswith('/'):
-                    # Windows 绝对路径如 D:/.../rag_v1_images/xxx.png
-                    parts = path_str.split('/')
-                    # 找到包含 _v1_images 或 _v1_thumbnails 的目录名
-                    for i, part in enumerate(parts):
-                        if '_v1_images' in part or '_v1_thumbnails' in part:
-                            # 取目录名 + 文件名
-                            if i + 1 < len(parts):
-                                path_str = f"{part}/{parts[i + 1]}"
-                                break
-                    else:
-                        # 如果没找到，只保留文件名
-                        path_str = parts[-1]
-                elif not any(marker in path_str for marker in ['_v1_images/', '_v1_thumbnails/']):
-                    # 只有文件名，尝试从 collection_name 推断学科
-                    subject = self.collection_name.replace('_v1', '')
-                    path_str = f"{subject}_v1_images/{path_str}"
+                for resolved in resolved_list:
+                    if not resolved.get("resolved"):
+                        print(f"[TutorAgent] LA-IMG: 跳过未解析的媒体: {resolved}")
+                        continue
+                    if resolved["url"] in seen_media_urls:
+                        continue
+                    seen_media_urls.add(resolved["url"])
 
-                media.append({
-                    "chunk_id": row[0],
-                    "type": row[1],
-                    "path": path_str,
-                    "caption": row[4] or "相关图片",
-                })
+                    media.append({
+                        "chunk_id": chunk_id,
+                        "type": chunk_type,
+                        "path": resolved["relative_path"],  # 相对路径，前端兼容性
+                        "url": resolved["url"],  # LA-MEDIA-UNIFY: 统一 URL
+                        "caption": heading,
+                        "filename": resolved["filename"],
+                        "original_name": resolved.get("original_name", ""),
+                        "subject": resolved["subject"],
+                    })
+                    print(f"[TutorAgent] LA-IMG: 解析成功: {resolved['url']}")
+
         except Exception as e:
             print(f"[TutorAgent] LA-IMG: 收集媒体资源失败: {e}")
             import traceback
             traceback.print_exc()
 
+        print(f"[TutorAgent] LA-IMG: 共收集 {len(media)} 个媒体资源")
         return media
 
     # ==================== LA-047: 引用来源收集 ====================
@@ -511,8 +517,10 @@ class TutorAgent(BaseAgent):
 
         # 查询 GraphStore 获取 chunk 元数据
         try:
-            from core.graph_store import GraphStore
-            store = GraphStore(self.collection_name)
+            store = self._graph_store
+            if store is None:
+                from core.graph_store import GraphStore
+                store = GraphStore(self.collection_name)
             store.init_schema()
             conn = store._ensure_db()
 
@@ -587,21 +595,30 @@ class TutorAgent(BaseAgent):
             return []
 
     def _handle_with_retrieval(self, query: str, filters: Optional[Dict[str, Any]] = None, context=None) -> Dict[str, Any]:
-        """使用传统 HybridRetriever 检索生成回答（阶段 1：支持对话上下文）"""
+        """使用传统 HybridRetriever 检索生成回答（阶段 1：支持对话上下文 + LA-IMG: 支持媒体收集）"""
         # 查询改写
         queries = self._rewriter.rewrite(query, n_variants=3)
 
         # 缓存检查
         query_embedding = self._embedding.embed_single(queries[0])
-        cached = self._cache.get(queries[0], query_embedding)
+        cached = self._cache.get(queries[0], query_embedding, scope=self._cache_scope())
         if cached is not None:
             cached_data = cached.get('result', {})
             # 新缓存结构: {'chunks': [...], 'answer': '...'}
             if isinstance(cached_data, dict) and 'answer' in cached_data:
+                cached_chunks = cached_data.get('chunks', [])
+                cached_media = self._collect_media_from_chunks(cached_chunks)
+                cached_answer = cached_data['answer']
+                if cached_media:
+                    cached_answer = self._fix_image_paths(cached_answer, cached_media)
                 return {
-                    "text": cached_data['answer'],
-                    "metadata": {"cache_hit": True, "hit_type": cached.get("hit_type", "unknown")},
-                    "chunks": cached_data.get('chunks', [])
+                    "text": cached_answer,
+                    "metadata": {
+                        "cache_hit": True,
+                        "hit_type": cached.get("hit_type", "unknown"),
+                        "media": cached_media,
+                    },
+                    "chunks": cached_chunks,
                 }
             # 兼容旧缓存结构（纯 chunks 列表）
             elif isinstance(cached_data, list):
@@ -639,20 +656,25 @@ class TutorAgent(BaseAgent):
         # MMR 多样性
         final_results = self._apply_mmr(query, reranked, n_results=self.top_k)
 
+        # LA-IMG-FIX: 从检索结果中收集媒体资源（传统检索路径也支持图片引用）
+        media = self._collect_media_from_chunks(final_results)
+        if media:
+            print(f"[TutorAgent] LA-IMG: 传统检索路径收集到 {len(media)} 个媒体资源")
+
         # 阶段 1: 注入对话历史
         history_text = ""
         if context is not None and hasattr(context, 'to_prompt_context'):
             history_text = context.to_prompt_context(max_turns=5)
 
         # 调用 LLM 生成润色回答
-        answer = self._generate_answer(query, final_results, history_text=history_text, user_theta=self.user_theta)
+        answer = self._generate_answer(query, final_results, history_text=history_text, media=media, user_theta=self.user_theta)
 
         # 写入缓存（新结构：包含 chunks 和 answer）
         cache_data = {
             'chunks': final_results,
             'answer': answer,
         }
-        self._cache.set(queries[0], query_embedding, cache_data)
+        self._cache.set(queries[0], query_embedding, cache_data, scope=self._cache_scope())
 
         # LA-047: 从检索结果收集引用来源
         sources = []
@@ -678,7 +700,7 @@ class TutorAgent(BaseAgent):
         
         return {
             "text": answer,
-            "metadata": {"chunks": len(final_results), "has_context": bool(history_text)},
+            "metadata": {"chunks": len(final_results), "has_context": bool(history_text), "media": media},
             "sources": unique_sources,  # LA-047: 引用来源
             "chunks": final_results,
         }
@@ -764,6 +786,152 @@ class TutorAgent(BaseAgent):
 
         return cleaned
 
+    def _collect_media_from_chunks(self, chunks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """LA-IMG-FIX: 从检索结果中收集媒体资源（传统检索路径使用）
+        
+        遍历检索到的 chunks，提取 image_pseudo / image / formula_pseudo 类型的 chunk
+        中的媒体引用信息。
+        """
+        import json
+        from core.media_resolver import resolve_media_list
+
+        media = []
+        seen_paths = set()
+        
+        for chunk in chunks:
+            meta = chunk.get("metadata", {})
+            chunk_type = meta.get("chunk_type", "")
+            
+            # 只处理包含图片的 chunk 类型
+            if chunk_type not in ("image_pseudo", "image", "formula_pseudo"):
+                continue
+            
+            # 提取 media_refs
+            media_refs = meta.get("media_refs", [])
+            if isinstance(media_refs, str):
+                try:
+                    media_refs = json.loads(media_refs)
+                except Exception:
+                    media_refs = []
+            
+            if not media_refs:
+                continue
+            
+            # 使用统一解析器解析路径
+            subject = self.collection_name.replace('_v1', '')
+            resolved_list = resolve_media_list(media_refs, subject=subject, user_id=self.user_id)
+            
+            for resolved in resolved_list:
+                if not resolved.get("resolved"):
+                    continue
+                # 去重
+                key = resolved.get("url", "")
+                if key in seen_paths:
+                    continue
+                seen_paths.add(key)
+                
+                media.append({
+                    "chunk_id": chunk.get("id", ""),
+                    "type": chunk_type,
+                    "path": resolved["relative_path"],
+                    "url": resolved["url"],
+                    "caption": meta.get("image_title", meta.get("heading_path", "相关图片")),
+                    "filename": resolved["filename"],
+                    "original_name": resolved.get("original_name", ""),
+                    "subject": resolved["subject"],
+                })
+        
+        return media
+
+    def _fix_image_paths(self, answer: str, media: List[Dict[str, Any]]) -> str:
+        """LA-IMG-FIX: LLM 输出后处理 — 修正不完整的图片路径
+
+        LLM 经常只输出文件名（如 ![图](xxx.png)）而不是完整 URL。
+        此函数扫描 answer 中的 markdown 图片链接，自动补全为可访问的路径。
+        """
+        import re
+
+        # 构建 filename -> 完整 url 的映射
+        filename_to_url = {}
+        for m in media:
+            # 从 url 中提取文件名
+            url = m.get("url", "")
+            filename = m.get("filename", "")
+            if filename and url:
+                filename_to_url[filename] = url
+            # 也支持从 path 中提取
+            path = m.get("path", "")
+            if path:
+                path_filename = path.split("/")[-1]
+                if path_filename and path_filename not in filename_to_url:
+                    filename_to_url[path_filename] = url or f"/api/media/{path}"
+
+        canonical_media = [m for m in media if m.get("url")]
+        canonical_urls = {m.get("url", "").split("?", 1)[0] for m in canonical_media}
+
+        if not filename_to_url:
+            return answer
+
+        # 正则匹配 markdown 图片: ![alt](url)
+        def replace_image(match):
+            alt = match.group(1)
+            url = match.group(2).strip()
+
+            # 如果已经是完整 URL，不处理
+            if url.startswith("http://") or url.startswith("https://"):
+                return match.group(0)
+            if "/api/media/Share/" in url or "/api/media/Users/" in url:
+                if url.split("?", 1)[0] in canonical_urls:
+                    return match.group(0)
+
+            # 提取文件名（处理 /api/media/filename.png 或纯 filename.png）
+            raw_filename = url.split("/")[-1]
+
+            # 在映射中查找匹配
+            if raw_filename in filename_to_url:
+                full_url = filename_to_url[raw_filename]
+                print(f"[TutorAgent] LA-IMG-FIX: 替换 '{url}' -> '{full_url}'")
+                return f"![{alt}]({full_url})"
+
+            # 尝试模糊匹配（去除扩展名）
+            for known_filename, full_url in filename_to_url.items():
+                # 去掉扩展名比较
+                known_stem = known_filename.rsplit(".", 1)[0] if "." in known_filename else known_filename
+                raw_stem = raw_filename.rsplit(".", 1)[0] if "." in raw_filename else raw_filename
+                if known_stem == raw_stem:
+                    print(f"[TutorAgent] LA-IMG-FIX: 模糊替换 '{url}' -> '{full_url}'")
+                    return f"![{alt}]({full_url})"
+
+            # 没找到匹配，保持原样
+            # LLM 可能把中文文件名改写成英文别名（例如 rag_typical_flow.png）。
+            # 只有在后端明确提供了媒体资源时才回写，避免把真正的幻觉 URL 指向任意文件。
+            if len(canonical_media) == 1:
+                full_url = canonical_media[0]["url"]
+                print(f"[TutorAgent] LA-IMG-FIX: 未知图片引用 '{url}' 回写到唯一关联媒体 '{full_url}'")
+                return f"![{alt}]({full_url})"
+
+            # 多张图片时按 alt/caption/文件名做保守匹配。
+            alt_text = re.sub(r"[^0-9A-Za-z\u4e00-\u9fff]+", " ", alt).lower()
+            best = None
+            best_score = 0
+            for candidate in canonical_media:
+                searchable = " ".join(str(candidate.get(k, "")) for k in ("caption", "filename", "original_name")).lower()
+                tokens = [t for t in re.split(r"\s+", re.sub(r"[^0-9A-Za-z\u4e00-\u9fff]+", " ", searchable)) if t]
+                score = sum(1 for token in tokens if len(token) >= 2 and token in alt_text)
+                if score > best_score:
+                    best_score, best = score, candidate
+            if best is not None:
+                full_url = best["url"]
+                print(f"[TutorAgent] LA-IMG-FIX: 按描述匹配 '{url}' -> '{full_url}'")
+                return f"![{alt}]({full_url})"
+
+            # 没找到匹配，保持原样
+            return match.group(0)
+
+        # 替换 markdown 图片链接
+        fixed = re.sub(r"!\[(.*?)\]\((.*?)\)", replace_image, answer)
+        return fixed
+
     # ==================== P0-INT-6: 消息总线回调 ====================
 
     def on_weak_area_detected(self, msg):
@@ -780,3 +948,44 @@ class TutorAgent(BaseAgent):
             if concept not in self._user_weak_areas:
                 self._user_weak_areas.append(concept)
             print(f"[TutorAgent] P0-INT-6: 记录薄弱点 concept={concept} streak_wrong={streak_wrong}，下次讲解将优先覆盖")
+
+
+# ==================== LA-IMG-ENHANCE: 图片内容类型推断辅助函数 ====================
+
+def _infer_image_content_type(caption: str, filename: str) -> str:
+    """根据图片标题和文件名推断内容类型，用于生成更精确的媒体提示。"""
+    text = (caption + " " + filename).lower()
+    
+    if any(k in text for k in ["流程", "workflow", "process", "步骤", "step", "sequence"]):
+        return "流程图"
+    if any(k in text for k in ["架构", "architecture", "结构", "structure", "framework", "框架"]):
+        return "架构图"
+    if any(k in text for k in ["原理", "principle", "mechanism", "how it works", "工作原理"]):
+        return "原理示意图"
+    if any(k in text for k in ["对比", "compare", "comparison", "vs", "versus", "差异"]):
+        return "对比图"
+    if any(k in text for k in ["公式", "formula", "equation", "math", "latex"]):
+        return "公式"
+    if any(k in text for k in ["截图", "screen", "screenshot", "界面", "ui", "界面"]):
+        return "截图/界面"
+    if any(k in text for k in ["示例", "example", "demo", "sample", "实例"]):
+        return "示例图"
+    if any(k in text for k in ["数据", "chart", "graph", "统计", "趋势", "分布"]):
+        return "数据图表"
+    return "示意图"
+
+
+def _get_image_usage_hint(content_type: str) -> str:
+    """根据内容类型返回使用提示，告诉 LLM 什么时候该引用这张图。"""
+    hints = {
+        "流程图": "描述工作流程、处理步骤、算法流程时**必须**引用",
+        "架构图": "描述系统架构、模块组成、层次结构时**必须**引用",
+        "原理示意图": "解释工作原理、核心机制、关键概念时**必须**引用",
+        "对比图": "进行对比分析、优劣比较、方案选型时**必须**引用",
+        "公式": "讲解数学公式、算法表达式时**必须**引用",
+        "截图/界面": "展示界面操作、配置步骤时引用",
+        "示例图": "举例说明、展示具体案例时引用",
+        "数据图表": "展示数据趋势、统计结果、实验数据时引用",
+        "示意图": "辅助说明抽象概念或复杂结构时引用",
+    }
+    return hints.get(content_type, "在讲解相关内容时引用")

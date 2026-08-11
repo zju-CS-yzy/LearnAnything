@@ -125,6 +125,19 @@ class SubjectManager:
                 imported_at TEXT
             )
         ''')
+        # ENG-P1-NEW: 幂等列迁移。user_manager._init_user_subjects_db 及早期版本
+        # 曾用旧 schema 创建 subjects 表（CREATE IF NOT EXISTS 不会补列），
+        # 这里对存量旧库补齐缺失列，避免 create_subject 报 OperationalError。
+        existing = {row[1] for row in conn.execute("PRAGMA table_info(subjects)").fetchall()}
+        for col, ddl in [
+            ("document_count", "INTEGER DEFAULT 0"),
+            ("raw_files_count", "INTEGER DEFAULT 0"),
+            ("owner_id", "TEXT"),
+            ("visibility", "TEXT DEFAULT 'public'"),
+            ("updated_at", "TEXT"),
+        ]:
+            if col not in existing:
+                conn.execute(f"ALTER TABLE subjects ADD COLUMN {col} {ddl}")
         conn.commit()
 
     # ---------- 原始文件管理 ----------
@@ -282,8 +295,14 @@ class SubjectManager:
             import app.backend_api as api_module
             cache_key = f"{subject_id}_v1"
             if hasattr(api_module, '_graph_store_cache') and cache_key in api_module._graph_store_cache:
-                del api_module._graph_store_cache[cache_key]
-                print(f"[SubjectDelete] 清除 GraphStore 缓存: {cache_key}")
+                # SUBJECT-DELETE-FIX: pop 后必须真正 close（原仅 del 字典项，
+                # KùzuDB 句柄仍打开，Windows 文件锁导致后续 rmtree 部分失败）
+                cached_store = api_module._graph_store_cache.pop(cache_key)
+                try:
+                    cached_store.close()
+                except Exception:
+                    pass
+                print(f"[SubjectDelete] 清除并关闭 GraphStore 缓存: {cache_key}")
         except Exception as e:
             print(f"[SubjectDelete] 清除 GraphStore 缓存失败（非阻塞）: {e}")
 
@@ -325,6 +344,17 @@ class SubjectManager:
         except Exception as e:
             print(f"[SubjectDelete] 向量数据库删除失败（非阻塞）: {e}")
 
+        # 2.5 LA-051-DIR-FIX: 清理旧式 KuzuDB 文件（可能在学科根目录下的 graph/graph.wal）
+        try:
+            subj_dir = self.get_subject_dir(subject_id, owner_id, visibility)
+            for old_kuzu_file in ["graph", "graph.wal", "graph.kuzu"]:
+                old_path = subj_dir / old_kuzu_file
+                if old_path.exists() and old_path.is_file():
+                    old_path.unlink()
+                    print(f"[SubjectDelete] 删除旧式 KuzuDB 文件: {old_path}")
+        except Exception as e:
+            print(f"[SubjectDelete] 旧式 KuzuDB 文件删除失败（非阻塞）: {e}")
+
         # 3. 删除数据库记录
         conn = self._get_conn()
         try:
@@ -336,6 +366,26 @@ class SubjectManager:
             print(f"[SubjectDelete] 数据库记录删除失败: {e}")
         finally:
             conn.close()
+
+        # 3.5 SUBJECT-DELETE-FIX: 删除 concepts.csv / name_mapping.json 等图谱辅助文件。
+        # 必须在删除学科目录（步骤 4）之前执行；直接拼路径，避免
+        # get_*_subject_dir 的 mkdir 副作用把已删除的学科目录重新创建出来。
+        # （原步骤 5 引用未定义的 subj 变量导致必现
+        #  "local variable 'subj' referenced before assignment"）
+        try:
+            from config.settings import USERS_KB_DIR, SHARE_KB_DIR
+            if owner_id and owner_id != "system" and visibility == VISIBILITY_PRIVATE:
+                csv_dir = USERS_KB_DIR / owner_id / subject_id
+            else:
+                csv_dir = SHARE_KB_DIR / subject_id
+            for aux_name in ["concepts.csv", "name_mapping.json",
+                             "concept_details.jsonl", "centrality_cache.json"]:
+                aux_path = csv_dir / aux_name
+                if aux_path.exists():
+                    aux_path.unlink()
+                    print(f"[SubjectDelete] 删除图谱辅助文件: {aux_path}")
+        except Exception as e:
+            print(f"[SubjectDelete] 图谱辅助文件删除失败（非阻塞）: {e}")
 
         # 4. 最后删除学科目录（此时所有文件句柄已释放）
         try:
@@ -353,6 +403,9 @@ class SubjectManager:
             import traceback
             traceback.print_exc()
             return False
+
+        # SUBJECT-DELETE-FIX: 原"步骤 5 删除 concepts.csv"已合并到步骤 3.5
+        # （删除学科目录之前执行，且不再使用会 mkdir 重建目录的路径入口）。
 
         return True
 

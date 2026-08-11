@@ -314,7 +314,9 @@ class ConceptDeduper:
             # canonical 名称本身也加入映射
             name_to_id[canonical_name.strip().lower()] = canonical_id
 
-        mapping_path = KNOWLEDGE_BASE_DIR / f"{self.collection_name}_name_mapping.json"
+        # LA-051-DIR-FIX: 使用学科内聚路径（graph_store.data_dir）
+        mapping_path = self.graph_store.data_dir / "name_mapping.json"
+        mapping_path.parent.mkdir(parents=True, exist_ok=True)
         with open(mapping_path, "w", encoding="utf-8") as f:
             json.dump(name_to_id, f, ensure_ascii=False, indent=2)
 
@@ -324,7 +326,8 @@ class ConceptDeduper:
         """
         加载 "原始名称 → canonical ID" 映射表。
         """
-        mapping_path = KNOWLEDGE_BASE_DIR / f"{self.collection_name}_name_mapping.json"
+        # LA-051-DIR-FIX: 使用学科内聚路径
+        mapping_path = self.graph_store.data_dir / "name_mapping.json"
         if not mapping_path.exists():
             return {}
 
@@ -336,13 +339,14 @@ class ConceptDeduper:
         导出去重后的概念表。
 
         Args:
-            output_path: 输出文件路径，默认保存到知识库目录
+            output_path: 输出文件路径，默认保存到学科内聚路径
 
         Returns:
             输出文件路径
         """
         if output_path is None:
-            output_path = str(KNOWLEDGE_BASE_DIR / f"{self.collection_name}_concepts.csv")
+            # LA-051-DIR-FIX: 使用学科内聚路径
+            output_path = str(self.graph_store.data_dir / "concepts.csv")
 
         concepts = self.dedupe_all()
         if not concepts:

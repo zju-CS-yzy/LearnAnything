@@ -12,7 +12,9 @@ LearnAnything API 配置中心 (LA-DEPLOY-FEAT)
 
 import configparser
 import os
+import shutil
 import sys
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -57,13 +59,26 @@ OLD_USERS_DATA_DIR = Path.home() / ".learnanything"
 
 def get_share_subject_dir(subject_id: str) -> Path:
     """获取共享学科目录。创建完整的学科内聚结构。"""
+    if not subject_id or not str(subject_id).strip():
+        raise ValueError("subject_id must not be empty")
     d = SHARE_KB_DIR / subject_id
     _ensure_subject_structure(d)
     return d
 
 
+def get_user_root_dir(user_id: str) -> Path:
+    """获取用户知识库根目录，但不创建任何学科级子目录。"""
+    if not user_id or not str(user_id).strip():
+        raise ValueError("user_id must not be empty")
+    d = USERS_KB_DIR / user_id
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
 def get_user_subject_dir(user_id: str, subject_id: str) -> Path:
     """获取用户私有学科目录。创建完整的学科内聚结构。"""
+    if not subject_id or not str(subject_id).strip():
+        raise ValueError("subject_id must not be empty")
     d = USERS_KB_DIR / user_id / subject_id
     _ensure_subject_structure(d)
     return d
@@ -74,6 +89,51 @@ def _ensure_subject_structure(base_dir: Path) -> None:
     (base_dir / "raw").mkdir(parents=True, exist_ok=True)
     (base_dir / "media" / "images").mkdir(parents=True, exist_ok=True)
     (base_dir / "media" / "thumbnails").mkdir(parents=True, exist_ok=True)
+    # New layout: Kuzu files live under <subject>/graph/.  A legacy
+    # <subject>/graph file is left in place and migrated before opening Kuzu.
+    graph_dir = base_dir / "graph"
+    if not graph_dir.exists():
+        graph_dir.mkdir(parents=True, exist_ok=True)
+    elif graph_dir.is_file():
+        # Do not call mkdir on a legacy Kuzu database file.  GraphStore will
+        # migrate it to graph/graph before opening the database.
+        return
+
+
+def migrate_legacy_graph_db(subject_dir: Path) -> None:
+    """Move legacy <subject>/graph[.wal] files into the graph directory."""
+    subject_dir = Path(subject_dir)
+    legacy_db = subject_dir / "graph"
+    legacy_wal = subject_dir / "graph.wal"
+    graph_dir = subject_dir / "graph"
+    target_db = graph_dir / "graph"
+    target_wal = graph_dir / "graph.wal"
+
+    if not legacy_db.is_file():
+        graph_dir.mkdir(parents=True, exist_ok=True)
+        return
+
+    tmp_dir = subject_dir / ".graph_migration_tmp"
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    moved_db = tmp_dir / "graph"
+    moved_wal = tmp_dir / "graph.wal"
+    try:
+        shutil.move(str(legacy_db), str(moved_db))
+        if legacy_wal.is_file():
+            shutil.move(str(legacy_wal), str(moved_wal))
+        graph_dir.mkdir(parents=True, exist_ok=True)
+        if not target_db.exists():
+            shutil.move(str(moved_db), str(target_db))
+        else:
+            moved_db.unlink(missing_ok=True)
+        if moved_wal.exists():
+            if not target_wal.exists():
+                shutil.move(str(moved_wal), str(target_wal))
+            else:
+                moved_wal.unlink(missing_ok=True)
+    finally:
+        if tmp_dir.exists():
+            shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
 def get_subject_vector_db_path(subject_id: str, user_id: str = None) -> Path:
@@ -91,7 +151,7 @@ def get_subject_graph_db_path(subject_id: str, user_id: str = None) -> Path:
         d = get_user_subject_dir(user_id, subject_id)
     else:
         d = get_share_subject_dir(subject_id)
-    return d / "graph"
+    return d / "graph" / "graph"
 
 
 def get_subject_images_dir(subject_id: str, user_id: str = None) -> Path:
@@ -373,8 +433,28 @@ def save_api_config(config: AppConfig) -> None:
     parser.add_section("mineru_extra")
     parser.set("mineru_extra", "cli_path", config.mineru_cli_path)
     
-    with open(API_CONFIG_PATH, "w", encoding="utf-8") as f:
-        parser.write(f)
+    temp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=str(CONFIG_DIR),
+            prefix=".api_config.",
+            suffix=".tmp",
+            delete=False,
+        ) as stream:
+            temp_path = Path(stream.name)
+            parser.write(stream)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temp_path, API_CONFIG_PATH)
+        try:
+            os.chmod(API_CONFIG_PATH, 0o600)
+        except OSError:
+            pass
+    finally:
+        if temp_path and temp_path.exists():
+            temp_path.unlink()
     
     print(f"[Config] 配置已保存到 {API_CONFIG_PATH}")
 
@@ -466,8 +546,8 @@ def reload_config():
 def update_config(config: AppConfig):
     """更新配置并保存"""
     global _CONFIG
-    _CONFIG = config
     save_api_config(config)
+    _CONFIG = config
     _sync_to_env(config)
 
 
@@ -538,5 +618,6 @@ SUBJECT_CONFIG_DIR = PROJECT_ROOT / "config" / "subjects"
 
 # ========== 初始化（保持原有） ==========
 
-VECTOR_DB_DIR.mkdir(parents=True, exist_ok=True)
+# LA-051-DIR-FIX: VECTOR_DB_DIR 不再自动创建，学科使用内聚路径
+# VECTOR_DB_DIR.mkdir(parents=True, exist_ok=True)
 CACHE_DIR.mkdir(parents=True, exist_ok=True)

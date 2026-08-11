@@ -1,232 +1,199 @@
-﻿# sync-to-release.ps1
-# LearnAnything-Dev -> LearnAnything (Release) 同步脚本
-# 用法: cd LearnAnything-Dev; .\scripts\sync-to-release.ps1 [-Push]
-#
-# 说明:
-#   此脚本将 Dev 仓库中的产品级文件同步到 Release 仓库。
-#   默认只执行同步，不执行 git push（需要用户手动确认后推送）。
-#   如需自动推送，添加 -Push 参数。
+# LearnAnything-Dev -> LearnAnything (public Release) sync script
+# Usage (from the Dev repository):
+#   .\scripts\sync-to-release.ps1 -NoCommit   # sync and inspect first
+#   .\scripts\sync-to-release.ps1 -Push       # sync, commit and push
 
+[CmdletBinding()]
 param(
-    [switch]$Push = $false
+    [switch]$Push,
+    [switch]$NoCommit,
+    [string]$DevDir = (Split-Path -Parent $PSScriptRoot),
+    [string]$ReleaseDir = (Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) "LearnAnything")
 )
 
-# ========== 配置 ==========
-$DevDir    = "D:\MyCS\AI\Project\LearnAnything-Dev"
-$ReleaseDir = "D:\MyCS\AI\Project\LearnAnything"
+$ErrorActionPreference = "Stop"
 
-# 核心目录（从 Dev 复制到 Release）
-# LA-051-STRUCT-FIX: 移除 subjects（Dev 中已删除）
-# SECURITY-FIX: 移除 config（API 密钥不纳入 Release，Release 单独维护脱敏模板）
-$CoreDirs = @(
-    "agents",
-    "app",
-    "core",
-    "interfaces",
-    "tests",
-    "web",
-    "web-vue"
-)
+if ($Push -and $NoCommit) {
+    throw "-Push and -NoCommit cannot be used together."
+}
 
-# 根目录产品级文件
-$RootFiles = @(
-    "app.py",
-    "requirements.txt",
-    "README.md",
-    "LICENSE"
-)
+function Resolve-RepositoryPath {
+    param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][string]$ExpectedLeaf)
 
-# Dev-only 排除文件（robocopy /XF 参数）
-$ExcludeFiles = @(
-    "API.txt",
-    "PROJECT_STATUS.md",
-    "app.spec",
-    "*.pyc"
-)
-
-# 排除目录（robocopy /XD 参数）
-# LA-051-STRUCT-FIX: 添加 data（Dev 的本地数据不应复制到 Release）
-$ExcludeDirs = @(
-    ".git",
-    ".pytest_cache",
-    "__pycache__",
-    "node_modules",
-    "data",           # <-- LA-051-STRUCT-FIX: 排除 Dev 的 data/ 目录
-    "dist",           # 排除构建产物
-    "web-vue\dist",   # 排除前端构建产物
-    "web\dist"        # 排除旧构建产物
-)
-
-Write-Host "========================================" -ForegroundColor Cyan
-Write-Host "  LearnAnything Sync: Dev -> Release" -ForegroundColor Cyan
-Write-Host "========================================" -ForegroundColor Cyan
-Write-Host ""
-Write-Host "Dev:    $DevDir" -ForegroundColor Gray
-Write-Host "Release: $ReleaseDir" -ForegroundColor Gray
-Write-Host ""
-
-# ========== 步骤1: 同步核心目录 ==========
-Write-Host "[Step 1/4] 同步核心目录..." -ForegroundColor Yellow
-
-foreach ($dir in $CoreDirs) {
-    $src = Join-Path $DevDir $dir
-    $dst = Join-Path $ReleaseDir $dir
-
-    if (-not (Test-Path $src)) {
-        Write-Host "  [SKIP] $dir (源目录不存在)" -ForegroundColor DarkGray
-        continue
+    $resolved = (Resolve-Path -LiteralPath $Path).Path.TrimEnd('\')
+    if ((Split-Path -Leaf $resolved) -ne $ExpectedLeaf) {
+        throw "Repository path must end with '$ExpectedLeaf': $resolved"
     }
-
-    # 确保目标目录存在
-    if (-not (Test-Path $dst)) {
-        New-Item -ItemType Directory -Path $dst -Force | Out-Null
+    if (-not (Test-Path -LiteralPath (Join-Path $resolved ".git"))) {
+        throw "Not a Git repository: $resolved"
     }
+    return $resolved
+}
 
-    # 构建 robocopy 参数数组
-    $robocopyArgs = @(
-        $src,
-        $dst,
-        "/MIR",      # 镜像同步
-        "/MT:8",     # 多线程
-        "/NJH",      # 隐藏作业头
-        "/NJS",      # 隐藏作业摘要
-        "/NP",       # 隐藏进度
-        "/NDL"       # 隐藏目录列表
+function Assert-PathWithin {
+    param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][string]$Root)
+
+    $fullPath = [IO.Path]::GetFullPath($Path).TrimEnd('\')
+    $fullRoot = [IO.Path]::GetFullPath($Root).TrimEnd('\')
+    if (-not $fullPath.StartsWith($fullRoot + '\', [StringComparison]::OrdinalIgnoreCase)) {
+        throw "Refusing to modify a path outside the Release repository: $fullPath"
+    }
+}
+
+function Invoke-RobocopyMirror {
+    param([Parameter(Mandatory)][string]$Source, [Parameter(Mandatory)][string]$Destination)
+
+    Assert-PathWithin -Path $Destination -Root $script:ReleaseDir
+    New-Item -ItemType Directory -Path $Destination -Force | Out-Null
+
+    $arguments = @(
+        $Source, $Destination, "/MIR", "/MT:8", "/NJH", "/NJS", "/NP", "/NDL",
+        "/XF", "API.txt", "api_config.ini", "PROJECT_STATUS.md", "app.spec", "*.pyc",
+        "/XD", ".git", ".pytest_cache", "__pycache__", "node_modules", "data", "dist"
+    )
+    $process = Start-Process -FilePath "robocopy" -ArgumentList $arguments -Wait -PassThru -WindowStyle Hidden
+    if ($process.ExitCode -gt 7) {
+        throw "robocopy failed for '$Source' (exit code $($process.ExitCode))."
+    }
+}
+
+function Sync-AllowListDirectory {
+    param(
+        [Parameter(Mandatory)][string]$Source,
+        [Parameter(Mandatory)][string]$Destination,
+        [Parameter(Mandatory)][string[]]$AllowedFiles
     )
 
-    # 添加文件排除
-    foreach ($xf in $ExcludeFiles) {
-        $robocopyArgs += "/XF"
-        $robocopyArgs += $xf
+    Assert-PathWithin -Path $Destination -Root $script:ReleaseDir
+    New-Item -ItemType Directory -Path $Destination -Force | Out-Null
+
+    foreach ($item in Get-ChildItem -LiteralPath $Destination -Force -ErrorAction SilentlyContinue) {
+        if ($item.Name -notin $AllowedFiles) {
+            Remove-Item -LiteralPath $item.FullName -Recurse -Force
+        }
     }
-
-    # 添加目录排除
-    foreach ($xd in $ExcludeDirs) {
-        $robocopyArgs += "/XD"
-        $robocopyArgs += $xd
-    }
-
-    # 执行 robocopy
-    $proc = Start-Process -FilePath "robocopy" -ArgumentList $robocopyArgs -Wait -PassThru -WindowStyle Hidden
-
-    # robocopy 退出码: 0-7 表示成功（0=无变化, 1-7=有文件被复制/跳过等）
-    if ($proc.ExitCode -le 7) {
-        Write-Host "  [OK] $dir" -ForegroundColor Green
-    } else {
-        Write-Host "  [WARN] $dir (exit code: $($proc.ExitCode))" -ForegroundColor Yellow
-    }
-}
-
-# ========== 步骤2: 同步特殊目录 ==========
-Write-Host "`n[Step 2/4] 同步特殊目录..." -ForegroundColor Yellow
-
-# docs/: 只保留 DESIGN.md 和 PROJECT_PAPER.md
-$docsSrc = Join-Path $DevDir "docs"
-$docsDst = Join-Path $ReleaseDir "docs"
-if (Test-Path $docsSrc) {
-    if (-not (Test-Path $docsDst)) {
-        New-Item -ItemType Directory -Path $docsDst -Force | Out-Null
-    }
-    # 删除 Release docs 中现有内容
-    Get-ChildItem $docsDst -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force
-    # 复制指定文件
-    foreach ($f in @("DESIGN.md", "PROJECT_PAPER.md")) {
-        $srcFile = Join-Path $docsSrc $f
-        if (Test-Path $srcFile) {
-            Copy-Item $srcFile $docsDst -Force
-            Write-Host "  [OK] docs\$f" -ForegroundColor Green
+    foreach ($name in $AllowedFiles) {
+        $sourceFile = Join-Path $Source $name
+        if (Test-Path -LiteralPath $sourceFile -PathType Leaf) {
+            Copy-Item -LiteralPath $sourceFile -Destination (Join-Path $Destination $name) -Force
+            Write-Host "  [OK] $name" -ForegroundColor Green
         }
     }
 }
 
-# scripts/: 只保留构建脚本和同步脚本本身
-$scriptsSrc = Join-Path $DevDir "scripts"
-$scriptsDst = Join-Path $ReleaseDir "scripts"
-if (Test-Path $scriptsSrc) {
-    if (-not (Test-Path $scriptsDst)) {
-        New-Item -ItemType Directory -Path $scriptsDst -Force | Out-Null
-    }
-    Get-ChildItem $scriptsDst -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force
-    # 复制允许的脚本
-    $allowedScripts = @("build.bat", "sync-to-release.ps1", "build.ps1")
-    foreach ($s in $allowedScripts) {
-        $srcFile = Join-Path $scriptsSrc $s
-        if (Test-Path $srcFile) {
-            Copy-Item $srcFile $scriptsDst -Force
-            Write-Host "  [OK] scripts\$s" -ForegroundColor Green
+function Test-ReleaseSafety {
+    $changedFiles = @(
+        git -C $script:ReleaseDir diff --name-only --diff-filter=ACMR HEAD
+        git -C $script:ReleaseDir ls-files --others --exclude-standard
+    ) | Where-Object { $_ } | Sort-Object -Unique
+
+    $forbiddenPath = '(^|/)(API\.txt|\.env(?:\..*)?|[^/]*\.(?:key|pem))$|^config/api_config\.ini$'
+    $secretPattern = '(?i)(sk-(?:proj-)?[A-Za-z0-9_-]{16,}|AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{30,}|gh[pousr]_[A-Za-z0-9]{30,})'
+
+    foreach ($relativePath in $changedFiles) {
+        $normalized = $relativePath.Replace('\', '/')
+        if ($normalized -match $forbiddenPath) {
+            throw "Sensitive file is present in the Release changes: $relativePath"
         }
-    }
-}
 
-# knowledge_base/: 只保留 .gitkeep
-$kbSrc = Join-Path $DevDir "knowledge_base"
-$kbDst = Join-Path $ReleaseDir "knowledge_base"
-if (-not (Test-Path $kbDst)) {
-    New-Item -ItemType Directory -Path $kbDst -Force | Out-Null
-}
-# 保留 .gitkeep，删除其他内容
-Get-ChildItem $kbDst -ErrorAction SilentlyContinue | Where-Object { $_.Name -ne ".gitkeep" } | Remove-Item -Recurse -Force
-if (-not (Test-Path (Join-Path $kbDst ".gitkeep"))) {
-    New-Item -ItemType File -Path (Join-Path $kbDst ".gitkeep") -Force | Out-Null
-}
-Write-Host "  [OK] knowledge_base\.gitkeep" -ForegroundColor Green
-
-# ========== 步骤3: 同步根目录文件 ==========
-Write-Host "`n[Step 3/4] 同步根目录文件..." -ForegroundColor Yellow
-
-foreach ($f in $RootFiles) {
-    $srcFile = Join-Path $DevDir $f
-    if (Test-Path $srcFile) {
-        Copy-Item $srcFile $ReleaseDir -Force
-        Write-Host "  [OK] $f" -ForegroundColor Green
-    }
-}
-
-# 同步 Release 专用的 .gitignore
-$gitignoreSrc = Join-Path $DevDir ".gitignore-release"
-$gitignoreDst = Join-Path $ReleaseDir ".gitignore"
-if (Test-Path $gitignoreSrc) {
-    Copy-Item $gitignoreSrc $gitignoreDst -Force
-    Write-Host "  [OK] .gitignore (Release 专用)" -ForegroundColor Green
-} else {
-    Write-Host "  [WARN] .gitignore-release 不存在，使用 Dev 的 .gitignore" -ForegroundColor Yellow
-    Copy-Item (Join-Path $DevDir ".gitignore") $gitignoreDst -Force
-}
-
-# ========== 步骤4: Git 操作 ==========
-Write-Host "`n[Step 4/4] Git 操作..." -ForegroundColor Yellow
-
-Push-Location $ReleaseDir
-
-try {
-    # 检查 git 状态
-    $status = git status --short 2>$null
-    if ($status) {
-        Write-Host "  检测到变更，准备提交..." -ForegroundColor Gray
-        git add -A
-        $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm"
-        git commit -m "Sync from Dev @ $timestamp`n`nAuto-sync by sync-to-release.ps1"
-        Write-Host "  [OK] Git commit 完成" -ForegroundColor Green
-
-        if ($Push) {
-            Write-Host "  正在推送到远程..." -ForegroundColor Gray
-            git push origin main
-            if ($LASTEXITCODE -eq 0) {
-                Write-Host "  [OK] Git push 完成" -ForegroundColor Green
-            } else {
-                Write-Host "  [ERROR] Git push 失败" -ForegroundColor Red
+        $fullPath = Join-Path $script:ReleaseDir $relativePath
+        if (-not (Test-Path -LiteralPath $fullPath -PathType Leaf)) { continue }
+        $lineNumber = 0
+        foreach ($line in Get-Content -LiteralPath $fullPath -ErrorAction SilentlyContinue) {
+            $lineNumber++
+            if ($line -match $secretPattern) {
+                throw "Possible credential detected at ${relativePath}:$lineNumber (value suppressed)."
             }
-        } else {
-            Write-Host "`n  [INFO] 未使用 -Push 参数，跳过 git push" -ForegroundColor Cyan
-            Write-Host "         请手动执行: git push origin main" -ForegroundColor Cyan
         }
-    } else {
-        Write-Host "  [INFO] 无变更，无需提交" -ForegroundColor Gray
     }
-} finally {
-    Pop-Location
 }
 
-Write-Host "`n========================================" -ForegroundColor Cyan
-Write-Host "  同步完成！" -ForegroundColor Cyan
+$script:DevDir = Resolve-RepositoryPath -Path $DevDir -ExpectedLeaf "LearnAnything-Dev"
+$script:ReleaseDir = Resolve-RepositoryPath -Path $ReleaseDir -ExpectedLeaf "LearnAnything"
+if ($script:DevDir -eq $script:ReleaseDir) { throw "Dev and Release paths must differ." }
+
+$releaseRemote = (git -C $script:ReleaseDir remote get-url origin).Trim()
+if ($LASTEXITCODE -ne 0 -or $releaseRemote -notmatch 'github\.com[:/]zju-CS-yzy/LearnAnything(?:\.git)?$') {
+    throw "Unexpected Release origin: $releaseRemote"
+}
+if ((git -C $script:ReleaseDir branch --show-current).Trim() -ne "main") {
+    throw "Release repository must be on branch 'main'."
+}
+if (git -C $script:ReleaseDir status --porcelain) {
+    throw "Release repository has uncommitted changes. Commit or clean them before syncing."
+}
+
+$coreDirs = @("agents", "app", "config", "core", "interfaces", "tests", "web", "web-vue")
+$rootFiles = @("app.py", "main.py", "rebuild.bat", "requirements.txt", "README.md", "LICENSE")
+$publicDocs = @("DESIGN.md", "PROJECT_PAPER.md", "DEPLOY.md")
+$publicScripts = @("build.bat", "manage_admin.py", "sync-to-release.ps1")
+
 Write-Host "========================================" -ForegroundColor Cyan
+Write-Host " LearnAnything: Dev -> public Release" -ForegroundColor Cyan
+Write-Host "========================================" -ForegroundColor Cyan
+Write-Host "Dev:     $script:DevDir" -ForegroundColor Gray
+Write-Host "Release: $script:ReleaseDir" -ForegroundColor Gray
+Write-Host "Origin:  $releaseRemote" -ForegroundColor Gray
+
+Write-Host "`n[1/4] Mirroring product directories..." -ForegroundColor Yellow
+foreach ($directory in $coreDirs) {
+    $source = Join-Path $script:DevDir $directory
+    if (-not (Test-Path -LiteralPath $source -PathType Container)) {
+        Write-Host "  [SKIP] $directory" -ForegroundColor DarkGray
+        continue
+    }
+    Invoke-RobocopyMirror -Source $source -Destination (Join-Path $script:ReleaseDir $directory)
+    Write-Host "  [OK] $directory" -ForegroundColor Green
+}
+
+Write-Host "`n[2/4] Syncing public docs and scripts..." -ForegroundColor Yellow
+Sync-AllowListDirectory -Source (Join-Path $script:DevDir "docs") -Destination (Join-Path $script:ReleaseDir "docs") -AllowedFiles $publicDocs
+Sync-AllowListDirectory -Source (Join-Path $script:DevDir "scripts") -Destination (Join-Path $script:ReleaseDir "scripts") -AllowedFiles $publicScripts
+
+Write-Host "`n[3/4] Syncing root files..." -ForegroundColor Yellow
+foreach ($name in $rootFiles) {
+    $sourceFile = Join-Path $script:DevDir $name
+    if (Test-Path -LiteralPath $sourceFile -PathType Leaf) {
+        Copy-Item -LiteralPath $sourceFile -Destination (Join-Path $script:ReleaseDir $name) -Force
+        Write-Host "  [OK] $name" -ForegroundColor Green
+    }
+}
+$releaseGitignore = Join-Path $script:DevDir ".gitignore-release"
+if (-not (Test-Path -LiteralPath $releaseGitignore -PathType Leaf)) {
+    throw "Missing public Release ignore policy: $releaseGitignore"
+}
+Copy-Item -LiteralPath $releaseGitignore -Destination (Join-Path $script:ReleaseDir ".gitignore") -Force
+Write-Host "  [OK] .gitignore (public Release policy)" -ForegroundColor Green
+
+Write-Host "`n[4/4] Running public-release safety checks..." -ForegroundColor Yellow
+Test-ReleaseSafety
+Write-Host "  [OK] No forbidden files or common credential patterns found" -ForegroundColor Green
+
+if ($NoCommit) {
+    Write-Host "`nSync complete. Changes were not staged or committed (-NoCommit)." -ForegroundColor Cyan
+    exit 0
+}
+
+git -C $script:ReleaseDir add -A
+if ($LASTEXITCODE -ne 0) { throw "git add failed." }
+$diffCheck = git -C $script:ReleaseDir diff --cached --check 2>&1
+if ($LASTEXITCODE -ne 0) {
+    Write-Warning "The staged diff contains legacy whitespace warnings; review with 'git diff --cached --check'."
+}
+
+if (git -C $script:ReleaseDir diff --cached --quiet) {
+    Write-Host "`nNo Release changes to commit." -ForegroundColor Gray
+    exit 0
+}
+
+$timestamp = Get-Date -Format "yyyy-MM-dd HH:mm"
+git -C $script:ReleaseDir commit -m "Sync accepted features from Dev @ $timestamp"
+if ($LASTEXITCODE -ne 0) { throw "git commit failed." }
+
+if ($Push) {
+    git -C $script:ReleaseDir push origin main
+    if ($LASTEXITCODE -ne 0) { throw "git push failed." }
+    Write-Host "`nRelease commit pushed to origin/main." -ForegroundColor Green
+} else {
+    Write-Host "`nRelease commit created. Run 'git push origin main' after review." -ForegroundColor Cyan
+}

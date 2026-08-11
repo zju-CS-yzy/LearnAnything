@@ -3,7 +3,11 @@
     <div v-if="node" class="info-content">
       <div class="info-header">
         <h3>📄 节点详情</h3>
-        <button class="btn-icon" @click="$emit('close')">✕</button>
+        <div class="header-actions">
+          <!-- LA-UI-001 M3: 分享到群聊 -->
+          <button class="btn-share" title="分享到群聊" @click="$emit('share', node)">💬 分享</button>
+          <button class="btn-icon" @click="$emit('close')">✕</button>
+        </div>
       </div>
 
       <div class="info-body">
@@ -214,6 +218,7 @@
 
 import { computed, ref, inject } from 'vue'
 import { renderLatex } from '../../utils/latex.js'
+import { withMediaAuth } from '../../utils/media.js'
 
 // LA-051-FIX: 注入学科状态，用于图片路径回退
 const subjectState = inject('subjectState')
@@ -228,7 +233,7 @@ const props = defineProps({
   links: { type: Array, default: () => [] },
 })
 
-defineEmits(['close', 'extract', 'expand', 'focus', 'navigate-to-chunk'])
+defineEmits(['close', 'extract', 'expand', 'focus', 'navigate-to-chunk', 'share'])
 
 // P39-FIX: 调试日志 — 当 node 变化时打印关键字段
 const debugNodeInfo = computed(() => {
@@ -265,7 +270,7 @@ const imageUrl = computed(() => {
     const sepIdx = Math.max(before.lastIndexOf('/'), before.lastIndexOf('\\'))
     const subject = sepIdx !== -1 ? before.substring(sepIdx + 1) : before
     const filename = path.substring(path.lastIndexOf('/') + 1).split('\\').pop()
-    return `${window.location.origin}/api/images/${subject.replace('_v1_images', '')}/${filename}`
+    return withMediaAuth(`${window.location.origin}/api/images/${subject.replace('_v1_images', '')}/${filename}`)
   }
   return ''
 })
@@ -284,7 +289,7 @@ const thumbnailUrl = computed(() => {
     const sepIdx = Math.max(before.lastIndexOf('/'), before.lastIndexOf('\\'))
     const subject = sepIdx !== -1 ? before.substring(sepIdx + 1) : before
     const filename = path.substring(path.lastIndexOf('/') + 1).split('\\').pop()
-    return `${window.location.origin}/api/images/${subject.replace('_v1_thumbnails', '')}/${filename}`
+    return withMediaAuth(`${window.location.origin}/api/images/${subject.replace('_v1_thumbnails', '')}/${filename}`)
   }
   return imageUrl.value
 })
@@ -305,6 +310,16 @@ const mediaRefs = computed(() => {
 const hasMedia = computed(() => mediaRefs.value.length > 0)
 
 function getImageUrl(ref) {
+  // LA-MEDIA-UNIFY: 优先使用后端已解析的统一 URL
+  if (ref && ref.url) {
+    // 确保 URL 是完整的（包含 origin）
+    if (ref.url.startsWith('http')) {
+      return withMediaAuth(ref.url)
+    }
+    return withMediaAuth(`${window.location.origin}${ref.url}`)
+  }
+
+  // 回退：兼容旧数据（没有 url 字段时）
   if (!ref || !ref.path) {
     console.warn('[NodeDetailPanel] getImageUrl: ref or path missing', ref)
     return ''
@@ -312,34 +327,30 @@ function getImageUrl(ref) {
   const path = ref.path
   const filename = path.split('/').pop().split('\\').pop()
   
-  // LA-051-FIX: 兼容新旧目录结构的图片路径解析
-  // 策略1: 如果 ref 中有 subject 字段，直接使用
+  // 旧格式路径解析（保留向后兼容）
   if (ref.subject) {
-    return `${window.location.origin}/api/images/${ref.subject}/${filename}`
+    return withMediaAuth(`${window.location.origin}/api/images/${ref.subject}/${filename}`)
   }
   
-  // 策略2: 旧格式路径包含 _v1_images
   const idx = path.indexOf('_v1_images')
   if (idx !== -1) {
     const before = path.substring(0, idx)
     const sepIdx = Math.max(before.lastIndexOf('/'), before.lastIndexOf('\\'))
     const subject = sepIdx !== -1 ? before.substring(sepIdx + 1) : before
     const cleanSubject = subject.replace('_v1_images', '').replace(/\\/g, '/')
-    return `${window.location.origin}/api/images/${cleanSubject}/${filename}`
+    return withMediaAuth(`${window.location.origin}/api/images/${cleanSubject}/${filename}`)
   }
   
-  // 策略3: 新格式路径包含 knowledge_base/Share/<subject>/media/images/
   const shareMatch = path.match(/knowledge_base[\\/]Share[\\/]([^\\/]+)[\\/]media[\\/]images/)
   if (shareMatch) {
-    return `${window.location.origin}/api/images/${shareMatch[1]}/${filename}`
+    return withMediaAuth(`${window.location.origin}/api/images/${shareMatch[1]}/${filename}`)
   }
   
-  // 策略4: 回退到当前选中学科
   const fallbackSubject = currentSubject.value || 'generic'
   console.warn('[NodeDetailPanel] getImageUrl: 无法从路径解析学科，回退到当前学科', {
     path, filename, fallbackSubject
   })
-  return `${window.location.origin}/api/images/${fallbackSubject}/${filename}`
+  return withMediaAuth(`${window.location.origin}/api/images/${fallbackSubject}/${filename}`)
 }
 
 function openImageModal(ref) {
@@ -457,6 +468,28 @@ function relationLabel(relation) {
   align-items: center;
   justify-content: space-between;
   margin-bottom: 16px;
+}
+
+.header-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.btn-share {
+  padding: 3px 8px;
+  font-size: 12px;
+  border: 1px solid var(--border-color, #dcdfe6);
+  border-radius: 4px;
+  background: var(--bg-secondary, #fff);
+  color: var(--text-secondary, #606266);
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.btn-share:hover {
+  color: var(--primary-color, #409eff);
+  border-color: var(--primary-color, #409eff);
 }
 
 .info-header h3 {

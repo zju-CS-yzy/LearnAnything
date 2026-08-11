@@ -881,52 +881,110 @@ class DialogContextManager:
         从回答文本中提取话题关键词。
 
         策略（按优先级）：
-        1. 从回答中提取第一个 Markdown heading（如 ### RAG架构）
-        2. 从 concept_names 中取出现频率最高的概念
-        3. 从 query 中提取核心名词（去掉疑问词）
+        1. 从 query 中提取核心名词（最优先，用户意图最准确）
+        2. 从 answer_text 中提取第一个 Markdown heading
+        3. 从 concept_names 中取第一个概念
         4. 回退：取回答前 20 个字符
 
-        Args:
-            answer_text: Agent 回答文本
-            concept_names: 图谱中的概念名称列表
-            query: 用户查询
-
-        Returns:
-            话题关键词 或 None
+        LA-UI-001-FIX: 修复话题提取过长/含结构标记的问题：
+        - 优先使用 query（用户问题最准确反映意图）
+        - 限制话题最大长度 30 字符
+        - 过滤中文编号（一、二、三）、markdown 标记、括号内容
         """
         print(f"\n[DialogContextManager] ====== extract_topic ======")
-        print(f"[DialogContextManager] 输入: answer_len={len(answer_text)}, concepts={concept_names[:3] if concept_names else None}, query='{query[:30] if query else ''}...'")
+        print(f"[DialogContextManager] 输入: answer_len={len(answer_text)}, concepts={concept_names[:3] if concept_names else None}, query='{query[:40] if query else ''}...'")
 
-        # 策略1: Markdown heading
-        if answer_text:
-            heading_match = re.search(r'^#{2,4}\s+(.+)$', answer_text, re.MULTILINE)
-            if heading_match:
-                topic = heading_match.group(1).strip()
-                print(f"[DialogContextManager] 话题提取(heading): '{topic}'")
-                return topic
-
-        # 策略2: concept_names 中取第一个（最相关的）
-        if concept_names and len(concept_names) > 0:
-            topic = concept_names[0]
-            print(f"[DialogContextManager] 话题提取(concept): '{topic}'")
-            return topic
-
-        # 策略3: query 去掉疑问词
+        # LA-UI-001-FIX: 策略1（最优先）: 从 query 提取核心名词
         if query:
-            cleaned = re.sub(r'^(什么是|什么叫|什么是|怎么|如何|为什么|请解释|介绍一下)\s*', '', query)
-            cleaned = re.sub(r'[？?\s]+$', '', cleaned)
-            if cleaned and len(cleaned) > 1:
+            cleaned = self._clean_topic_from_query(query)
+            if cleaned and len(cleaned) >= 3:
                 print(f"[DialogContextManager] 话题提取(query): '{cleaned}'")
                 return cleaned
 
+        # 策略2: Markdown heading
+        if answer_text:
+            heading_match = re.search(r'^#{2,4}\s+(.+)$', answer_text, re.MULTILINE)
+            if heading_match:
+                topic = self._clean_topic(heading_match.group(1).strip())
+                if topic:
+                    print(f"[DialogContextManager] 话题提取(heading): '{topic}'")
+                    return topic
+
+        # 策略3: concept_names 中取第一个
+        if concept_names and len(concept_names) > 0:
+            topic = self._clean_topic(concept_names[0])
+            if topic:
+                print(f"[DialogContextManager] 话题提取(concept): '{topic}'")
+                return topic
+
         # 策略4: 回退
         if answer_text:
-            fallback = answer_text[:20].strip()
-            print(f"[DialogContextManager] 话题提取(fallback): '{fallback}'")
-            return fallback
+            fallback = self._clean_topic(answer_text[:30])
+            if fallback:
+                print(f"[DialogContextManager] 话题提取(fallback): '{fallback}'")
+                return fallback
 
         print(f"[DialogContextManager] 话题提取: 失败，无可用文本")
         return None
+
+    def _clean_topic(self, text: str) -> str:
+        """
+        清理话题文本，去除结构标记、编号、过长内容。
+        
+        LA-UI-001-FIX: 防止话题变成"一、先理解：什么是Graph RAG？"这种含编号的长文本。
+        """
+        if not text:
+            return ""
+        
+        # 去除中文编号前缀（一、二、三... / 1. 2. 3...）
+        text = re.sub(r'^[一二三四五六七八九十零\d]+[、.．,，\s]+', '', text.strip())
+        # 去除 markdown 标记
+        text = re.sub(r'^#{1,6}\s*', '', text)
+        # 去除 HTML 标签
+        text = re.sub(r'<[^>]+>', '', text)
+        # 去除括号及其中内容
+        text = re.sub(r'[（(].*?[）)]', '', text)
+        # 去除常见前缀词
+        for prefix in ["先理解：", "先了解：", "什么是", "介绍", "解释", "详解"]:
+            text = text.replace(prefix, "")
+        
+        text = text.strip()
+        
+        # 限制最大长度
+        if len(text) > 30:
+            # 取前30字符，尝试在词语边界截断
+            truncated = text[:30]
+            # 找到最后一个空格或标点，避免截断在词中间
+            last_sep = max(truncated.rfind(' '), truncated.rfind('，'), truncated.rfind(','))
+            if last_sep > 15:
+                text = truncated[:last_sep]
+            else:
+                text = truncated
+        
+        return text.strip()
+
+    def _clean_topic_from_query(self, query: str) -> str:
+        """
+        从用户 query 中提取核心话题。
+        
+        去除疑问词、请求词，保留核心名词短语。
+        """
+        if not query:
+            return ""
+        
+        # 去除句首疑问词/请求词
+        cleaned = re.sub(r'^(什么是|什么叫|怎么|如何|为什么|请解释|介绍一下|给我讲讲|讲一下|说说|聊聊|问一下)\s*', '', query.strip())
+        # 去除句末疑问词/标点
+        cleaned = re.sub(r'[？?。！!\s]+$', '', cleaned)
+        # 去除常见介词短语
+        cleaned = re.sub(r'\s*(中|里|上|下|的|地|得)\s*', '', cleaned)
+        # 去除"是如何实现的"、"是什么"等后缀
+        cleaned = re.sub(r'(是如何实现|是什么|的定义|的原理|的介绍)$', '', cleaned)
+        
+        cleaned = cleaned.strip()
+        
+        # 限制长度
+        return self._clean_topic(cleaned)
 
     def detect_topic_switch(self, query: str) -> Tuple[bool, Optional[str]]:
         """

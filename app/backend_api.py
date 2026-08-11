@@ -12,7 +12,7 @@ try:
 except (OSError, FileNotFoundError):
     print(f"[DIAG] File mtime: N/A (frozen environment)")
 
-"""
+r"""
 LearnAnything API Backend
 FastAPI 后端 — 封装 core/ + agents/ 能力为 REST API
 
@@ -34,7 +34,7 @@ from pathlib import Path
 import re  # 用于 SSE 流式接口的文本切分
 import sqlite3  # LA-044: 对话上下文会话列表查询
 
-from fastapi import FastAPI, HTTPException, UploadFile, File, Form, BackgroundTasks, Header
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form, BackgroundTasks, Header, Query, Depends
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, FileResponse
@@ -66,11 +66,24 @@ from core.quiz_bank import (
     approve_question as qb_approve,
     delete_question as qb_delete,
     get_stats as qb_stats,
+    check_duplicate_questions as qb_check_duplicates,
 )
 from core.graph_store import GraphStore
 from core.dialog_context import DialogContextManager
 from core.permission_manager import PermissionManager, Role  # LA-051: 权限管理
-from app.setup_api import router as setup_router, is_first_run
+from app.setup_api import (
+    FeatureConfigRequest as SetupFeatureConfigRequest,
+    _merge_feature_config,
+    _write_audit_event,
+    is_first_run,
+    router as setup_router,
+)
+from app.auth import (
+    get_current_user_id as _shared_get_current_user_id,
+    get_effective_user_id as _shared_get_effective_user_id,
+    require_admin,
+    resolve_legacy_user_id as _shared_resolve_legacy_user_id,
+)
 
 
 # ========== Global instances ==========
@@ -121,11 +134,21 @@ app = FastAPI(
     version="1.0.0",
 )
 
-# CORS 中间件（允许前端跨域访问）
+_cors_origins_env = os.getenv("LEARNANYTHING_ALLOWED_ORIGINS", "")
+_cors_origins = [
+    origin.strip()
+    for origin in _cors_origins_env.split(",")
+    if origin.strip()
+] or [
+    "http://127.0.0.1:5173",
+    "http://localhost:5173",
+]
+
+# Desktop production is same-origin; only explicit development origins need CORS.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # 生产环境应限制为前端域名
-    allow_credentials=True,
+    allow_origins=_cors_origins,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -144,12 +167,16 @@ async def visualization_workaround(request, call_next):
                 user_id=request.query_params.get("user_id", "default"),
                 subject=request.query_params.get("subject", "generic"),
                 days=int(request.query_params.get("days", 30)),
-                x_user_id=request.headers.get("X-User-ID")
+                x_user_id=request.headers.get("X-User-ID"),
+                authorization=request.headers.get("Authorization")
             )
             return JSONResponse(content=result.dict())
+        except HTTPException as e:
+            # 中间件内 HTTPException 不会走 FastAPI 异常处理器，需手动转响应
+            return JSONResponse(status_code=e.status_code, content={"detail": e.detail})
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
-    
+
     if path == "/api/visualization/wrong-answers" and method == "GET":
         from fastapi.responses import JSONResponse
         try:
@@ -161,21 +188,27 @@ async def visualization_workaround(request, call_next):
                 sort=request.query_params.get("sort", "last_wrong_desc"),
                 limit=int(request.query_params.get("limit", 50)),
                 offset=int(request.query_params.get("offset", 0)),
-                x_user_id=request.headers.get("X-User-ID")
+                x_user_id=request.headers.get("X-User-ID"),
+                authorization=request.headers.get("Authorization")
             )
             return JSONResponse(content=result.dict())
+        except HTTPException as e:
+            # 中间件内 HTTPException 不会走 FastAPI 异常处理器，需手动转响应
+            return JSONResponse(status_code=e.status_code, content={"detail": e.detail})
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
-    
+
     return await call_next(request)
 
 # LA-DEPLOY: 注册配置向导路由
 app.include_router(setup_router)
 
 
-# ========== 内存会话存储（评测用） ==========
-# 生产环境应使用 Redis 或数据库
-_eval_sessions: Dict[str, Dict[str, Any]] = {}
+# ========== 评测会话存储 ==========
+# LA-005: SQLite 持久化（原内存 dict，重启丢失且不支持多进程）。
+# EvalSessionStore 提供 dict 兼容接口，下方调用点无需改动。
+from core.eval_session_store import EvalSessionStore
+_eval_sessions = EvalSessionStore()
 
 
 def _cleanup_session(session_id: str):
@@ -238,6 +271,23 @@ class ChatSendRequest(BaseModel):
         None, ge=0.0, le=1.0,
         description="用户能力水平 0.0~1.0（可选，用于个性化讲解深度）"
     )
+    # LA-UI-001 M2: 群聊测评模式（仅 agent_target=coach 时生效）
+    eval_mode: Optional[str] = Field(
+        None,
+        description="测评模式（可选）：generate=出新题 | bank=题库抽题 | mixed=混合"
+    )
+
+
+# LA-UI-001 M3: 左→右分享（图谱节点等元素分享到群聊）
+class ChatShareRequest(BaseModel):
+    """分享元素到群聊请求"""
+    session_id: Optional[str] = Field(None, description="群聊会话ID（可选，空则新建）")
+    subject: str = Field("generic", description="学科标识")
+    card_type: str = Field("concept", description="卡片类型：concept|question|quiz_result|graph_node")
+    title: str = Field(..., description="卡片标题")
+    preview: str = Field("", description="预览文本")
+    data: Optional[Dict[str, Any]] = Field(None, description="原始数据")
+    source_view: str = Field("graph", description="来源视图")
 
 
 # LA-044-#3: 用户状态 API 模型
@@ -279,6 +329,7 @@ class AuthResponse(BaseModel):
     user_id: str
     username: str
     display_name: str
+    system_role: str = "user"
     token: str
     message: str
 
@@ -326,6 +377,13 @@ class QuizBankQuestion(BaseModel):
     options: List[str] = []
     answer: str
     explanation: str
+    # LA-UI-001: 题库列表展示所需的管理字段
+    topic: Optional[str] = ""
+    bloom_level: Optional[str] = None
+    is_approved: bool = False
+    used_count: int = 0
+    correct_rate: float = 0.0
+    created_at: Optional[str] = ""
 
 class QuizBankListResponse(BaseModel):
     """题库列表响应"""
@@ -401,6 +459,8 @@ class EvaluateSubmitRequest(BaseModel):
     """提交评测答案请求"""
     session_id: str = Field(..., description="评测会话ID")
     answers: List[str] = Field(..., description="用户答案列表，顺序与题目对应")
+    # LA-UI-001 M2: 群聊测评闭环——传入群聊会话ID时，评分结果回写为结果卡片消息
+    dialog_session_id: Optional[str] = Field(None, description="群聊对话会话ID（可选，用于结果卡片回写）")
 
 
 class EvaluateDetail(BaseModel):
@@ -480,38 +540,17 @@ def get_current_user_id(
     x_user_id: Optional[str] = Header(None, alias="X-User-ID"),
     authorization: Optional[str] = Header(None),
 ) -> str:
-    """
-    LA-052 + LA-052-A: 统一身份验证
+    """Compatibility wrapper for the shared authentication dependency."""
+    return _shared_get_current_user_id(x_user_id, authorization)
 
-    优先级：
-    1. Authorization: Bearer <token> → 验证 token 获取 user_id
-    2. X-User-ID Header → 向后兼容
-    3. 默认 default（本地用户，无需密码）
 
-    Returns:
-        user_id 字符串
-    """
-    # 优先验证 token
-    if authorization and authorization.startswith("Bearer "):
-        token = authorization[7:]
-        try:
-            um = get_user_manager()
-            user_id = um.verify_token(token)
-            if user_id:
-                return user_id
-        except Exception as e:
-            print(f"[Auth] Token 验证失败: {e}")
-
-    # 回退到 X-User-ID
-    if x_user_id:
-        return x_user_id
-
-    # LA-052-A: 默认 default 用户（替代 anonymous）
-    return "default"
-    if x_user_id:
-        return x_user_id
-
-    return "default"
+def _resolve_legacy_user_id(
+    x_user_id: Optional[str],
+    authorization: Optional[str],
+    legacy_user_id: Optional[str] = None,
+) -> str:
+    """Compatibility wrapper for legacy endpoints."""
+    return _shared_resolve_legacy_user_id(x_user_id, authorization, legacy_user_id)
 
 
 # 便捷函数：供现有端点快速获取 effective_user_id
@@ -519,8 +558,8 @@ def _get_effective_user_id(
     x_user_id: Optional[str] = Header(None, alias="X-User-ID"),
     authorization: Optional[str] = Header(None),
 ) -> str:
-    """LA-052-A: 获取有效用户 ID（token 优先，默认 default）"""
-    return get_current_user_id(x_user_id, authorization)
+    """Compatibility alias for the shared FastAPI dependency."""
+    return _shared_get_effective_user_id(x_user_id, authorization)
 
 
 @app.get("/api/health", response_model=HealthResponse)
@@ -554,21 +593,19 @@ class ConfigResponse(BaseModel):
     mineru: LLMConfigItem
 
 @app.get("/api/config", response_model=ConfigResponse)
-def get_config():
+def get_config(admin_user_id: str = Depends(require_admin)):
     """
     LLM-ROBUST: 获取应用配置（LLM/VLM/Embedding/MinerU）。
     
     返回当前加载的 api_config.ini 配置，包含主 LLM 和备用 LLM(fallback)。
-    API Key 返回时脱敏处理（只显示前4位和后4位）。
+    API Key 只返回是否已配置的占位值，不暴露任何片段。
     """
     from config.settings import get_full_config
     cfg = get_full_config()
     
     def _mask_key(key: str) -> str:
         """脱敏 API Key"""
-        if len(key) <= 12:
-            return "***"
-        return key[:4] + "..." + key[-4:]
+        return "***" if key else ""
     
     def _to_item(fc) -> LLMConfigItem:
         return LLMConfigItem(
@@ -598,21 +635,28 @@ class ConfigUpdateRequest(BaseModel):
     mineru: Optional[LLMConfigItem] = None
 
 @app.put("/api/config")
-def update_config(request: ConfigUpdateRequest):
+def update_config(
+    request: ConfigUpdateRequest,
+    admin_user_id: str = Depends(require_admin),
+):
     """
     LLM-ROBUST: 更新应用配置。
     
     只更新传入的字段，未传入的保持原值。
     API Key 若传入 "***" 或空字符串，表示不修改原值。
     """
-    from config.settings import get_full_config, save_api_config, FeatureConfig
+    from config.settings import get_full_config, update_config as update_app_config, FeatureConfig
     
     cfg = get_full_config()
     
-    def _merge_item(current: FeatureConfig, incoming: Optional[LLMConfigItem]) -> FeatureConfig:
+    def _merge_item(
+        feature: str,
+        current: FeatureConfig,
+        incoming: Optional[LLMConfigItem],
+    ) -> FeatureConfig:
         if not incoming:
             return current
-        return FeatureConfig(
+        merged = FeatureConfig(
             provider=incoming.provider if incoming.provider else current.provider,
             # API Key: 如果传入的是脱敏值或空，保持原值
             api_key=current.api_key if (not incoming.api_key or incoming.api_key == "***" or "..." in incoming.api_key) else incoming.api_key,
@@ -621,14 +665,21 @@ def update_config(request: ConfigUpdateRequest):
             enabled=incoming.enabled,
             custom_model=incoming.custom_model if incoming.custom_model else current.custom_model,
         )
+        # Reuse the canonical validation path even for the deprecated endpoint.
+        return _merge_feature_config(
+            feature,
+            current,
+            SetupFeatureConfigRequest(**merged.__dict__),
+        )
     
-    cfg.llm = _merge_item(cfg.llm, request.llm)
-    cfg.llm_fallback = _merge_item(cfg.llm_fallback, request.llm_fallback)
-    cfg.vlm = _merge_item(cfg.vlm, request.vlm)
-    cfg.embedding = _merge_item(cfg.embedding, request.embedding)
-    cfg.mineru = _merge_item(cfg.mineru, request.mineru)
+    cfg.llm = _merge_item("llm", cfg.llm, request.llm)
+    cfg.llm_fallback = _merge_item("llm_fallback", cfg.llm_fallback, request.llm_fallback)
+    cfg.vlm = _merge_item("vlm", cfg.vlm, request.vlm)
+    cfg.embedding = _merge_item("embedding", cfg.embedding, request.embedding)
+    cfg.mineru = _merge_item("mineru", cfg.mineru, request.mineru)
     
-    save_api_config(cfg)
+    update_app_config(cfg)
+    _write_audit_event(admin_user_id, "config.update.legacy", {})
     return {"success": True, "message": "配置已保存"}
 
 
@@ -646,7 +697,7 @@ class LLMDiagnosticResponse(BaseModel):
     fallback_model: str
     fallback_enabled: bool
 
-@app.get("/api/llm/diagnostic", response_model=LLMDiagnosticResponse)
+@app.get("/api/llm/diagnostic", response_model=LLMDiagnosticResponse, dependencies=[Depends(require_admin)])
 def get_llm_diagnostic():
     """
     LLM-ROBUST: 获取 LLM 诊断信息。
@@ -697,7 +748,7 @@ class LLMTestResponse(BaseModel):
     key_hash: str
     error: Optional[str] = None
 
-@app.post("/api/llm/test", response_model=LLMTestResponse)
+@app.post("/api/llm/test", response_model=LLMTestResponse, dependencies=[Depends(require_admin)])
 def test_llm_connection(request: LLMTestRequest):
     """
     LLM-ROBUST: 测试 LLM 连接。
@@ -810,7 +861,7 @@ class TokenUsageLogsResponse(BaseModel):
     """用量日志响应"""
     logs: List[Dict[str, Any]]
 
-@app.get("/api/llm/usage/stats", response_model=TokenUsageStatsResponse)
+@app.get("/api/llm/usage/stats", response_model=TokenUsageStatsResponse, dependencies=[Depends(require_admin)])
 def get_token_usage_stats(year_month: Optional[str] = None):
     """
     LLM-ROBUST-11: 获取 Token 用量统计。
@@ -842,7 +893,7 @@ def get_token_usage_stats(year_month: Optional[str] = None):
         budget_used_ratio=budget_used_ratio,
     )
 
-@app.get("/api/llm/usage/daily", response_model=List[TokenUsageDailyItem])
+@app.get("/api/llm/usage/daily", response_model=List[TokenUsageDailyItem], dependencies=[Depends(require_admin)])
 def get_token_usage_daily(days: int = 7):
     """
     LLM-ROBUST-11: 获取最近 N 天的每日用量。
@@ -853,7 +904,7 @@ def get_token_usage_daily(days: int = 7):
     daily = tracker.get_daily_stats(days)
     return [TokenUsageDailyItem(**item) for item in daily]
 
-@app.get("/api/llm/usage/models", response_model=List[TokenUsageModelItem])
+@app.get("/api/llm/usage/models", response_model=List[TokenUsageModelItem], dependencies=[Depends(require_admin)])
 def get_token_usage_models(days: int = 30):
     """
     LLM-ROBUST-11: 按模型分组统计用量。
@@ -875,7 +926,7 @@ class TokenBudgetResponse(BaseModel):
     monthly_budget: float
     warning_threshold: float
 
-@app.post("/api/llm/usage/budget", response_model=TokenBudgetResponse)
+@app.post("/api/llm/usage/budget", response_model=TokenBudgetResponse, dependencies=[Depends(require_admin)])
 def set_token_budget(request: TokenBudgetRequest):
     """
     LLM-ROBUST-11: 设置月度预算。
@@ -893,7 +944,7 @@ def set_token_budget(request: TokenBudgetRequest):
         warning_threshold=request.warning_threshold,
     )
 
-@app.get("/api/llm/usage/budget", response_model=TokenBudgetResponse)
+@app.get("/api/llm/usage/budget", response_model=TokenBudgetResponse, dependencies=[Depends(require_admin)])
 def get_token_budget():
     """
     LLM-ROBUST-11: 获取当前预算配置。
@@ -939,7 +990,7 @@ class SlowRequestModelBreakdownItem(BaseModel):
     avg_latency_ms: float
     slow_count: int
 
-@app.get("/api/llm/slow-requests", response_model=List[SlowRequestItem])
+@app.get("/api/llm/slow-requests", response_model=List[SlowRequestItem], dependencies=[Depends(require_admin)])
 def get_slow_requests(limit: int = 20):
     """
     LLM-ROBUST-12: 获取慢请求列表。
@@ -952,7 +1003,7 @@ def get_slow_requests(limit: int = 20):
     requests = monitor.get_slow_requests(limit)
     return [SlowRequestItem(**r) for r in requests]
 
-@app.get("/api/llm/slow-requests/stats", response_model=SlowRequestStatsResponse)
+@app.get("/api/llm/slow-requests/stats", response_model=SlowRequestStatsResponse, dependencies=[Depends(require_admin)])
 def get_slow_request_stats():
     """
     LLM-ROBUST-12: 获取慢请求统计。
@@ -965,7 +1016,7 @@ def get_slow_request_stats():
     stats = monitor.get_stats()
     return SlowRequestStatsResponse(**stats)
 
-@app.get("/api/llm/slow-requests/models", response_model=List[SlowRequestModelBreakdownItem])
+@app.get("/api/llm/slow-requests/models", response_model=List[SlowRequestModelBreakdownItem], dependencies=[Depends(require_admin)])
 def get_slow_request_model_breakdown():
     """
     LLM-ROBUST-12: 按模型分组的耗时统计。
@@ -1001,6 +1052,7 @@ def auth_register(request: RegisterRequest):
             user_id=user["user_id"],
             username=user["username"],
             display_name=user["display_name"],
+            system_role=user.get("system_role", "user"),
             token=token,
             message="注册成功",
         )
@@ -1029,6 +1081,7 @@ def auth_login(request: LoginRequest):
         user_id=user["user_id"],
         username=user["username"],
         display_name=user["display_name"] or user["username"],
+        system_role=user.get("system_role", "user"),
         token=token,
         message="登录成功",
     )
@@ -1072,6 +1125,7 @@ def auth_me(authorization: Optional[str] = Header(None)):
         "user_id": user_id,
         "username": user["username"],
         "display_name": user.get("display_name", user["username"]),
+        "system_role": user.get("system_role", "user"),
     }
 
 
@@ -1117,6 +1171,7 @@ def ask_question(
         user_theta=user_theta,
         graph_store=graph_store,
         vector_store=vector_store,
+        user_id=effective_user_id,
     )
     # LA-050-HISTORY-FIX: 注入用户隔离的 DialogContextManager
     if effective_user_id not in ("anonymous", "default"):
@@ -1205,6 +1260,7 @@ def ask_stream(
             user_theta=user_theta,
             graph_store=graph_store,
             vector_store=vector_store,
+            user_id=effective_user_id,
         )
         # LA-050-HISTORY-FIX: 注入用户隔离的 DialogContextManager
         # 确保对话消息保存到用户隔离数据库，而非共享数据库
@@ -1341,6 +1397,7 @@ def chat_send(
         user_theta=user_theta,
         graph_store=graph_store,
         vector_store=vector_store,
+        user_id=effective_user_id,
     )
 
     # LA-050-HISTORY-FIX: 注入用户隔离 DialogContextManager
@@ -1356,13 +1413,22 @@ def chat_send(
         session_id=request.session_id,
         user_theta=user_theta,
         agent_target=request.agent_target,
+        eval_mode=request.eval_mode,
     )
+
+    # LA-UI-001 M2: 群聊 Coach 题卡 → 登记测评会话（EVAL-P2-1 闭环前置）
+    eval_session_id = _setup_chat_eval_session(result, request.subject, effective_user_id)
 
     # 提取媒体资源和引用来源
     agent_result = result.get("result", {})
     metadata = agent_result.get("metadata", {}) if isinstance(agent_result, dict) else {}
     media = metadata.get("media") if isinstance(metadata, dict) else None
     sources = metadata.get("sources") if isinstance(metadata, dict) else None
+
+    # LA-UI-001 M1: 单Agent题卡数据（多Agent时在各 agent_tasks 的 metadata 中）
+    is_multi = result.get("multi_agent", False)
+    questions = None if is_multi else (agent_result.get("questions") if isinstance(agent_result, dict) else None)
+    quiz_topic = None if is_multi else (agent_result.get("topic") if isinstance(agent_result, dict) else None)
 
     # LA-044-#3: 对话结束后自动保存用户状态
     _save_user_state_after_dialog_chat(effective_user_id, request, result)
@@ -1382,6 +1448,12 @@ def chat_send(
         "multi_agent": result.get("multi_agent", False),
         "execution_mode": result.get("execution_mode", "sequential"),
         "agent_tasks": result.get("agent_tasks", []),
+        # LA-UI-001 M1: 单Agent题卡数据
+        "questions": questions,
+        "topic": quiz_topic,
+        # LA-UI-001 M2: 群聊测评会话（Coach 题卡时非空）
+        "eval_session_id": eval_session_id,
+        "card_mode": "evaluate" if eval_session_id else None,
     }
 
 
@@ -1410,48 +1482,63 @@ def chat_send_stream(
     多 Agent 场景下，meta 事件会发送多次（每个 Agent 开始前），
     前端通过 agent 字段区分不同 Agent 的输出。
     """
+    # LA-STREAM-PREFLIGHT: 权限与 store 解析在流开始前完成，
+    # 让 401/403 等错误走正常的 HTTP 响应，而不是流式 200 空响应
+    effective_user_id = get_current_user_id(x_user_id, authorization)
+    if effective_user_id in ("anonymous", "default") and request.user_id and request.user_id not in ("anonymous", "default"):
+        effective_user_id = request.user_id
+
+    # LA-044-FIX: 从 UserStateStore 读取 theta
+    user_theta = request.user_theta
+    if user_theta is None and effective_user_id not in ("anonymous", "default"):
+        try:
+            store = _get_isolated_state_store(effective_user_id)
+            subject_id = f"{request.subject}_v1"
+            state = store.get_full_user_state(effective_user_id, subject_id)
+            user_theta = state.get("profile", {}).get("global_theta")
+        except Exception:
+            pass
+
+    # LA-051: 权限感知的 store
+    subject = request.subject
+    graph_store = _get_accessible_graph_store(subject, effective_user_id)
+    vector_store = _get_accessible_vector_store(subject, effective_user_id)
+
+    coordinator = Coordinator(
+        collection_name=f"{subject}_v1",
+        top_k=5,
+        user_theta=user_theta,
+        graph_store=graph_store,
+        vector_store=vector_store,
+        user_id=effective_user_id,
+    )
+
+    # LA-050-HISTORY-FIX: 注入用户隔离 DialogContextManager
+    if effective_user_id not in ("anonymous", "default"):
+        from core.user_context import UserContext
+        ctx = UserContext(effective_user_id)
+        coordinator._dialog_manager = ctx.dialog_manager
+
     async def event_generator():
-        effective_user_id = get_current_user_id(x_user_id, authorization)
-        if effective_user_id in ("anonymous", "default") and request.user_id and request.user_id not in ("anonymous", "default"):
-            effective_user_id = request.user_id
-
-        # LA-044-FIX: 从 UserStateStore 读取 theta
-        user_theta = request.user_theta
-        if user_theta is None and effective_user_id not in ("anonymous", "default"):
-            try:
-                store = _get_isolated_state_store(effective_user_id)
-                subject_id = f"{request.subject}_v1"
-                state = store.get_full_user_state(effective_user_id, subject_id)
-                user_theta = state.get("profile", {}).get("global_theta")
-            except Exception:
-                pass
-
-        # LA-051: 权限感知的 store
-        subject = request.subject
-        graph_store = _get_accessible_graph_store(subject, effective_user_id)
-        vector_store = _get_accessible_vector_store(subject, effective_user_id)
-
-        coordinator = Coordinator(
-            collection_name=f"{subject}_v1",
-            top_k=5,
-            user_theta=user_theta,
-            graph_store=graph_store,
-            vector_store=vector_store,
-        )
-
-        # LA-050-HISTORY-FIX: 注入用户隔离 DialogContextManager
-        if effective_user_id not in ("anonymous", "default"):
-            from core.user_context import UserContext
-            ctx = UserContext(effective_user_id)
-            coordinator._dialog_manager = ctx.dialog_manager
-
-        result = coordinator.handle(
-            query=request.content,
-            user_id=effective_user_id,
-            session_id=request.session_id,
-            user_theta=user_theta,
-            agent_target=request.agent_target,
-        )
+        try:
+            result = coordinator.handle(
+                query=request.content,
+                user_id=effective_user_id,
+                session_id=request.session_id,
+                user_theta=user_theta,
+                agent_target=request.agent_target,
+                eval_mode=request.eval_mode,
+            )
+            # LA-UI-001 M2: 群聊 Coach 题卡 → 登记测评会话（EVAL-P2-1 闭环前置）
+            eval_session_id = _setup_chat_eval_session(result, subject, effective_user_id)
+        except Exception as e:
+            # 流式响应已开始，错误只能通过 error 事件告知前端
+            import traceback
+            traceback.print_exc()
+            err = json.dumps({"error": f"处理失败: {e}"}, ensure_ascii=False)
+            yield f"event: error\ndata: {err}\n\n"
+            yield f"event: done\ndata: {{}}\n\n"
+            return
 
         intent = result.get("intent", {})
         agent_name = result.get("agent", "")
@@ -1468,6 +1555,14 @@ def chat_send_stream(
         media = metadata.get("media") if isinstance(metadata, dict) else None
         sources = metadata.get("sources") if isinstance(metadata, dict) else None
 
+        # LA-UI-001 M1: 提取题目数据（QuizAgent 结果顶层），供前端 QuestionCard 渲染
+        questions = agent_result.get("questions") if isinstance(agent_result, dict) else None
+        quiz_topic = agent_result.get("topic") if isinstance(agent_result, dict) else None
+        if is_multi_agent:
+            # 多Agent场景 questions 已在各 agent_tasks 的 metadata 中
+            questions = None
+            quiz_topic = None
+
         # 发送元数据事件
         meta = json.dumps({
             "intent": intent,
@@ -1482,36 +1577,55 @@ def chat_send_stream(
             "multi_agent": is_multi_agent,
             "execution_mode": execution_mode,
             "agent_tasks": agent_tasks,
+            # LA-UI-001 M1: 单Agent题卡数据
+            "questions": questions,
+            "topic": quiz_topic,
+            # LA-UI-001 M2: 群聊测评会话（单Agent Coach 题卡时非空；
+            # 多Agent时在对应 agent_tasks[i].metadata.eval_session_id）
+            "eval_session_id": eval_session_id,
+            "card_mode": "evaluate" if eval_session_id else None,
         }, ensure_ascii=False)
         yield f"event: meta\ndata: {meta}\n\n"
 
-        # 将回答分段流式发送（与 /api/ask/stream 一致）
-        if answer_text:
-            paragraphs = answer_text.split('\n\n')
-            for para in paragraphs:
-                para = para.strip()
-                if not para:
-                    continue
-                if len(para) > 200:
-                    sentences = re.split(r'([。！？.!?]\s*)', para)
-                    buffer = ""
-                    for s in sentences:
-                        buffer += s
-                        if len(buffer) >= 80 or s.strip() and s.strip()[-1] in '。！？.!?':
+        # LA-UI-001-FIX: 多Agent场景 — 所有Agent输出已在 meta 的 agent_tasks 中完整发送
+        # 跳过 chunk 流式发送，避免与前端 meta 中的多消息渲染冲突
+        if not is_multi_agent:
+            # LA-UI-001 M1: 有 questions 时题目由 QuestionCard 渲染，
+            # 正文只流式发送引导段（首段），避免与卡片重复
+            if questions:
+                answer_text = answer_text.split("\n\n")[0].strip()
+            # 单Agent：将回答分段流式发送（与 /api/ask/stream 一致）
+            if answer_text:
+                paragraphs = answer_text.split('\n\n')
+                for para in paragraphs:
+                    para = para.strip()
+                    if not para:
+                        continue
+                    if len(para) > 200:
+                        sentences = re.split(r'([。！？.!?]\s*)', para)
+                        buffer = ""
+                        for s in sentences:
+                            buffer += s
+                            if len(buffer) >= 80 or s.strip() and s.strip()[-1] in '。！？.!?':
+                                chunk_data = json.dumps({"text": buffer}, ensure_ascii=False)
+                                yield f"event: chunk\ndata: {chunk_data}\n\n"
+                                buffer = ""
+                                await asyncio.sleep(0.03)
+                        if buffer:
                             chunk_data = json.dumps({"text": buffer}, ensure_ascii=False)
                             yield f"event: chunk\ndata: {chunk_data}\n\n"
-                            buffer = ""
-                            await asyncio.sleep(0.03)
-                    if buffer:
-                        chunk_data = json.dumps({"text": buffer}, ensure_ascii=False)
+                    else:
+                        chunk_data = json.dumps({"text": para + '\n\n'}, ensure_ascii=False)
                         yield f"event: chunk\ndata: {chunk_data}\n\n"
-                else:
-                    chunk_data = json.dumps({"text": para + '\n\n'}, ensure_ascii=False)
-                    yield f"event: chunk\ndata: {chunk_data}\n\n"
-                    await asyncio.sleep(0.05)
-        else:
-            err_data = json.dumps({"text": "抱歉，未能生成回答。"}, ensure_ascii=False)
-            yield f"event: chunk\ndata: {err_data}\n\n"
+                        await asyncio.sleep(0.05)
+            else:
+                err_data = json.dumps({"text": "抱歉，未能生成回答。"}, ensure_ascii=False)
+                yield f"event: chunk\ndata: {err_data}\n\n"
+
+        # LA-UI-001 M4: 发送视图命令事件（CommandMessage），驱动左侧视图联动
+        for cmd in _derive_view_commands(result):
+            cmd_data = json.dumps(cmd, ensure_ascii=False)
+            yield f"event: command\ndata: {cmd_data}\n\n"
 
         # 发送完成事件
         yield f"event: done\ndata: {{}}\n\n"
@@ -1542,6 +1656,106 @@ def _save_user_state_after_dialog_chat(user_id: str, request: ChatSendRequest, r
     _save_user_state_after_dialog(user_id, fake_req, result)
 
 
+# LA-UI-001 M4: 从 Agent 结果派生 CommandMessage（设计文档 §3.2）
+def _derive_view_commands(result: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """
+    确定性命令派生：TutorAgent 图谱路径返回的 chunks 含知识图谱概念节点 id
+    （source='knowledge_graph'），据此生成图谱高亮/聚焦命令，
+    前端 CommandExecutor 接收后驱动 GraphView 定位相关节点。
+
+    限制：多 Agent 场景的 agent_tasks metadata 不含概念节点 id，暂不透出命令。
+    """
+    if result.get("multi_agent"):
+        return []
+    agent_result = result.get("result", {})
+    if not isinstance(agent_result, dict):
+        return []
+    node_ids: List[str] = []
+    labels: List[str] = []
+    for ch in agent_result.get("chunks") or []:
+        if isinstance(ch, dict) and ch.get("source") == "knowledge_graph" and ch.get("id"):
+            node_ids.append(str(ch["id"]))
+            if ch.get("concept"):
+                labels.append(str(ch["concept"]))
+    if not node_ids:
+        return []
+    return [{
+        "type": "command",
+        "command": "navigate",
+        "target": "graph",
+        "payload": {
+            "action": "highlight_nodes",
+            "node_ids": node_ids[:5],
+            "labels": labels[:5],
+            "focus_first": True,
+        },
+    }]
+
+
+# LA-UI-001 M3: 分享接口（左侧视图元素 → 群聊概念卡）
+@app.post("/api/chat/share")
+def chat_share(
+    request: ChatShareRequest,
+    x_user_id: Optional[str] = Header(None, alias="X-User-ID"),
+    authorization: Optional[str] = Header(None),
+):
+    """
+    LA-UI-001 M3: 将左侧视图元素（图谱节点等）分享为群聊卡片消息。
+
+    以 role="user" 消息写入对话历史，metadata.card 携带卡片数据，
+    历史会话加载时恢复 ConceptCard 渲染。返回 session_id 供前端跟踪。
+    """
+    effective_user_id = get_current_user_id(x_user_id, authorization)
+
+    try:
+        if effective_user_id in ("anonymous", "default"):
+            mgr = _dialog_manager
+        else:
+            from core.user_context import UserContext
+            mgr = UserContext(effective_user_id).dialog_manager
+
+        # 获取或创建会话（与 chat_send 行为一致）
+        sid, _session = mgr.get_or_create_session(
+            user_id=effective_user_id,
+            subject_id=f"{request.subject}_v1",
+            session_id=request.session_id or None,
+        )
+
+        # 归属到当前最后一轮（无消息则为第 1 轮）
+        conn = sqlite3.connect(str(mgr.db_path))
+        try:
+            row = conn.execute(
+                "SELECT MAX(turn_number) FROM dialog_messages WHERE session_id = ?", (sid,)
+            ).fetchone()
+            turn_number = (row[0] or 0) + 1
+        finally:
+            conn.close()
+
+        preview = (request.preview or "")[:200]
+        mgr.save_message(
+            session_id=sid,
+            turn_number=turn_number,
+            role="user",
+            content=f"[分享{request.card_type}] {request.title}" + (f"——{preview}" if preview else ""),
+            intent="share",
+            metadata={
+                "card": {
+                    "card_type": request.card_type,
+                    "title": request.title,
+                    "preview": request.preview or "",
+                    "data": request.data or {},
+                    "source_view": request.source_view,
+                },
+            },
+        )
+        print(f"[LA-UI-001 M3] 分享已写入群聊: session={sid[:8]}..., card={request.card_type}/{request.title[:20]}")
+        return {"ok": True, "session_id": sid}
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"分享失败: {e}")
+
+
 @app.post("/api/quiz", response_model=QuizResponse)
 def generate_quiz(
     request: QuizRequest,
@@ -1554,18 +1768,20 @@ def generate_quiz(
     Routes through Coordinator to enable P0 graph-education pipeline:
     ConceptRetriever -> SubgraphBuilder -> ContextAssembler -> QuizAgent.
     """
-    # P0-QUIZ-fix: use shared GraphStore to avoid KuzuDB file locking
-    graph_store = get_graph_store(request.subject)
+    effective_user_id = get_current_user_id(x_user_id, authorization)
+    # Resolve the permission-aware store before constructing Coordinator so
+    # private subjects never fall back to the shared database.
+    graph_store = _get_accessible_graph_store(request.subject, effective_user_id)
 
     coordinator = Coordinator(
         collection_name=f"{request.subject}_v1",
         top_k=5,
         graph_store=graph_store,  # shared GraphStore, avoids duplicate connections
+        user_id=effective_user_id,
     )
     # LA-050-HISTORY-FIX: 注入用户隔离的 DialogContextManager
     # LA-050-HISTORY-FIX: 注入用户隔离的 DialogContextManager
     # LA-051-SESSION: 从 header 获取真实身份
-    effective_user_id = get_current_user_id(x_user_id, authorization)
     if effective_user_id not in ("anonymous", "default"):
         from core.user_context import UserContext
         ctx = UserContext(effective_user_id)
@@ -1651,12 +1867,13 @@ def start_evaluation(
         )
 
         if gen_count > 0:
-            # P0-QUIZ-fix: use Coordinator + shared GraphStore
-            graph_store = get_graph_store(request.subject)
+            # Use the permission-aware GraphStore for the requested subject.
+            graph_store = _get_accessible_graph_store(request.subject, effective_user_id)
             coordinator = Coordinator(
                 collection_name=f"{request.subject}_v1",
                 top_k=5,
                 graph_store=graph_store,
+                user_id=effective_user_id,
             )
             # LA-050-HISTORY-FIX: 注入用户隔离的 DialogContextManager
             # LA-050-HISTORY-FIX: 注入用户隔离 DialogContextManager
@@ -1682,12 +1899,13 @@ def start_evaluation(
         instructions = f"本次评测包含 {len(bank_questions)} 道题库题目和 {len(gen_questions)} 道生成题目。"
 
     else:
-        # Default: generate new questions (P0-QUIZ-fix: use Coordinator + shared GraphStore)
-        graph_store = get_graph_store(request.subject)
+        # Default: generate new questions from the permission-aware store.
+        graph_store = _get_accessible_graph_store(request.subject, effective_user_id)
         coordinator = Coordinator(
             collection_name=f"{request.subject}_v1",
             top_k=5,
             graph_store=graph_store,
+            user_id=effective_user_id,
         )
         # LA-050-HISTORY-FIX: 注入用户隔离的 DialogContextManager
         # LA-050-HISTORY-FIX: 注入用户隔离 DialogContextManager
@@ -1712,12 +1930,19 @@ def start_evaluation(
         instructions = agent_result.get("text", "").split("\n\n")[0] if agent_result.get("text") else ""
 
     # 保存会话
+    # LA-EVAL-HISTORY-FIX: 会话归属必须使用 token 解析的 effective_user_id，
+    # 而不是请求体 user_id——否则历史写入 default 用户的共享库，
+    # 而 /api/evaluation/history 按 token 身份读实名用户的隔离库，永远读不到。
+    # 匿名身份时保留请求体 user_id 回退（与 /api/ask 的 LA-051-SESSION 行为一致）。
+    session_user_id = effective_user_id
+    if effective_user_id in ("anonymous", "default") and request.user_id and request.user_id not in ("anonymous", "default"):
+        session_user_id = request.user_id
     _eval_sessions[session_id] = {
         "questions": questions,
         "subject": request.subject,
         "topic": request.topic,
         "mode": request.mode,
-        "user_id": request.user_id or "default",  # LA-040-P2: 保存 user_id 用于历史记录
+        "user_id": session_user_id,  # LA-040-P2: 保存 user_id 用于历史记录
         "created_at": time.time(),
     }
     print(f"[EvalStart] session={session_id} mode={request.mode} questions={len(questions)} sessions_count={len(_eval_sessions)}")
@@ -1774,6 +1999,10 @@ def submit_evaluation(request: EvaluateSubmitRequest):
 
     # LA-040-P2: 写入评测历史 + 错题本
     _save_evaluation_history(request.session_id, session, report)
+
+    # LA-UI-001 M2: 群聊测评闭环——结果回写为群聊结果卡片消息（历史会话可恢复 ResultCard）
+    if request.dialog_session_id:
+        _append_eval_result_to_dialog(session, request.dialog_session_id, report)
 
     # 清理会话
     del _eval_sessions[request.session_id]
@@ -1926,6 +2155,130 @@ def _save_evaluation_history(eval_session_id: str, session: Dict, report: Dict):
             conn.close()
 
 
+def _append_eval_result_to_dialog(session: Dict, dialog_session_id: str, report: Dict):
+    """
+    LA-UI-001 M2: 群聊测评结果回写为对话消息（ResultCard 数据源）。
+
+    在指定群聊会话中追加一条 CoachAgent 消息：
+    - content: 评测结果摘要文本（供 LLM 对话历史理解）
+    - metadata.eval_result: 完整评分报告（前端恢复 ResultCard 渲染）
+    非阻塞：任何失败只打印日志，不影响评测提交主流程。
+    """
+    try:
+        user_id = session.get("user_id", "anonymous")
+        topic = session.get("topic", "")
+
+        # 用户隔离的 DialogContextManager（与 chat_send 注入逻辑一致）
+        if user_id in ("anonymous", "default"):
+            mgr = _dialog_manager
+        else:
+            from core.user_context import UserContext
+            mgr = UserContext(user_id).dialog_manager
+
+        # 归属到当前最后一轮对话
+        import sqlite3 as _sqlite3
+        conn = _sqlite3.connect(str(mgr.db_path))
+        try:
+            row = conn.execute(
+                "SELECT MAX(turn_number) FROM dialog_messages WHERE session_id = ?",
+                (dialog_session_id,),
+            ).fetchone()
+            turn_number = (row[0] or 1)
+        finally:
+            conn.close()
+
+        content_lines = [
+            f"【评测结果】总分: {report.get('total_score', 0)}/{report.get('max_score', 0)} "
+            f"({report.get('percentage', 0)}%)",
+            f"等级: {report.get('level', '未知')}",
+            f"正确率: {report.get('correct_count', 0)}/{report.get('total_questions', 0)}",
+        ]
+        weak = report.get("weak_areas", [])
+        if weak:
+            content_lines.append(f"薄弱领域: {', '.join(weak)}")
+
+        mgr.save_message(
+            session_id=dialog_session_id,
+            turn_number=turn_number,
+            role="agent",
+            content="\n".join(content_lines),
+            agent_name="CoachAgent",
+            intent="evaluate",
+            metadata={
+                "eval_result": {
+                    "total_score": report.get("total_score", 0),
+                    "max_score": report.get("max_score", 0),
+                    "percentage": report.get("percentage", 0.0),
+                    "correct_count": report.get("correct_count", 0),
+                    "total_questions": report.get("total_questions", 0),
+                    "level": report.get("level", "未知"),
+                    "summary": report.get("summary", ""),
+                    "weak_areas": weak,
+                    "strong_areas": report.get("strong_areas", []),
+                    "details": report.get("details", []),
+                },
+                "topic": topic,
+            },
+        )
+        print(f"[LA-UI-001 M2] 评测结果卡片已回写群聊: dialog_session={dialog_session_id[:8]}...")
+    except Exception as e:
+        print(f"[LA-UI-001 M2] 评测结果回写群聊失败（非阻塞）: {e}")
+
+
+def _setup_chat_eval_session(result: Dict[str, Any], subject: str, user_id: str) -> Optional[str]:
+    """
+    LA-UI-001 M2: 群聊 Coach 出题后创建测评会话，返回 eval_session_id。
+
+    检测 Coordinator 结果中的 Coach 题卡（单Agent 或多Agent agent_tasks），
+    将 questions 登记到 EvalSessionStore（与 /api/evaluate/start 同一存储），
+    并把 eval_session_id + card_mode 注入对应结构，供前端渲染测评作答卡。
+
+    返回 None 表示本次结果不含 Coach 题卡。
+    """
+    COACH_NAMES = ("evaluate", "coach", "CoachAgent")
+
+    # 多Agent：在 agent_tasks 中找 Coach 题卡
+    if result.get("multi_agent"):
+        for task in result.get("agent_tasks", []):
+            meta = task.get("metadata") or {}
+            questions = meta.get("questions")
+            if task.get("agent") in COACH_NAMES and questions:
+                eval_sid = str(uuid.uuid4())
+                _eval_sessions[eval_sid] = {
+                    "questions": questions,
+                    "subject": subject,
+                    "topic": meta.get("topic", ""),
+                    "mode": "chat",
+                    "user_id": user_id,
+                    "created_at": time.time(),
+                }
+                meta["eval_session_id"] = eval_sid
+                meta["card_mode"] = "evaluate"
+                task["metadata"] = meta
+                print(f"[LA-UI-001 M2] 多Agent Coach 题卡已登记测评会话: {eval_sid[:8]}... ({len(questions)} 题)")
+                return eval_sid
+        return None
+
+    # 单Agent：Coach 直接返回 questions
+    agent_name = result.get("agent", "")
+    agent_result = result.get("result", {})
+    questions = agent_result.get("questions") if isinstance(agent_result, dict) else None
+    if agent_name in COACH_NAMES and questions:
+        eval_sid = str(uuid.uuid4())
+        _eval_sessions[eval_sid] = {
+            "questions": questions,
+            "subject": subject,
+            "topic": agent_result.get("topic", ""),
+            "mode": "chat",
+            "user_id": user_id,
+            "created_at": time.time(),
+        }
+        print(f"[LA-UI-001 M2] 单Agent Coach 题卡已登记测评会话: {eval_sid[:8]}... ({len(questions)} 题)")
+        return eval_sid
+
+    return None
+
+
 # LA-040-P2: 评测历史读取 API
 class EvalHistoryItem(BaseModel):
     """评测历史条目"""
@@ -1963,7 +2316,7 @@ def get_evaluation_history(
     LA-040-P2: 获取用户的评测历史列表。
     LA-050-Phase4: 支持 X-User-ID Header 实现用户隔离。
     """
-    effective_user_id = x_user_id or user_id or "default"
+    effective_user_id = _resolve_legacy_user_id(x_user_id, authorization, user_id)
     # LA-050-Phase4: 使用用户隔离的 state_store 路径
     store = _get_isolated_state_store(effective_user_id)
     db_path = store.db_path
@@ -2411,17 +2764,48 @@ def save_to_quiz_bank(request: QuizBankSaveRequest):
     """
     保存题目到题库。
     生成题目后，用户可以选择保留的题目加入题库。
+
+    LA-UI-001: 按归一化题干去重——已在题库中的题目跳过不存，
+    响应中返回 skipped/skipped_questions 供前端提示。
     """
+    incoming = [q.model_dump() for q in request.questions]
+    dup_flags = qb_check_duplicates(
+        [q.get("question", "") for q in incoming], subject=request.subject
+    )
+    to_save = [q for q, dup in zip(incoming, dup_flags) if not dup]
+    skipped = [q.get("question", "") for q, dup in zip(incoming, dup_flags) if dup]
+
     ids = qb_batch_save(
-        questions=[q.model_dump() for q in request.questions],
+        questions=to_save,
         subject=request.subject,
         topic=request.topic,
         is_approved=request.is_approved,
-    )
+    ) if to_save else []
+
+    message = f"成功保存 {len(ids)} 道题目到题库"
+    if skipped:
+        message += f"，跳过 {len(skipped)} 道已存在的重复题目"
     return {
         "saved": len(ids),
         "question_ids": ids,
-        "message": f"成功保存 {len(ids)} 道题目到题库",
+        "skipped": len(skipped),
+        "skipped_questions": skipped,
+        "message": message,
+    }
+
+
+# LA-UI-001: 题库重复检查（题卡保存前预检，标注"已在题库"）
+class QuizBankCheckRequest(BaseModel):
+    """题库重复检查请求"""
+    subject: str = "generic"
+    questions: List[str] = Field(..., description="题干文本列表")
+
+
+@app.post("/api/quiz-bank/check")
+def check_quiz_bank_duplicates(request: QuizBankCheckRequest):
+    """逐题检查题干是否已存在于题库，返回等长布尔列表。"""
+    return {
+        "duplicates": qb_check_duplicates(request.questions, subject=request.subject)
     }
 
 
@@ -2454,6 +2838,13 @@ def list_quiz_bank(
                 options=q.get("options", []),
                 answer=q["answer"],
                 explanation=q.get("explanation", ""),
+                # LA-UI-001: 题库列表管理字段
+                topic=q.get("topic", ""),
+                bloom_level=q.get("bloom_level"),
+                is_approved=bool(q.get("is_approved", 0)),
+                used_count=q.get("used_count", 0),
+                correct_rate=q.get("correct_rate", 0.0),
+                created_at=q.get("created_at", ""),
             )
             for q in questions
         ],
@@ -3239,6 +3630,8 @@ def build_knowledge_graph(
     body = body or {}
     paradigm = body.get("paradigm", "theory")
     force_rebuild = body.get("force_rebuild", False)
+    with_dedupe = body.get("with_dedupe", True)
+    granularity = body.get("granularity", "medium")
     llm_provider = body.get("llm_provider")  # LA-ROBUST: 支持切换 LLM 提供商
 
     try:
@@ -3256,6 +3649,9 @@ def build_knowledge_graph(
             builder = GraphBuilder(f"{subject}_v1", paradigm=paradigm,
                                    llm_provider=llm_provider)
         result = builder.build_all(force_rebuild=force_rebuild)
+        # Granularity is currently a recorded build option; extraction policy
+        # changes remain a separate follow-up implementation.
+        result["granularity"] = granularity
 
         # Phase 2: 如果传入了 paradigm（非默认 theory 或明确请求），自动执行语义层
         semantic_result = None
@@ -3263,14 +3659,16 @@ def build_knowledge_graph(
         link_result = None
         if body.get("with_semantic", True):
             semantic_result = builder.extract_all_concepts()
-            dedupe_result = builder.dedupe_concepts()
+            if with_dedupe:
+                dedupe_result = builder.dedupe_concepts()
             # Phase 2.5: 构建语义连接
             link_result = builder.link_concepts(paradigm=paradigm)
 
         # Phase 2.6: 计算图中心性（PageRank）- 非阻塞
         try:
-            from core.graph_store import GraphStore as _GS
-            _store = _GS(f"{subject}_v1")
+            # Reuse the builder's graph store so PageRank is computed for the
+            # same user-scoped database that received the build output.
+            _store = builder.graph_store
             _store.init_schema()
             _centrality_cache = _store.compute_and_cache_centrality()
             print(f"[build_knowledge_graph] P0-INT-5: PageRank 缓存已更新，{len(_centrality_cache)} 个节点")
@@ -3503,7 +3901,9 @@ def get_subgraph(
         raise HTTPException(status_code=500, detail=f"子图查询失败: {str(e)}")
 
 
-# ==================== LA-035: 图片静态文件服务 ====================
+# ==================== LA-035 + LA-MEDIA-UNIFY: 图片静态文件服务 ====================
+# LA-MEDIA-UNIFY: /api/images/ 和 /api/media/ 统一底层实现，
+# 所有媒体资源最终都通过 /api/media/{path} 访问。
 
 @app.get("/api/images/{subject}/{filename}")
 def get_image(
@@ -3511,79 +3911,43 @@ def get_image(
     filename: str,
     x_user_id: Optional[str] = Header(None, alias="X-User-ID"),
     authorization: Optional[str] = Header(None),
+    access_token: Optional[str] = Query(None),
 ):
     """
-    提供学科知识库中的图片文件访问。
-    LA-051-STRUCT: 使用新目录结构（学科内聚）
-    LA-060-FIX: 修复图片路径解析，支持跨用户目录查找
+    LA-MEDIA-UNIFY: /api/images/ 现在复用 /api/media/ 的底层查找逻辑。
+    保留此路由仅用于向后兼容（NodeDetailPanel 等旧代码）。
     
-    路径: /api/images/<subject>/<filename>
+    内部通过 media_resolver.find_media_file 查找文件，然后返回 FileResponse。
     """
-    from config.settings import get_subject_images_dir, get_subject_thumbnails_dir, USERS_KB_DIR
+    from core.media_resolver import find_media_file
+
+    if not authorization and access_token:
+        authorization = f"Bearer {access_token}"
     effective_user_id = get_current_user_id(x_user_id, authorization)
     
     # 安全检查：防止目录遍历
     safe_filename = Path(filename).name
     
-    # LA-060-FIX: 先获取学科信息，确定 owner_id
-    subj = _get_subject_anywhere(subject, effective_user_id)
-    owner_id = subj.get("owner_id") if subj else None
+    # 使用统一查找器搜索文件
+    file_path = find_media_file(
+        safe_filename,
+        subject=subject,
+        user_id=effective_user_id,
+    )
     
-    # 1. 优先查找当前登录用户的私有目录
-    if effective_user_id != "default":
-        ctx = _get_user_context_from_header(effective_user_id)
-        user_img_dir = ctx.get_user_images_dir(subject)
-        user_img = user_img_dir / safe_filename
-        if user_img.exists():
-            return FileResponse(str(user_img))
-        
-        user_thumb_dir = ctx.get_user_thumbnails_dir(subject)
-        user_thumb = user_thumb_dir / safe_filename
-        if user_thumb.exists():
-            return FileResponse(str(user_thumb))
+    if file_path and file_path.exists():
+        return FileResponse(str(file_path))
     
-    # 2. LA-060-FIX: 查找学科 owner 的私有目录（图片可能存储在 owner 目录中）
-    if owner_id and owner_id != "system" and owner_id != effective_user_id:
-        try:
-            from core.user_context import UserContext
-            owner_ctx = UserContext(owner_id)
-            owner_img_dir = owner_ctx.get_user_images_dir(subject)
-            owner_img = owner_img_dir / safe_filename
-            if owner_img.exists():
-                return FileResponse(str(owner_img))
-            
-            owner_thumb_dir = owner_ctx.get_user_thumbnails_dir(subject)
-            owner_thumb = owner_thumb_dir / safe_filename
-            if owner_thumb.exists():
-                return FileResponse(str(owner_thumb))
-        except Exception as e:
-            print(f"[get_image] 查找 owner 目录失败: {e}")
+    # 回退：尝试直接走 /api/media/ 路由（重定向）
+    # 构建一个可能的相对路径，让 serve_media 处理
+    fallback_path = f"Share/{subject}/media/images/{safe_filename}"
+    print(f"[get_image] 文件未找到，回退到 /api/media/{fallback_path}")
     
-    # 3. Fallback: 共享目录（新结构）
-    share_img_dir = get_subject_images_dir(subject)
-    img_path = share_img_dir / safe_filename
-    if img_path.exists():
-        return FileResponse(str(img_path))
-    
-    share_thumb_dir = get_subject_thumbnails_dir(subject)
-    thumb_path = share_thumb_dir / safe_filename
-    if thumb_path.exists():
-        return FileResponse(str(thumb_path))
-    
-    # 4. LA-060-FIX: 最后尝试遍历所有用户的私有目录（兜底）
-    try:
-        if USERS_KB_DIR.exists():
-            for user_dir in USERS_KB_DIR.iterdir():
-                if not user_dir.is_dir():
-                    continue
-                user_img = user_dir / subject / "media" / "images" / safe_filename
-                if user_img.exists():
-                    return FileResponse(str(user_img))
-                user_thumb = user_dir / subject / "media" / "thumbnails" / safe_filename
-                if user_thumb.exists():
-                    return FileResponse(str(user_thumb))
-    except Exception as e:
-        print(f"[get_image] 遍历用户目录失败: {e}")
+    # 手动调用 serve_media 的逻辑（避免 HTTP 重定向）
+    from config.settings import KNOWLEDGE_BASE_DIR
+    full_path = KNOWLEDGE_BASE_DIR / fallback_path.replace('/', os.sep)
+    if full_path.exists():
+        return FileResponse(str(full_path))
     
     raise HTTPException(status_code=404, detail=f"图片不存在: {filename}")
 
@@ -3727,12 +4091,13 @@ def list_graph_concepts(
     """
     effective_user_id = get_current_user_id(x_user_id, authorization)
     import csv
-    from config.settings import KNOWLEDGE_BASE_DIR
     from core.graph_store import GraphStore
 
     try:
         # 1. 从 CSV 读取额外字段（description, parent_hint）
-        csv_path = KNOWLEDGE_BASE_DIR / f"{subject}_v1_concepts.csv"
+        # LA-051-DIR-FIX: 使用 graph_store.data_dir 学科内聚路径
+        graph_store = _get_accessible_graph_store(subject, effective_user_id)
+        csv_path = graph_store.data_dir / "concepts.csv"
         csv_data = {}
         if csv_path.exists():
             with open(csv_path, "r", encoding="utf-8") as f:
@@ -3751,7 +4116,6 @@ def list_graph_concepts(
 
         # 2. 从 KùzuDB 读取概念节点（确保 ID 与边一致）
         # LA-051-P1-FIX: 使用权限感知的 GraphStore
-        graph_store = _get_accessible_graph_store(subject, effective_user_id)
         graph_store.init_schema()
         db_nodes = graph_store.get_canonical_concepts(limit=limit)
 
@@ -4450,6 +4814,13 @@ def get_session_messages(
                 "time": row[5],
                 "sources": metadata.get("sources", []),
                 "media": metadata.get("media", []),
+                # LA-UI-001 M1: 题卡恢复数据（历史会话重新渲染 QuestionCard）
+                "questions": metadata.get("questions"),
+                "topic": metadata.get("topic"),
+                # LA-UI-001 M2: 评测结果卡片恢复数据（历史会话重新渲染 ResultCard）
+                "eval_result": metadata.get("eval_result"),
+                # LA-UI-001 M3: 分享卡片恢复数据（历史会话重新渲染 ConceptCard）
+                "card": metadata.get("card"),
             })
         return {"session_id": session_id, "messages": messages}
     except HTTPException:
@@ -4526,7 +4897,12 @@ def delete_dialog_session(
 # ========== LA-035: 媒体文件静态服务 ==========
 
 @app.get("/api/media/{path:path}")
-def serve_media(path: str, x_user_id: Optional[str] = Header(None, alias="X-User-ID"), authorization: Optional[str] = Header(None)):
+def serve_media(
+    path: str,
+    x_user_id: Optional[str] = Header(None, alias="X-User-ID"),
+    authorization: Optional[str] = Header(None),
+    access_token: Optional[str] = Query(None),
+):
     """
     提供知识库中的图片等媒体文件的静态访问。
     LA-050-Phase5: 支持 X-User-ID Header，优先查找用户私有目录。
@@ -4538,6 +4914,10 @@ def serve_media(path: str, x_user_id: Optional[str] = Header(None, alias="X-User
     import os
     from config.settings import KNOWLEDGE_BASE_DIR
     
+    # Browser <img> requests cannot attach Authorization headers. Validate a
+    # media-only query token through the same authentication path.
+    if not authorization and access_token:
+        authorization = f"Bearer {access_token}"
     effective_user_id = get_current_user_id(x_user_id, authorization)
     
     # 解码 URL 编码
@@ -4551,25 +4931,94 @@ def serve_media(path: str, x_user_id: Optional[str] = Header(None, alias="X-User
     if effective_user_id != "default":
         try:
             # LA-051-DIR: 使用 settings.py 统一路径入口
-            from config.settings import get_user_subject_dir
-            user_kb = get_user_subject_dir(effective_user_id, "")  # 获取用户知识库根
-            user_path = user_kb / normalized_path
+            from config.settings import get_user_root_dir
+            user_kb = get_user_root_dir(effective_user_id)  # 只获取用户知识库根，不创建伪学科目录
+            # Media records may contain either a user-root-relative path
+            # (media/images/...) or a knowledge-base-relative path
+            # (Users/<user>/media/images/...). Normalize both forms.
+            relative_path = Path(normalized_path)
+            user_prefix = Path("Users") / effective_user_id
+            if relative_path.parts[:2] == user_prefix.parts:
+                relative_path = Path(*relative_path.parts[2:])
+            user_path = user_kb / relative_path
             user_path = user_path.resolve()
-            if user_path.exists() and user_path.is_file():
+            user_root = user_kb.resolve()
+            if user_root in user_path.parents and user_path.exists() and user_path.is_file():
                 print(f"[API] LA-IMG: 200 返回用户文件: {user_path}")
                 return FileResponse(user_path)
+
+            # 兼容旧的仅文件名引用，但只在当前用户自己的学科目录内查找。
+            from core.media_resolver import find_media_file
+            legacy_candidate = find_media_file(Path(normalized_path).name, user_id=effective_user_id)
+            if legacy_candidate is not None:
+                print(f"[API] LA-IMG: 200 用户媒体文件名命中: {legacy_candidate}")
+                return FileResponse(legacy_candidate)
         except Exception as e:
             print(f"[API] LA-IMG: 用户目录查找失败: {e}")
+
+    # MEDIA-P2-1: 授权用户访问 owner 私有学科的媒体文件。
+    # 设计结论：授权 ≠ 公开 ≠ 数据迁移。私有学科被授权后仍是私有、仍属创建者，
+    # 数据物理位置仍在 Users/<owner>/ 下；这里只对通过 can_read 校验的请求放行，
+    # 与 _get_accessible_vector_store/_get_accessible_graph_store 同一套权限逻辑。
+    path_parts = Path(normalized_path).parts
+    if len(path_parts) >= 3 and path_parts[0] == "Users" and path_parts[1] != effective_user_id:
+        owner_id = path_parts[1]
+        media_subject_id = path_parts[2]
+        from core.permission_manager import PermissionManager
+        from config.settings import USERS_KB_DIR
+        subj = _get_subject_anywhere(media_subject_id, effective_user_id)
+        subj_owner = subj.get("owner_id", owner_id) if subj else owner_id
+        subj_visibility = subj.get("visibility", "private") if subj else "private"
+        if PermissionManager().can_read(effective_user_id, media_subject_id, subj_owner, subj_visibility):
+            owner_root = (USERS_KB_DIR / owner_id).resolve()
+            target = (owner_root / Path(*path_parts[2:])).resolve()
+            if owner_root in target.parents and target.is_file():
+                print(f"[API] MEDIA-P2-1: 200 授权访问 owner 媒体: {target} (user={effective_user_id})")
+                return FileResponse(target)
+            # 有权限但文件不存在：落到后面的 Share 兜底/404
+        else:
+            print(f"[API] MEDIA-P2-1: 403 无权访问私有媒体: user={effective_user_id}, path={decoded_path}")
+            raise HTTPException(status_code=403, detail="无权访问该私有媒体")
     
-    # Fallback: 共享目录
-    full_path = KNOWLEDGE_BASE_DIR / normalized_path
+    # Fallback: 共享目录（旧结构兼容）
+    # Unauthenticated and cross-user fallback is limited to public Share/.
+    full_path = KNOWLEDGE_BASE_DIR / "Share" / normalized_path
     print(f"[API] LA-IMG: 解析路径: {full_path}")
     
+    # LA-051-STRUCT-FIX: 文件可能在 Share/{subject}/media/ 新结构下
+    # 当直接路径找不到时，遍历 Share 下的学科目录查找
+    if not full_path.exists():
+        from config.settings import get_subject_images_dir, get_subject_thumbnails_dir
+        # 尝试所有学科的 images 和 thumbnails 目录
+        share_dir = KNOWLEDGE_BASE_DIR / "Share"
+        if share_dir.exists():
+            for subject_dir in share_dir.iterdir():
+                if not subject_dir.is_dir():
+                    continue
+                # 检查 media/images/
+                img_dir = subject_dir / "media" / "images"
+                if img_dir.exists():
+                    candidate = img_dir / Path(normalized_path).name
+                    if candidate.exists() and candidate.is_file():
+                        print(f"[API] LA-IMG: 200 Share结构命中: {candidate}")
+                        return FileResponse(candidate)
+                # 检查 media/thumbnails/
+                thumb_dir = subject_dir / "media" / "thumbnails"
+                if thumb_dir.exists():
+                    candidate = thumb_dir / Path(normalized_path).name
+                    if candidate.exists() and candidate.is_file():
+                        print(f"[API] LA-IMG: 200 Share结构命中(thumb): {candidate}")
+                        return FileResponse(candidate)
+        # ENG-P2-4: 原"Users/ 私有目录兜底遍历"已删除。
+        # 私有媒体跨用户访问一律走上方 MEDIA-P2-1 的 can_read 校验路径，
+        # 不再保留 if False 死代码。
+
     # 安全检查：确保路径在知识库目录内（防止目录遍历攻击）
     try:
         full_path = full_path.resolve()
         kb_root = KNOWLEDGE_BASE_DIR.resolve()
-        if not str(full_path).startswith(str(kb_root)):
+        share_root = (KNOWLEDGE_BASE_DIR / "Share").resolve()
+        if not full_path.is_relative_to(kb_root) or not full_path.is_relative_to(share_root):
             print(f"[API] LA-IMG: 403 路径越界: {full_path}")
             raise HTTPException(status_code=403, detail="Forbidden: path outside knowledge base")
     except Exception:
@@ -4750,6 +5199,7 @@ def _get_accessible_vector_store(subject_id: str, user_id: str):
         return VectorStore(f"{subject_id}_v1")
     
     owner_id = subj.get("owner_id", "system")
+    visibility = subj.get("visibility", "public")
     pm = PermissionManager()
     
     if not pm.can_read(user_id, subject_id, owner_id):
@@ -4758,10 +5208,9 @@ def _get_accessible_vector_store(subject_id: str, user_id: str):
     # 2. 判断使用哪个用户的数据目录
     # LA-051-DIR: 只有 owner 使用自己的目录。
     # Maintainer/Contributor/Reader 都访问 owner 的数据（权限控制是逻辑层面的，数据物理位置统一在 owner 目录）。
-    if user_id == owner_id:
-        data_user_id = user_id
-    else:
-        data_user_id = owner_id
+    # Public subjects are stored in Share; private subjects are stored under
+    # their owner's user directory regardless of who is reading them.
+    data_user_id = owner_id if visibility == "private" else None
     
     # 3. 构建路径并返回 VectorStore（LA-051-DIR: 学科内聚路径）
     from config.settings import get_subject_vector_db_path
@@ -4795,16 +5244,14 @@ def _get_accessible_graph_store(subject_id: str, user_id: str):
         return GraphStore(f"{subject_id}_v1")
     
     owner_id = subj.get("owner_id", "system")
+    visibility = subj.get("visibility", "public")
     pm = PermissionManager()
     
     if not pm.can_read(user_id, subject_id, owner_id):
         raise HTTPException(status_code=403, detail="无权访问该学科")
     
     # 2. 判断使用哪个用户的数据目录
-    if user_id == owner_id:
-        data_user_id = user_id
-    else:
-        data_user_id = owner_id
+    data_user_id = owner_id if visibility == "private" else None
     
     # 3. 构建路径并返回 GraphStore（LA-051-DIR: 学科内聚路径）
     from config.settings import get_subject_graph_db_path
@@ -4922,7 +5369,8 @@ def _save_user_state_after_dialog(user_id: str, request: AskRequest, result: Dic
 def get_user_state(
     user_id: str = "anonymous",  # LA-051-FIX: 添加默认值防止 422
     subject: str = "generic",
-    x_user_id: Optional[str] = Header(None, alias="X-User-ID")
+    x_user_id: Optional[str] = Header(None, alias="X-User-ID"),
+    authorization: Optional[str] = Header(None),
 ):
     """
     LA-044-#3: 获取用户完整状态（全局画像 + 概念级别知识状态）
@@ -4943,7 +5391,7 @@ def get_user_state(
         }
     """
     # LA-050-Phase4: 优先使用 Header 中的 user_id
-    effective_user_id = x_user_id or user_id or "default"
+    effective_user_id = _resolve_legacy_user_id(x_user_id, authorization, user_id)
     print(f"\n[API] LA-044-#3/LA-050: GET /api/user-state | user_id={effective_user_id}, subject={subject}")
 
     if not effective_user_id:
@@ -4967,7 +5415,8 @@ def get_user_state(
 @app.post("/api/user-state")
 def update_user_state(
     request: UserStateUpdateRequest,
-    x_user_id: Optional[str] = Header(None, alias="X-User-ID")
+    x_user_id: Optional[str] = Header(None, alias="X-User-ID"),
+    authorization: Optional[str] = Header(None),
 ):
     """
     LA-044-#3: 更新用户全局画像（theta + 薄弱点）
@@ -4985,7 +5434,7 @@ def update_user_state(
         {"success": true, "message": "..."}
     """
     # LA-050-Phase4: 优先使用 Header 中的 user_id
-    effective_user_id = x_user_id or request.user_id or "default"
+    effective_user_id = _resolve_legacy_user_id(x_user_id, authorization, request.user_id)
     print(f"\n[API] LA-044-#3/LA-050: POST /api/user-state | user_id={effective_user_id}, subject={request.subject}")
     print(f"[API] LA-044-#3: 请求数据: theta={request.global_theta}, weak_areas={request.weak_areas}")
 
@@ -5047,7 +5496,8 @@ def get_visualization_bars(
     sort: str = "mastery_asc",
     limit: int = 20,
     filter_status: str = "all",
-    x_user_id: Optional[str] = Header(None, alias="X-User-ID")
+    x_user_id: Optional[str] = Header(None, alias="X-User-ID"),
+    authorization: Optional[str] = Header(None),
 ):
     """
     LA-040-P1-VIS Phase 1: 获取能力条形图数据
@@ -5065,7 +5515,7 @@ def get_visualization_bars(
         各概念的掌握度条形数据，含统计摘要
     """
     # LA-050-Phase4: 优先使用 Header 中的 user_id
-    effective_user_id = x_user_id or user_id or "default"
+    effective_user_id = _resolve_legacy_user_id(x_user_id, authorization, user_id)
     print(f"\n[API] LA-040-P1-VIS/LA-050: GET /api/visualization/bars | user={effective_user_id}, subject={subject}, sort={sort}, filter={filter_status}")
 
     try:
@@ -5232,13 +5682,14 @@ def get_progress_chart(
     user_id: str = "default",
     subject: str = "generic",
     days: int = 30,
-    x_user_id: Optional[str] = Header(None, alias="X-User-ID")
+    x_user_id: Optional[str] = Header(None, alias="X-User-ID"),
+    authorization: Optional[str] = Header(None),
 ):
     """
     LA-040-P2: 获取进步曲线数据。
     LA-050-Phase4: 支持 X-User-ID Header 实现用户隔离。
     """
-    effective_user_id = x_user_id or user_id or "default"
+    effective_user_id = _resolve_legacy_user_id(x_user_id, authorization, user_id)
     print(f"[DIAG-ENTER] get_progress_chart called with user_id={effective_user_id}, subject={subject}, days={days}")
     
     from datetime import datetime, timedelta
@@ -5291,7 +5742,7 @@ def get_progress_chart(
             elif second_half < first_half - 0.05:
                 trend = "declining"
 
-        print(f"[API] LA-040-P2: GET /api/visualization/progress | user={user_id}, points={len(data_points)}, trend={trend}")
+        print(f"[API] LA-040-P2: GET /api/visualization/progress | user={effective_user_id}, points={len(data_points)}, trend={trend}")
 
         return ProgressResponse(
             user_id=effective_user_id,
@@ -5333,7 +5784,7 @@ def get_wrong_answers(
         limit/offset: 分页
     """
     # LA-050-Phase4-FIX: 使用用户隔离的 state_store 路径
-    effective_user_id = x_user_id or user_id or "default"
+    effective_user_id = _resolve_legacy_user_id(x_user_id, authorization, user_id)
     store = _get_isolated_state_store(effective_user_id)
     db_path = store.db_path
     subject_id = f"{subject}_v1"
@@ -5502,9 +5953,10 @@ class BloomRadarResponse(BaseModel):
 def get_bloom_radar(
     user_id: str = "default",
     subject: str = "generic",
-    x_user_id: Optional[str] = Header(None, alias="X-User-ID")
+    x_user_id: Optional[str] = Header(None, alias="X-User-ID"),
+    authorization: Optional[str] = Header(None),
 ):
-    effective_user_id = x_user_id or user_id or "default"
+    effective_user_id = _resolve_legacy_user_id(x_user_id, authorization, user_id)
     """
     LA-040-P3: 获取 Bloom 认知层次雷达图数据。
 
@@ -5678,9 +6130,10 @@ class RecommendationsResponse(BaseModel):
 def get_recommendations(
     user_id: str = "default",
     subject: str = "generic",
-    x_user_id: Optional[str] = Header(None, alias="X-User-ID")
+    x_user_id: Optional[str] = Header(None, alias="X-User-ID"),
+    authorization: Optional[str] = Header(None),
 ):
-    effective_user_id = x_user_id or user_id or "default"
+    effective_user_id = _resolve_legacy_user_id(x_user_id, authorization, user_id)
     """
     LA-040-P3: 获取基于薄弱点的学习建议。
 

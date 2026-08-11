@@ -24,7 +24,13 @@ import yaml
 
 
 
-from config.settings import GRAPH_DB_DIR, PROJECT_ROOT, KNOWLEDGE_BASE_DIR
+from config.settings import (
+    GRAPH_DB_DIR,
+    PROJECT_ROOT,
+    KNOWLEDGE_BASE_DIR,
+    get_subject_graph_db_path,
+    migrate_legacy_graph_db,
+)
 
 
 
@@ -180,16 +186,28 @@ class GraphStore:
         Args:
             collection_name: 学科集合名（如"ai_llm_v2"）
             db_path: 可选自定义数据库路径（LA-050-Phase3: 用户隔离）
+                     如未提供，自动使用学科内聚路径（LA-051-DIR-FIX）
         """
         self.collection_name = collection_name
-        # LA-050-Phase3: 支持自定义 db_path（用户隔离）
         if db_path:
             self.db_path = Path(db_path)
+            is_subject_graph_path = self.db_path.parent.name == "graph"
         else:
-            self.db_path = GRAPH_DB_DIR / f"{collection_name}_graph"
+            # LA-051-DIR-FIX: 默认使用学科内聚路径（Share/），替代旧扁平路径 GRAPH_DB_DIR
+            subject_id = collection_name.removesuffix("_v1")
+            self.db_path = get_subject_graph_db_path(subject_id)
+            print(f"[GraphStore] LA-051-DIR-FIX: 使用学科内聚路径 | {self.db_path}")
+            is_subject_graph_path = True
+        subject_dir = (
+            self.db_path.parent.parent
+            if is_subject_graph_path
+            else self.db_path.parent
+        )
+        if is_subject_graph_path:
+            migrate_legacy_graph_db(subject_dir)
         self.db_path_str = str(self.db_path)  # LA-035-P12: 统一使用字符串缓存 key
-
-        self._db = None
+        # LA-051-DIR-FIX: data_dir 是 graph db 的父目录（学科根目录），用于存放知识图谱相关文件
+        self.data_dir = subject_dir
         self._conn = None
         # LA-055: 懒加载 CycleDetector（首次使用时从现有图谱构建）
         self._cycle_detector = None
@@ -244,11 +262,10 @@ class GraphStore:
         用于学科删除时清理图数据库。等价于 init_schema(force=True)。
         """
         import shutil
-        with _db_cache_lock:
-            if self.db_path_str in _db_cache:
-                del _db_cache[self.db_path_str]
-        self._db = None
-        self._conn = None
+        # SUBJECT-DELETE-FIX: 先关闭本实例连接，再关闭并移除共享缓存 Database
+        # （释放 Windows 文件锁，避免 rmtree 部分失败留下残留节点）
+        self.close()
+        GraphStore.close_cached_database(self.db_path_str)
         self._reset_cycle_detector()  # LA-055: 数据库删除后重置环检测器
         if self.db_path.exists():
             if self.db_path.is_dir():
@@ -407,7 +424,7 @@ class GraphStore:
 
 
 
-        # 检查是否已存在 Chunk 表（避免重复创建??    
+        # 检查是否已存在 Chunk 表（避免重复创建??
 
         try:
 
@@ -571,7 +588,7 @@ class GraphStore:
 
         """
 
-        安全转义 Cypher 字符串中的特殊字符??        
+        安全转义 Cypher 字符串中的特殊字符??
 
         Kùzu Cypher 对字符串中的特殊字符敏感，需要：
 
@@ -626,14 +643,14 @@ class GraphStore:
         """
         if not media_refs:
             return []
-        
+
         cleaned = []
         for ref in media_refs:
             if not isinstance(ref, dict):
                 continue
-            
+
             ref_copy = dict(ref)
-            
+
             # LA-051-DIR: 有效路径：包含 _v1_images/ _v1_thumbnails/ (旧) 或 media/images/ media/thumbnails/ (新)
             rel_path = ref_copy.get("relative_path", "")
             path_val = ref_copy.get("path", "")
@@ -649,14 +666,14 @@ class GraphStore:
                 # 用 relative_path 替代（避免 Windows 路径跨平台问题）
                 ref_copy["path"] = rel_path
             # 否则保留 path 原值（防止 MinerU 原始文件名如 "RAG运行流程与架构.png" 覆盖实际路径）
-            
+
             # 清理所有路径字段中的反斜杠
             for key in ["path", "thumbnail_path", "relative_path"]:
                 if key in ref_copy and isinstance(ref_copy[key], str):
                     ref_copy[key] = ref_copy[key].replace("\\", "/")
-            
+
             cleaned.append(ref_copy)
-        
+
         return cleaned
 
 
@@ -749,7 +766,7 @@ class GraphStore:
             media_refs_raw = meta.get("media_refs", []) or meta.get("image_refs", [])
             # LA-035-P27-fix: 清理路径格式（relative_path 优先，反斜杠替换为正斜杠）
             media_refs_raw = self._sanitize_media_refs(media_refs_raw)
-            
+
             # LA-035-P18-fix: 如果 media_refs 为空但 image_path 存在，
             # 自动从 image_path 构建 media_refs（兼容 DocumentProcessor 生成的 chunk）
             if not media_refs_raw and image_path and image_path != "":
@@ -761,7 +778,7 @@ class GraphStore:
                     "width": width or 0,
                     "height": height or 0,
                 }]
-            
+
             # LA-035-P26: 用 _escape_cypher_string_safe 保留 JSON 中的反斜杠
             media_refs_json = self._escape_cypher_string_safe(
                 json.dumps(media_refs_raw, ensure_ascii=False) if media_refs_raw else ""
@@ -1061,9 +1078,8 @@ class GraphStore:
         return pagerank
 
     def _get_centrality_cache_path(self):
-        """获取 PageRank 缓存文件路径（LA-DEPLOY: 使用 KNOWLEDGE_BASE_DIR 替代硬编码路径）"""
-        from config.settings import KNOWLEDGE_BASE_DIR
-        return KNOWLEDGE_BASE_DIR / f"{self.collection_name}_centrality_cache.json"
+        """获取 PageRank 缓存文件路径（LA-051-DIR-FIX: 使用学科内聚路径）"""
+        return self.data_dir / "centrality_cache.json"
 
     def _get_centrality_cache(self) -> Dict[str, float]:
         import json
@@ -1664,19 +1680,15 @@ class GraphStore:
 
         import json
 
-        from config.settings import KNOWLEDGE_BASE_DIR
+
+
+        # LA-051-DIR-FIX: 使用学科内聚路径（与 graph db 同目录）
+        details_path = self.data_dir / "concept_details.jsonl"
+        details_path.parent.mkdir(parents=True, exist_ok=True)
 
 
 
-        details_dir = KNOWLEDGE_BASE_DIR / "concept_details"
-
-        details_dir.mkdir(parents=True, exist_ok=True)
-
-        details_path = details_dir / f"{self.collection_name}.jsonl"
-
-
-
-        # 追加写入（每??chunk 一??JSON??    
+        # 追加写入（每??chunk 一??JSON??     
 
         with open(details_path, "a", encoding="utf-8") as f:
 
@@ -1727,12 +1739,10 @@ class GraphStore:
 
         import json
 
-        from config.settings import KNOWLEDGE_BASE_DIR
 
 
-
-        details_path = KNOWLEDGE_BASE_DIR / "concept_details" / f"{self.collection_name}.jsonl"
-
+        # LA-051-DIR-FIX: 使用学科内聚路径
+        details_path = self.data_dir / "concept_details.jsonl"
         if not details_path.exists():
 
             return {}
@@ -1797,7 +1807,8 @@ class GraphStore:
 
         concepts = []
 
-
+        # ENG-P2-3: 外部传入的 chunk_id 统一转义后再拼接 Cypher
+        chunk_id = self._escape_cypher_string(chunk_id)
 
         # 查询 Chunk -> ExtractedConcept 的 HAS_CONCEPT 关系
 
@@ -1859,7 +1870,8 @@ class GraphStore:
 
         nodes = []
 
-
+        # ENG-P2-3: limit 强制 int，杜绝字符串拼接注入
+        limit = int(limit)
 
         try:
             # LA-035: 兼容旧数据库（可能缺少 media_refs 字段）
@@ -2041,6 +2053,9 @@ class GraphStore:
         conn = self._ensure_db()
         nodes = []
 
+        # ENG-P2-3: limit 强制 int，杜绝字符串拼接注入
+        limit = int(limit)
+
         try:
             # LA-035: 兼容旧数据库（可能缺少 media_refs 字段）
             try:
@@ -2121,6 +2136,8 @@ class GraphStore:
 
         edges = []
 
+        # ENG-P2-3: limit 强制 int，杜绝字符串拼接注入
+        limit = int(limit)
 
 
         # 查询 Chunk -(HAS_CONCEPT)-> ExtractedConcept
@@ -2298,6 +2315,9 @@ class GraphStore:
         """
         conn = self._ensure_db()
         edges = []
+        # ENG-P2-3: limit 强制 int，杜绝字符串拼接注入
+        limit = int(limit)
+
         try:
             result = self._execute(conn, f"""
                 MATCH (a:CanonicalConcept)-[r:HAS_DETAIL]->(b:CanonicalConcept)
@@ -2318,11 +2338,34 @@ class GraphStore:
 
     def close(self):
 
-        """关闭数据库连接??"""
+        """关闭本实例的连接（真正释放 KùzuDB 句柄）。"""
 
+        try:
+            if self._conn is not None:
+                self._conn.close()
+        except Exception:
+            pass
         self._conn = None
 
         self._db = None
+
+    @classmethod
+    def close_cached_database(cls, db_path_str: str) -> bool:
+        """关闭并移除全局缓存中的共享 Database。
+
+        SUBJECT-DELETE-FIX: Windows 上 KùzuDB 文件被打开的 Database 锁定时，
+        delete_all 的 rmtree 会部分失败（留下损坏的库：节点残留、边丢失）。
+        删除学科前必须先关闭对应路径的共享 Database 释放文件锁。
+        """
+        with _db_cache_lock:
+            db = _db_cache.pop(db_path_str, None)
+        if db is not None:
+            try:
+                db.close()
+            except Exception:
+                pass
+            return True
+        return False
 
 
 

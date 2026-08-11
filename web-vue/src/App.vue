@@ -4,7 +4,7 @@
     <LoginGuard v-if="showLoginGuard" @success="onLoginSuccess" />
 
     <!-- LA-DEPLOY: 首次启动配置向导 -->
-    <SetupWizard v-model="showSetupWizard" @configured="onSetupConfigured" />
+    <SetupWizard v-if="isSystemAdmin" v-model="showSetupWizard" @configured="onSetupConfigured" />
 
     <!-- Trae 式三栏布局 -->
     <AppLayout
@@ -46,7 +46,7 @@ const themeState = useTheme()
 provide('themeState', themeState)
 
 // 用户状态
-const { isAuthenticated, currentUser } = useUser()
+const { isAuthenticated, isSystemAdmin, currentUser } = useUser()
 
 // ========== 布局引用 ==========
 
@@ -63,8 +63,9 @@ onMounted(() => {
 
 const showLoginGuard = ref(false)
 
-function onLoginSuccess() {
+async function onLoginSuccess() {
   showLoginGuard.value = false
+  await checkSetupStatus()
 }
 
 // ========== 配置向导 ==========
@@ -77,8 +78,23 @@ function onSetupConfigured() {
 }
 
 function openSettings() {
+  if (!isSystemAdmin.value) {
+    window.alert('仅系统管理员可以修改 API 配置')
+    return
+  }
   console.log('[App] 用户打开设置向导')
   showSetupWizard.value = true
+}
+
+async function checkSetupStatus() {
+  try {
+    const resp = await fetch('/api/setup/status')
+    if (!resp.ok) return
+    const status = await resp.json()
+    showSetupWizard.value = !!status.is_first_run && isSystemAdmin.value
+  } catch (e) {
+    console.error('检查首次启动状态失败:', e)
+  }
 }
 
 // ========== 学科列表加载 ==========
@@ -110,17 +126,8 @@ onMounted(async () => {
     showLoginGuard.value = true
   }
 
-  // LA-DEPLOY: 检查是否为首次启动
-  try {
-    const resp = await fetch('/api/setup/status')
-    const status = await resp.json()
-    if (status.is_first_run) {
-      console.log('[App] 首次启动，显示配置向导')
-      showSetupWizard.value = true
-    }
-  } catch (e) {
-    console.error('检查首次启动状态失败:', e)
-  }
+  // AUTH-P0-2: 只有系统管理员可以进入首次配置向导。
+  await checkSetupStatus()
 
   // 加载学科列表
   await loadSubjects()

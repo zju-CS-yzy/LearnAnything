@@ -161,10 +161,11 @@ export async function apiEvalStart(topic, subject = 'generic', count = 5, mode =
 }
 
 // 评测 — 提交
-export async function apiEvalSubmit(sessionId, answers) {
+// LA-UI-001 M2: dialogSessionId 可选——群聊测评提交时传入，评分结果回写群聊结果卡片
+export async function apiEvalSubmit(sessionId, answers, dialogSessionId = null) {
   return fetchApi('/api/evaluate/submit', {
     method: 'POST',
-    body: JSON.stringify({ session_id: sessionId, answers }),
+    body: JSON.stringify({ session_id: sessionId, answers, dialog_session_id: dialogSessionId }),
   })
 }
 
@@ -178,13 +179,22 @@ export async function apiQuizBankSave(questions, subject = 'generic', topic = ''
   })
 }
 
+// LA-UI-001: 题库重复检查（题卡保存前预检）
+export async function apiQuizBankCheck(questionTexts, subject = 'generic') {
+  return fetchApi('/api/quiz-bank/check', {
+    method: 'POST',
+    body: JSON.stringify({ questions: questionTexts, subject }),
+  })
+}
+
 // 查询题库列表
-export async function apiQuizBankList(subject = 'generic', topic = null, isApproved = null, limit = 100) {
+export async function apiQuizBankList(subject = 'generic', topic = null, isApproved = null, limit = 100, offset = 0) {
   const params = new URLSearchParams()
   params.append('subject', subject)
   if (topic) params.append('topic', topic)
   if (isApproved !== null) params.append('is_approved', isApproved)
   params.append('limit', limit)
+  params.append('offset', offset)
   return fetchApi(`/api/quiz-bank/list?${params.toString()}`)
 }
 
@@ -412,6 +422,18 @@ export async function apiGetSlowRequestModels() {
   return fetchApi('/api/llm/slow-requests/models')
 }
 
+// ========== LA-UI-001 M3: 分享接口 ==========
+
+/**
+ * 将左侧视图元素分享到群聊（持久化为卡片消息，历史会话可恢复）
+ */
+export async function apiChatShare(payload) {
+  return fetchApi('/api/chat/share', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  })
+}
+
 // ========== LA-UI-001: 统一聊天入口 API ==========
 
 /**
@@ -425,6 +447,7 @@ export async function apiChatSend(content, subject = 'generic', options = {}) {
     agent_target = null,
     shared_context = null,
     user_theta = null,
+    eval_mode = null,  // LA-UI-001 M2: 测评模式（仅 coach 目标时传）
   } = options
 
   const effectiveUserId = user_id || getXUserId()
@@ -439,6 +462,7 @@ export async function apiChatSend(content, subject = 'generic', options = {}) {
       agent_target,
       shared_context,
       user_theta,
+      eval_mode,
     }),
   })
 }
@@ -454,6 +478,7 @@ export async function* apiChatSendStream(content, subject = 'generic', options =
     agent_target = null,
     shared_context = null,
     user_theta = null,
+    eval_mode = null,  // LA-UI-001 M2: 测评模式（仅 coach 目标时传）
   } = options
 
   const effectiveUserId = user_id || getXUserId()
@@ -469,6 +494,7 @@ export async function* apiChatSendStream(content, subject = 'generic', options =
       agent_target,
       shared_context,
       user_theta,
+      eval_mode,
     }),
   })
 
