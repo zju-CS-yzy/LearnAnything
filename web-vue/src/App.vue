@@ -3,6 +3,17 @@
     <!-- LA-055: 登录路由守卫 -->
     <LoginGuard v-if="showLoginGuard" @success="onLoginSuccess" />
 
+    <AdminBootstrap v-model="showAdminBootstrap" @claimed="onAdminClaimed" />
+
+    <button
+      v-if="bootstrapRequired && canClaimAdminLocally && isLoggedIn && !showAdminBootstrap"
+      class="bootstrap-reminder"
+      type="button"
+      @click="showAdminBootstrap = true"
+    >
+      🛡️ 初始化本机管理员
+    </button>
+
     <!-- LA-DEPLOY: 首次启动配置向导 -->
     <SetupWizard v-if="isSystemAdmin" v-model="showSetupWizard" @configured="onSetupConfigured" />
 
@@ -29,6 +40,7 @@ import { ref, provide, onMounted, onUnmounted } from 'vue'
 import AppLayout from './components/AppLayout.vue'
 import SetupWizard from './components/SetupWizard.vue'
 import LoginGuard from './components/LoginGuard.vue'
+import AdminBootstrap from './components/AdminBootstrap.vue'
 
 import { useSubject } from './composables/useSubject.js'
 import { useTheme } from './composables/useTheme.js'
@@ -46,7 +58,7 @@ const themeState = useTheme()
 provide('themeState', themeState)
 
 // 用户状态
-const { isAuthenticated, isSystemAdmin, currentUser } = useUser()
+const { isAuthenticated, isLoggedIn, isSystemAdmin, currentUser } = useUser()
 
 // ========== 布局引用 ==========
 
@@ -65,6 +77,35 @@ const showLoginGuard = ref(false)
 
 async function onLoginSuccess() {
   showLoginGuard.value = false
+  await checkAdminBootstrapStatus(true)
+  if (!bootstrapRequired.value) await checkSetupStatus()
+}
+
+// ========== 首位管理员初始化 ==========
+
+const bootstrapRequired = ref(false)
+const canClaimAdminLocally = ref(false)
+const showAdminBootstrap = ref(false)
+
+async function checkAdminBootstrapStatus(openWhenAvailable = false) {
+  try {
+    const response = await fetch('/api/admin/bootstrap/status')
+    if (!response.ok) return
+    const status = await response.json()
+    bootstrapRequired.value = !!status.bootstrap_required
+    canClaimAdminLocally.value = !!status.can_claim_locally
+    if (openWhenAvailable && bootstrapRequired.value && canClaimAdminLocally.value && isLoggedIn.value) {
+      showAdminBootstrap.value = true
+    }
+  } catch (error) {
+    console.error('[App] 检查管理员初始化状态失败:', error)
+  }
+}
+
+async function onAdminClaimed() {
+  bootstrapRequired.value = false
+  canClaimAdminLocally.value = false
+  showAdminBootstrap.value = false
   await checkSetupStatus()
 }
 
@@ -126,8 +167,9 @@ onMounted(async () => {
     showLoginGuard.value = true
   }
 
-  // AUTH-P0-2: 只有系统管理员可以进入首次配置向导。
-  await checkSetupStatus()
+  await checkAdminBootstrapStatus(false)
+  // AUTH-P0-2: 只有已存在的系统管理员可以进入首次配置向导。
+  if (!bootstrapRequired.value) await checkSetupStatus()
 
   // 加载学科列表
   await loadSubjects()
@@ -146,5 +188,20 @@ onUnmounted(() => {
   width: 100vw;
   height: 100vh;
   overflow: hidden;
+}
+
+.bootstrap-reminder {
+  position: fixed;
+  right: 22px;
+  bottom: 22px;
+  z-index: 900;
+  padding: 11px 16px;
+  border: 0;
+  border-radius: 999px;
+  background: #2563eb;
+  color: #fff;
+  font-weight: 700;
+  box-shadow: 0 10px 28px rgba(37, 99, 235, .3);
+  cursor: pointer;
 }
 </style>

@@ -198,6 +198,29 @@ export function useUser() {
     return data
   }
 
+  async function refreshCurrentUser() {
+    if (!_authToken.value) {
+      throw new Error('当前会话没有可用的认证 Token')
+    }
+    const res = await fetch('/api/auth/me', {
+      headers: { 'Authorization': `Bearer ${_authToken.value}` },
+    })
+    const data = await res.json()
+    if (!res.ok) {
+      throw new Error(data.detail || '刷新用户信息失败')
+    }
+    const user = {
+      ..._currentUser.value,
+      user_id: data.user_id,
+      username: data.username,
+      display_name: data.display_name || data.username,
+      system_role: data.system_role || 'user',
+    }
+    saveUser(user)
+    addToUserList(user)
+    return user
+  }
+
   // LA-052: 登出
   async function logout() {
     if (_authToken.value) {
@@ -230,20 +253,38 @@ export function useUser() {
     _sessionLogin.value = true
   }
 
-  // 切换用户（不重新登录，从已保存列表中选择）
-  function switchUser(user_id) {
+  // 只允许无密码的本地用户直接切换。密码账户必须通过
+  // loginWithPassword() 获取与目标用户绑定的新 Bearer Token。
+  async function switchUser(user_id) {
     const list = userList.value
     const found = list.find(u => u.user_id === user_id)
-    if (found) {
-      saveUser(found)
-      // LA-052-A: 切换到 default 用户时清除 token
-      if (found.user_id === 'default') {
-        saveToken('')
-      }
-      return true
+    if (!found) {
+      console.warn('[useUser] 用户不在列表中:', user_id)
+      return false
     }
-    console.warn('[useUser] 用户不在列表中:', user_id)
-    return false
+
+    if (found.user_id !== 'default') {
+      console.warn('[useUser] 密码账户必须重新登录，拒绝无认证切换:', user_id)
+      return false
+    }
+
+    // 离开密码账户时尽力撤销服务端 Token；即使网络失败，也必须
+    // 清除本地 Token，避免它与 default 身份组合后继续发送。
+    if (_authToken.value) {
+      try {
+        await fetch('/api/auth/logout', {
+          method: 'POST',
+          headers: { 'Authorization': `Bearer ${_authToken.value}` },
+        })
+      } catch (e) {
+        console.warn('[useUser] 切换本地用户时注销 Token 失败:', e)
+      }
+    }
+
+    saveToken('')
+    saveUser({ ...DEFAULT })
+    _sessionLogin.value = true
+    return true
   }
 
   // 用户列表 — 使用模块级别的 _userList
@@ -269,6 +310,7 @@ export function useUser() {
     xUserId,
     loginWithPassword,
     register,
+    refreshCurrentUser,
     logout,
     login,       // 旧方式兼容
     switchUser,

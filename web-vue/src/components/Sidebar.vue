@@ -268,8 +268,8 @@ function toggleUserPanel() {
 // - 其他用户需要密码登录
 async function switchToUser(userId) {
   if (userId === 'default') {
-    // default 用户直接切换
-    switchUser(userId)
+    // default 用户直接切换，并撤销当前密码账户的 Token
+    await switchUser(userId)
     showUserPanel.value = false
     window.location.reload()
     return
@@ -387,11 +387,12 @@ const baseNavItems = [
   { id: 'progress', icon: '📈', label: '学习进度' },
   { id: 'import', icon: '📚', label: '导入' },
   { id: 'knowledge', icon: '🗂️', label: '知识库' },
-  { id: 'monitor', icon: '📡', label: '监控' },
+  { id: 'monitor', icon: '📡', label: '监控', adminOnly: true },
+  { id: 'admin-users', icon: '👥', label: '用户管理', adminOnly: true },
 ]
 
 const navItems = computed(() =>
-  baseNavItems.filter(item => item.id !== 'monitor' || isSystemAdmin.value)
+  baseNavItems.filter(item => !item.adminOnly || isSystemAdmin.value)
 )
 
 const settingsItem = { id: 'settings', icon: '⚙️', label: '设置' }

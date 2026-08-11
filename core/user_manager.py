@@ -449,30 +449,93 @@ class UserManager:
         if normalized not in SYSTEM_ROLES:
             raise ValueError(f"Unsupported system role: {role}")
 
-        current_role = self.get_system_role(user_id)
-        if current_role is None:
-            raise ValueError(f"User does not exist: {user_id}")
-        if normalized == "admin":
-            conn = sqlite3.connect(str(self.users_db))
-            cursor = conn.cursor()
-            cursor.execute("SELECT password_hash FROM users WHERE user_id = ?", (user_id,))
-            row = cursor.fetchone()
-            conn.close()
-            if not row or not row[0]:
-                raise ValueError("A password-authenticated account is required for administrators")
-        if current_role == "admin" and normalized != "admin" and self.count_system_admins() <= 1:
-            raise ValueError("Cannot demote the last system administrator")
+        conn = sqlite3.connect(str(self.users_db), timeout=10)
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT system_role, password_hash FROM users WHERE user_id = ?",
+                (user_id,),
+            ).fetchone()
+            if not row:
+                raise ValueError(f"User does not exist: {user_id}")
 
+            current_role, password_hash = row
+            if normalized == "admin" and not password_hash:
+                raise ValueError("A password-authenticated account is required for administrators")
+            if current_role == "admin" and normalized != "admin":
+                admin_count = int(
+                    conn.execute(
+                        "SELECT COUNT(*) FROM users WHERE system_role = 'admin'"
+                    ).fetchone()[0]
+                )
+                if admin_count <= 1:
+                    raise ValueError("Cannot demote the last system administrator")
+
+            cursor = conn.execute(
+                "UPDATE users SET system_role = ? WHERE user_id = ?",
+                (normalized, user_id),
+            )
+            conn.commit()
+            return cursor.rowcount > 0
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def verify_user_password(self, user_id: str, password: str) -> bool:
+        """Verify a password against a specific user without exposing its hash."""
+        if not password:
+            return False
         conn = sqlite3.connect(str(self.users_db))
-        cursor = conn.cursor()
-        cursor.execute(
-            "UPDATE users SET system_role = ? WHERE user_id = ?",
-            (normalized, user_id),
-        )
-        updated = cursor.rowcount > 0
-        conn.commit()
+        row = conn.execute(
+            "SELECT password_hash FROM users WHERE user_id = ?",
+            (user_id,),
+        ).fetchone()
         conn.close()
-        return updated
+        return bool(
+            row
+            and row[0]
+            and bcrypt.checkpw(password.encode("utf-8"), row[0].encode("utf-8"))
+        )
+
+    def claim_first_system_admin(self, user_id: str, password: str) -> bool:
+        """Atomically let a password-authenticated user claim the first admin role."""
+        conn = sqlite3.connect(str(self.users_db), timeout=10)
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT password_hash FROM users WHERE user_id = ?",
+                (user_id,),
+            ).fetchone()
+            if not row:
+                raise ValueError(f"User does not exist: {user_id}")
+            if not row[0]:
+                raise ValueError("A password-authenticated account is required for administrators")
+
+            admin_count = int(
+                conn.execute(
+                    "SELECT COUNT(*) FROM users WHERE system_role = 'admin'"
+                ).fetchone()[0]
+            )
+            if admin_count:
+                raise ValueError("A system administrator already exists")
+            if not password or not bcrypt.checkpw(
+                password.encode("utf-8"), row[0].encode("utf-8")
+            ):
+                raise ValueError("Current password is incorrect")
+
+            cursor = conn.execute(
+                "UPDATE users SET system_role = 'admin' WHERE user_id = ?",
+                (user_id,),
+            )
+            conn.commit()
+            return cursor.rowcount == 1
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
 
     # ── LA-052: 密码认证 ──
 

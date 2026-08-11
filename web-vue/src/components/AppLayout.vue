@@ -55,6 +55,7 @@ import ImportView from './ImportView.vue'
 import KnowledgeBaseView from './KnowledgeBaseView.vue'
 import GraphView from './graph/GraphView.vue'
 import LLMMonitorView from './LLMMonitorView.vue'
+import AdminUsersView from './AdminUsersView.vue'
 
 const emit = defineEmits(['open-settings'])
 
@@ -67,6 +68,7 @@ const viewComponents = {
   knowledge: KnowledgeBaseView,
   graph: GraphView,
   monitor: LLMMonitorView,
+  'admin-users': AdminUsersView,
 }
 
 // 状态

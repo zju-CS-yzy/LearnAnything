@@ -84,6 +84,7 @@ from app.auth import (
     require_admin,
     resolve_legacy_user_id as _shared_resolve_legacy_user_id,
 )
+from app.admin_api import router as admin_router
 
 
 # ========== Global instances ==========
@@ -202,6 +203,7 @@ async def visualization_workaround(request, call_next):
 
 # LA-DEPLOY: 注册配置向导路由
 app.include_router(setup_router)
+app.include_router(admin_router)
 
 
 # ========== 评测会话存储 ==========
