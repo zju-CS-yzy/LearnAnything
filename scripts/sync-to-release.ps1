@@ -124,9 +124,16 @@ if (git -C $script:ReleaseDir status --porcelain) {
 }
 
 $coreDirs = @("agents", "app", "config", "core", "interfaces", "tests", "web", "web-vue")
-$rootFiles = @("app.py", "main.py", "rebuild.bat", "requirements.txt", "README.md", "LICENSE")
+$rootFiles = @("app.py", "main.py", "app.spec", "rebuild.bat", "requirements.txt", "README.md", "LICENSE")
 $publicDocs = @("DESIGN.md", "PROJECT_PAPER.md", "DEPLOY.md")
-$publicScripts = @("build.bat", "manage_admin.py", "sync-to-release.ps1")
+$publicScripts = @(
+    "build.bat",
+    "build-release.py",
+    "build_uninstaller.py",
+    "manage_admin.py",
+    "sync-to-release.ps1",
+    "uninstaller.py"
+)
 
 Write-Host "========================================" -ForegroundColor Cyan
 Write-Host " LearnAnything: Dev -> public Release" -ForegroundColor Cyan

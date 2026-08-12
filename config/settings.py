@@ -11,6 +11,7 @@ LearnAnything API 配置中心 (LA-DEPLOY-FEAT)
 """
 
 import configparser
+import json
 import os
 import shutil
 import sys
@@ -25,6 +26,12 @@ from typing import Dict, List, Optional
 PROJECT_ROOT = Path(__file__).parent.parent
 
 
+def get_user_home() -> Path:
+    """Resolve the current user's home, with an isolated-test override."""
+    override = os.getenv("LEARNANYTHING_USER_HOME")
+    return Path(override).expanduser() if override else Path.home()
+
+
 # ========== LA-051-STRUCT: 数据根目录（分层方案）==========
 
 def get_data_root() -> Path:
@@ -34,12 +41,33 @@ def get_data_root() -> Path:
     打包环境（PyInstaller）: ~/.learnanything/
     """
     if getattr(sys, 'frozen', False):
-        return Path.home() / ".learnanything"
+        return get_user_home() / ".learnanything"
     else:
         return PROJECT_ROOT / "data"
 
 
 DATA_ROOT = get_data_root()
+
+
+def ensure_data_root_marker() -> None:
+    """Mark the packaged application's data root for safe uninstallation."""
+    if not getattr(sys, "frozen", False):
+        return
+    DATA_ROOT.mkdir(parents=True, exist_ok=True)
+    marker = DATA_ROOT / ".learnanything-data.json"
+    if marker.exists():
+        return
+    payload = {
+        "product": "LearnAnything",
+        "kind": "data-root",
+        "format_version": 1,
+    }
+    temp_marker = marker.with_suffix(".tmp")
+    temp_marker.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    os.replace(temp_marker, marker)
+
+
+ensure_data_root_marker()
 
 # 知识库根目录（新结构 v2）
 KNOWLEDGE_BASE_DIR = DATA_ROOT / "knowledge_base"
@@ -52,7 +80,7 @@ USERS_DB_PATH = DATA_ROOT / "users.db"
 
 # 旧结构兼容（迁移检测用）
 OLD_KNOWLEDGE_BASE_DIR = PROJECT_ROOT / "knowledge_base"
-OLD_USERS_DATA_DIR = Path.home() / ".learnanything"
+OLD_USERS_DATA_DIR = get_user_home() / ".learnanything"
 
 
 # ========== LA-051-STRUCT: 学科路径辅助函数（统一入口）==========
@@ -334,8 +362,52 @@ class AppConfig:
 
 # ========== 配置文件路径 ==========
 
-CONFIG_DIR = PROJECT_ROOT / "config"
+# 可变且含密钥的 API 配置属于运行时用户数据，不能写入 PyInstaller 的
+# _internal/config 资源目录。PROJECT_ROOT/config 仅存放随程序发布的只读模板。
+CONFIG_DIR = DATA_ROOT / "config"
 API_CONFIG_PATH = CONFIG_DIR / "api_config.ini"
+BUNDLED_CONFIG_DIR = PROJECT_ROOT / "config"
+LEGACY_API_CONFIG_PATH = BUNDLED_CONFIG_DIR / "api_config.ini"
+LEGACY_API_KEYS_PATH = BUNDLED_CONFIG_DIR / "api_keys.ini"
+
+
+def migrate_legacy_api_config(
+    runtime_path: Path = API_CONFIG_PATH,
+    legacy_path: Path = LEGACY_API_CONFIG_PATH,
+    remove_source: Optional[bool] = None,
+) -> bool:
+    """Move the old program-directory API config into the user data root.
+
+    Source runs keep the ignored legacy file as a fallback copy. Frozen builds
+    remove it after an atomic migration so secrets no longer remain beneath
+    ``_internal`` and the portable package can be removed cleanly.
+    """
+    if runtime_path.exists() or not legacy_path.is_file():
+        return False
+
+    runtime_path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = runtime_path.with_name(f".{runtime_path.name}.{os.getpid()}.tmp")
+    try:
+        shutil.copyfile(legacy_path, temp_path)
+        os.replace(temp_path, runtime_path)
+        try:
+            os.chmod(runtime_path, 0o600)
+        except OSError:
+            pass
+        should_remove = getattr(sys, "frozen", False) if remove_source is None else remove_source
+        if should_remove:
+            try:
+                legacy_path.unlink()
+            except OSError as exc:
+                print(f"[Config] 旧 API 配置已迁移，但旧文件删除失败: {exc}")
+        print(f"[Config] 旧 API 配置已迁移到 {runtime_path}")
+        return True
+    finally:
+        if temp_path.exists():
+            temp_path.unlink()
+
+
+migrate_legacy_api_config()
 
 
 # ========== 配置加载/保存 ==========
@@ -375,6 +447,8 @@ def _load_api_config() -> AppConfig:
     # 2. 兼容旧格式：从 api_keys.ini 读取到内存（不保存文件）
     # LA-DEPLOY-FIX: 不自动保存，让用户在向导中确认后再保存
     old_ini = CONFIG_DIR / "api_keys.ini"
+    if not old_ini.exists():
+        old_ini = LEGACY_API_KEYS_PATH
     if old_ini.exists():
         parser = configparser.ConfigParser()
         parser.read(old_ini, encoding="utf-8")

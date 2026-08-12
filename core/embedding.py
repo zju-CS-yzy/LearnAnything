@@ -6,25 +6,18 @@ Embedding 模型管理器 (LA-DEPLOY-FEAT)
 保留 HashEmbedding 离线降级方案。
 """
 
-import os
-import sys
 import time
 import threading
 import hashlib
-from pathlib import Path
 from typing import List, Optional
 
 import numpy as np
 
-from config.settings import CACHE_DIR, DEFAULT_EMBEDDING_DIM, get_embedding_config
+from config.settings import DEFAULT_EMBEDDING_DIM, get_embedding_config
 
-
-# 模型缓存目录（打包环境下指向可写目录）
-if getattr(sys, 'frozen', False):
-    _MODEL_CACHE_DIR = Path(os.path.dirname(sys.executable)) / "models"
-else:
-    _MODEL_CACHE_DIR = CACHE_DIR / "models"
-_MODEL_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+# 当前实现只使用远程 Embedding API 或内存中的 HashEmbedding 降级方案，
+# 不下载、不读取本地模型。旧版本曾为本地 sentence-transformers 预留
+# <程序目录>/models 缓存，但目录从未实际使用，因此不应在模块导入时创建。
 
 
 class HashEmbeddingFunction:

@@ -25,6 +25,8 @@
    - 双击 `LearnAnything.exe`
    - 程序将启动由 PyInstaller 打包的 PyQt5 桌面图形界面；前端页面显示在程序内置的 `QWebEngineView` 中，不会自动打开外部浏览器
    - 桌面程序会在后台启动仅供自身使用的本地 FastAPI 服务，并将其加载到内置界面；用户无需手动访问任何 localhost 地址
+   - 新电脑首次启动时，Windows 实时防护、PyInstaller 运行库及 DLL 冷加载可能使后端启动慢于后续启动。30 秒后界面会提示“首次启动初始化时间较长”并继续等待，不会直接误报失败；只有后端明确退出或 180 秒仍未通过健康检查时才报错
+   - 如果后端确实启动失败，请提供 `%USERPROFILE%\.learnanything\logs\desktop_startup.log`。日志只记录启动阶段、耗时和错误，不记录 API 密钥
 
 4. **首次启动配置**
    - 在全新设备或尚无系统管理员的数据目录中，先注册或登录一个密码账户，并按提示重新输入密码，一次性认领首位本机管理员
@@ -98,6 +100,37 @@ python scripts/build-release.py v1.0.0
 
 > 💡 **构建脚本会自动检测前端依赖**：如果 `web-vue/node_modules` 不存在，会自动运行 `npm install` 安装。Release 仓库无需手动维护 `node_modules`。>
 
+### 卸载桌面程序
+
+发布 ZIP 内包含 `LearnAnything/uninstall.exe`。运行前应先关闭
+`LearnAnything.exe`，然后双击卸载器：
+
+1. 首次确认是否卸载程序；
+2. 再选择“保留用户数据”或“永久删除用户数据”；
+3. 用户数据位于 `%USERPROFILE%\.learnanything`，其中包括账号、API 配置、
+   知识库、原始文档、对话、题库和学习记录；删除后不可恢复。
+
+卸载器按发布时生成的 `.learnanything-install.json` 清单删除程序文件，
+不会删除用户后来放入程序目录的未知文件。为避免误删，用户数据仅在路径严格为
+当前用户的 `%USERPROFILE%\.learnanything` 且存在应用生成的
+`.learnanything-data.json` 身份标记时才允许自动递归删除。
+
+关闭卸载完成提示后，临时清理程序会等待 `uninstall.exe` 进程退出，再删除
+`uninstall.exe`、安装清单以及已经清空的最外层 `LearnAnything` 文件夹。若程序目录中
+存在不属于发布清单的未知文件，出于安全考虑会保留该文件和相应目录。
+
+静默卸载默认保留数据：
+
+```powershell
+.\uninstall.exe /S
+```
+
+静默卸载并删除数据：
+
+```powershell
+.\uninstall.exe /S --delete-data
+```
+
 ---
 
 ## 🛠️ 技术架构
@@ -108,10 +141,10 @@ python scripts/build-release.py v1.0.0
 
 ```
 功能层 ────────→ 配置层 ────────→ 实现层
-语言处理(LLM)     api_config.ini    DeepSeek / OpenAI / 硅基流动
-视觉处理(VLM)     api_config.ini    智谱AI / OpenAI / 硅基流动
-文本向量化(EMB)   api_config.ini    智谱AI / OpenAI / 硅基流动
-PDF解析(MinerU)   api_config.ini    MinerU CLI
+语言处理(LLM)     ~/.learnanything/config/api_config.ini    DeepSeek / OpenAI / 硅基流动
+视觉处理(VLM)     ~/.learnanything/config/api_config.ini    智谱AI / OpenAI / 硅基流动
+文本向量化(EMB)   ~/.learnanything/config/api_config.ini    智谱AI / OpenAI / 硅基流动
+PDF解析(MinerU)   ~/.learnanything/config/api_config.ini    MinerU CLI
 ```
 
 **优势**：
@@ -121,7 +154,8 @@ PDF解析(MinerU)   api_config.ini    MinerU CLI
 
 ### 配置文件格式
 
-`config/api_config.ini`（首次配置后自动生成）：
+打包程序使用 `%USERPROFILE%\.learnanything\config\api_config.ini`；源码开发模式
+使用 `data/config/api_config.ini`。该文件在首次配置后自动生成：
 
 ```ini
 [llm]
