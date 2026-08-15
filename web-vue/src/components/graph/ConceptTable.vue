@@ -1,8 +1,11 @@
 <template>
-  <div v-if="concepts.length > 0" class="concept-table-wrapper">
+  <section class="concept-table-wrapper" aria-labelledby="concept-catalog-title">
     <div class="table-header">
-      <h3>📋 全局概念表（去重后）</h3>
-      <span class="table-count">共 {{ concepts.length }} 个概念</span>
+      <div>
+        <h3 id="concept-catalog-title">全局概念</h3>
+        <p>跨文档合并后的概念目录，可按类型筛选并追溯来源。</p>
+      </div>
+      <span class="table-count">{{ concepts.length }} 个概念</span>
     </div>
 
     <div class="concept-toolbar">
@@ -20,11 +23,32 @@
       </div>
     </div>
 
-    <div class="table-scroll">
+    <div v-if="availableTypes.length" class="type-filters" aria-label="按概念类型筛选">
+      <button
+        class="filter-chip"
+        :class="{ active: selectedType === '' }"
+        :aria-pressed="selectedType === ''"
+        @click="selectedType = ''"
+      >全部 {{ concepts.length }}</button>
+      <button
+        v-for="item in availableTypes"
+        :key="item.type"
+        class="filter-chip"
+        :class="{ active: selectedType === item.type }"
+        :aria-pressed="selectedType === item.type"
+        @click="selectedType = item.type"
+      >
+        <span class="filter-dot" :style="{ background: colorFor(item.type) }"></span>
+        {{ typeLabel(item.type) }} {{ item.count }}
+      </button>
+    </div>
+
+    <div v-if="filtered.length" class="table-scroll">
       <table class="concept-table">
         <thead>
           <tr>
             <th>概念名称</th>
+            <th>说明</th>
             <th>别名</th>
             <th>类型</th>
             <th>关系</th>
@@ -32,13 +56,20 @@
           </tr>
         </thead>
         <tbody>
-          <tr v-for="c in paginated" :key="c.id" @click="$emit('select', c)">
+          <tr
+            v-for="c in paginated"
+            :key="c.id"
+            tabindex="0"
+            @click="$emit('select', c)"
+            @keyup.enter="$emit('select', c)"
+          >
             <td class="name-cell">{{ c.name }}</td>
+            <td class="description-cell">{{ c.description || '—' }}</td>
             <td class="alias-cell">
               <span v-if="c.aliases" class="alias-tags">{{ c.aliases.slice(0, 3).join(' | ') }}</span>
             </td>
             <td>
-              <span class="type-badge" :class="'type-' + c.concept_type">{{ typeLabel(c.concept_type) }}</span>
+              <span class="type-badge" :style="{ background: colorFor(c.concept_type) }">{{ typeLabel(c.concept_type) }}</span>
             </td>
             <td>{{ relationLabel(c.relation) }}</td>
             <td>{{ c.source_chunk_count }}</td>
@@ -47,8 +78,13 @@
       </table>
     </div>
 
+    <div v-else class="empty-state" role="status">
+      <strong>{{ concepts.length ? '没有匹配的概念' : '尚未生成全局概念' }}</strong>
+      <span>{{ concepts.length ? '尝试清除搜索词或切换类型。' : '完成图谱构建后，去重概念会显示在这里。' }}</span>
+    </div>
+
     <!-- 分页 -->
-    <div class="pagination">
+    <div v-if="filtered.length" class="pagination">
       <button class="btn btn-sm" :disabled="page <= 1" @click="page--">上一页</button>
       <span class="page-info">第 {{ page }} / {{ totalPages }} 页</span>
       <button class="btn btn-sm" :disabled="page >= totalPages" @click="page++">下一页</button>
@@ -59,7 +95,7 @@
         <option :value="100">100/页</option>
       </select>
     </div>
-  </div>
+  </section>
 </template>
 
 <script setup>
@@ -71,6 +107,9 @@ import { ref, computed, watch } from 'vue'
 
 const props = defineProps({
   concepts: { type: Array, default: () => [] },
+  typeLabels: { type: Object, default: () => ({}) },
+  relationLabels: { type: Object, default: () => ({}) },
+  typeColors: { type: Object, default: () => ({}) },
 })
 
 defineEmits(['select'])
@@ -78,11 +117,22 @@ defineEmits(['select'])
 const searchQuery = ref('')
 const page = ref(1)
 const pageSize = ref(20)
+const selectedType = ref('')
+
+const availableTypes = computed(() => {
+  const counts = new Map()
+  props.concepts.forEach(c => {
+    const type = c.concept_type || 'concept'
+    counts.set(type, (counts.get(type) || 0) + 1)
+  })
+  return [...counts.entries()].map(([type, count]) => ({ type, count }))
+})
 
 const filtered = computed(() => {
   const query = searchQuery.value.trim().toLowerCase()
-  if (!query) return [...props.concepts]
   return props.concepts.filter(c => {
+    if (selectedType.value && c.concept_type !== selectedType.value) return false
+    if (!query) return true
     const name = (c.name || '').toLowerCase()
     const aliases = (c.aliases || []).join(' ').toLowerCase()
     const type = (c.concept_type || '').toLowerCase()
@@ -100,6 +150,7 @@ const paginated = computed(() => {
 watch(() => props.concepts, () => { page.value = 1 })
 watch(searchQuery, () => { page.value = 1 })
 watch(pageSize, () => { page.value = 1 })
+watch(selectedType, () => { page.value = 1 })
 
 function filter() { /* 搜索按钮触发，逻辑由 computed 自动处理 */ }
 
@@ -111,7 +162,7 @@ function typeLabel(type) {
     'sub_technology': '子技术',
     'concept': '概念',
   }
-  return map[type] || type
+  return props.typeLabels[type] || map[type] || type
 }
 
 function relationLabel(relation) {
@@ -121,19 +172,23 @@ function relationLabel(relation) {
     'APPLIES_TO': '应用于',
     'EXTENDS': '扩展了',
   }
-  return map[relation] || relation
+  return props.relationLabels[relation] || map[relation] || relation || '—'
+}
+
+function colorFor(type) {
+  return props.typeColors[type] || props.typeColors.concept || '#237A45'
 }
 </script>
 
 <style scoped>
 .concept-table-wrapper {
   background: var(--bg-card, #fff);
-  border-top: 1px solid var(--border-color, #e0e0e0);
-  padding: 16px 24px;
-  max-height: 320px;
+  padding: 20px 24px 16px;
   overflow: hidden;
   display: flex;
   flex-direction: column;
+  flex: 1;
+  min-height: 0;
 }
 
 .table-header {
@@ -151,6 +206,12 @@ function relationLabel(relation) {
   color: var(--text-primary, #2c3e50);
 }
 
+.table-header p {
+  margin: 4px 0 0;
+  color: var(--text-muted, #7f8c8d);
+  font-size: var(--font-size-xs);
+}
+
 .table-count {
   font-size: var(--font-size-xs);
   color: var(--text-muted, #7f8c8d);
@@ -162,6 +223,47 @@ function relationLabel(relation) {
   padding: 10px 0;
   align-items: center;
   flex-wrap: wrap;
+}
+
+.type-filters {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 0 0 14px;
+}
+
+.filter-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 30px;
+  padding: 5px 10px;
+  border: 1px solid var(--border-color, #ddd);
+  border-radius: 6px;
+  background: var(--bg-card, #fff);
+  color: var(--text-secondary, #555);
+  font-size: var(--font-size-xs);
+  cursor: pointer;
+}
+
+.filter-chip:hover,
+.filter-chip.active {
+  border-color: var(--accent-primary, #3498db);
+  background: var(--bg-active, #ecf0f1);
+  color: var(--text-primary, #2c3e50);
+}
+
+.filter-chip:focus-visible,
+.concept-table tbody tr:focus-visible {
+  outline: 2px solid var(--accent-primary, #3498db);
+  outline-offset: -2px;
+}
+
+.filter-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 3px;
 }
 
 .toolbar-group {
@@ -187,6 +289,9 @@ function relationLabel(relation) {
 .table-scroll {
   overflow-y: auto;
   flex: 1;
+  min-height: 0;
+  border: 1px solid var(--border-color, #e0e0e0);
+  border-radius: 8px;
 }
 
 .concept-table {
@@ -211,7 +316,7 @@ function relationLabel(relation) {
 }
 
 .concept-table td {
-  padding: 8px 10px;
+  padding: 10px;
   border-bottom: 1px solid var(--border-color, #e0e0e0);
   vertical-align: top;
 }
@@ -226,6 +331,13 @@ function relationLabel(relation) {
   color: var(--text-primary, #2c3e50);
   max-width: 150px;
   word-break: break-all;
+}
+
+.description-cell {
+  min-width: 220px;
+  max-width: 420px;
+  color: var(--text-secondary, #555);
+  line-height: 1.45;
 }
 
 .alias-cell { max-width: 200px; }
@@ -244,6 +356,24 @@ function relationLabel(relation) {
   padding: 2px 6px;
   border-radius: 3px;
   display: inline-block;
+  color: #fff;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.empty-state {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  color: var(--text-muted, #7f8c8d);
+}
+
+.empty-state strong {
+  color: var(--text-primary, #2c3e50);
+  font-size: var(--font-size-md);
 }
 
 .pagination {
@@ -292,5 +422,11 @@ function relationLabel(relation) {
 .btn-sm {
   padding: 4px 10px;
   font-size: var(--font-size-xs);
+}
+
+@media (max-width: 900px) {
+  .concept-table-wrapper { padding: 16px 12px 12px; }
+  .table-header { align-items: flex-start; }
+  .description-cell { min-width: 180px; }
 }
 </style>

@@ -62,7 +62,7 @@
               </div>
               <!-- 消息正文：Markdown 渲染（含内联图片/公式） -->
               <!-- LA-LOADING: 等待时显示占位内容 -->
-              <div v-if="msg.text" class="message-body markdown-body" v-html="renderMarkdown(msg.text)"></div>
+              <RichText v-if="msg.text" class="message-body markdown-body" :content="msg.text" />
               <div v-else-if="msg.role === 'ai' && isStreaming && msg === lastAiMessage" class="message-body loading-placeholder">
                 <span class="loading-text">正在思考中</span>
                 <span class="loading-dots">
@@ -213,7 +213,6 @@
 
 <script setup>
 import { ref, nextTick, onMounted, inject, computed } from 'vue'
-import { marked } from 'marked'
 // LA-UI-001: 使用新的统一入口 API
 import { apiChatSendStream, apiChatShare } from '../composables/useApi.js'
 import { executeCommand } from '../utils/commandExecutor.js'
@@ -223,6 +222,7 @@ import { withMediaAuth } from '../utils/media.js'
 import QuestionCard from './chat/QuestionCard.vue'
 import ConceptCard from './chat/ConceptCard.vue'
 import ResultCard from './chat/ResultCard.vue'
+import RichText from './common/RichText.vue'
 
 // LA-050-Phase5: 当前用户（用于对话用户隔离）
 const { currentUser, getAuthHeaders } = useUser()
@@ -630,59 +630,6 @@ function hideAtDropdown() {
   setTimeout(() => {
     atDropdownVisible.value = false
   }, 150)
-}
-
-// LA-IMG: 自定义 marked renderer，处理图片路径和大小
-// FIX-LA048: marked v12+ 中 renderer 方法接收对象参数 {href, title, text}
-// FIX-LA049: 兼容 marked v11/v12 的 image 方法签名差异
-const mediaRenderer = new marked.Renderer()
-mediaRenderer.image = (href, title, text) => {
-  // 兼容 marked v11 和 v12：v12 传入 token 对象，v11 传入三个参数
-  if (typeof href === 'object' && href !== null) {
-    const token = href
-    href = token.href
-    title = token.title
-    text = token.text
-  }
-  // 确保 href 有效
-  if (!href) {
-    console.error('[ChatView] mediaRenderer.image: href is undefined')
-    return ''
-  }
-  // 确保路径使用 /api/media/ 前缀
-  let src = href
-  if (!src.startsWith('http') && !src.startsWith('/api/media/')) {
-    src = `/api/media/${src}`
-  }
-  // FIX-LA049: 对路径进行 URL 编码（处理中文、空格等特殊字符）
-  // 使用 encodeURI 而非 encodeURIComponent，保留路径中的 /
-  if (!src.startsWith('http')) {
-    const prefix = '/api/media/'
-    if (src.startsWith(prefix)) {
-      const pathPart = src.slice(prefix.length)
-      // 只编码路径中的特殊字符，保留 /
-      src = prefix + pathPart.split('/').map(encodeURIComponent).join('/')
-    }
-  }
-  return `<img src="${withMediaAuth(src)}" alt="${text || ''}" title="${title || ''}" class="chat-inline-image" loading="lazy" onerror="this.style.display='none';this.parentNode.classList.add('img-error')" />`
-}
-
-function renderMarkdown(text) {
-  if (!text) return ''
-  try {
-    // FIX-LA048: 清理 LLM 可能产生的转义字符（如 \#  -> #）
-    text = text.replace(/\\#/g, '#')
-    // FIX-LA048: 清理 HTML 实体编码的 heading（如 &amp;#35; -> #）
-    text = text.replace(/&#35;/g, '#')
-    return marked.parse(text, { 
-      breaks: true, 
-      renderer: mediaRenderer,
-      headerIds: false,  // 禁用 heading ID 生成，避免冲突
-      mangle: false,
-    })
-  } catch {
-    return text
-  }
 }
 
 // LA-IMG: 编码媒体路径（处理 Windows 反斜杠和 URL 编码）

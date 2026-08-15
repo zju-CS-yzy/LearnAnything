@@ -90,6 +90,11 @@ class MarkdownChunker:
             - source: 来源文件名
         """
         source_name = source_metadata.get("source", "unknown")
+        # MinerU/PDF text can contain C0 separators such as U+0005/U+0006.
+        # They have no Markdown meaning, break downstream JSON/API payloads,
+        # and should not become visible knowledge-base text.
+        markdown_text = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", " ", markdown_text)
+        markdown_text = self._promote_implicit_headings(markdown_text)
         lines = markdown_text.split("\n")
         
         # Stage 1: 解析标题树
@@ -105,6 +110,44 @@ class MarkdownChunker:
         chunks = self._generate_chunks(root_node, all_nodes, source_metadata)
         
         return chunks
+
+    @staticmethod
+    def _promote_implicit_headings(markdown_text: str) -> str:
+        """Promote numbered question lines when MinerU emitted no headings.
+
+        Interview/FAQ PDFs frequently lose font-size heading information and
+        arrive as lines such as ``1 介绍一下 FFN 块？``.  The conservative
+        fallback is enabled only when the whole document has no Markdown
+        heading, and only question-like numbered lines are promoted.
+        """
+        if re.search(r"(?m)^#{1,6}\s+\S", markdown_text):
+            return markdown_text
+        question_words = (
+            "介绍", "什么", "为什么", "为何", "如何", "怎样", "怎么",
+            "区别", "差异", "计算", "公式", "是否", "哪些", "哪个",
+        )
+        pattern = re.compile(
+            r"^(\s*)(\d{1,3}|[一二三四五六七八九十百]+)[、.．)）\s]+(.+?)\s*$"
+        )
+        promoted = []
+        count = 0
+        for line in markdown_text.splitlines():
+            match = pattern.match(line)
+            body = match.group(3).strip() if match else ""
+            looks_like_question = (
+                bool(body)
+                and len(body) <= 120
+                and (
+                    body.endswith(("?", "？"))
+                    or any(word in body for word in question_words)
+                )
+            )
+            if match and looks_like_question:
+                promoted.append(f"## {match.group(2)} {body}")
+                count += 1
+            else:
+                promoted.append(line)
+        return "\n".join(promoted) if count >= 2 else markdown_text
     
     # ========== Stage 1: 标题解析 ==========
     
@@ -789,9 +832,7 @@ class MarkdownChunker:
     
     def _count_formulas(self, text: str) -> int:
         """统计文本中的公式数量（LaTeX 行内 + 块级）。"""
-        block = len(re.findall(r'\$\$(.*?)\$\$', text, re.DOTALL))
-        inline = len(re.findall(r'(?<!\$)\$(?!\$)([^\$]+)\$(?!\$)', text))
-        return block + inline
+        return len(self._extract_formulas(text))
     
     def _extract_formulas(self, text: str) -> List[Dict[str, Any]]:
         """
@@ -799,7 +840,9 @@ class MarkdownChunker:
         
         支持的格式:
         - 块级公式: $$...$$
+        - 块级公式: \\[...\\]
         - 行内公式: $...$ (不包含 $$)
+        - 行内公式: \\(...\\)
         
         Returns:
             [{"type": "formula", "latex": str, "display": "block"|"inline"}, ...]
@@ -812,8 +855,22 @@ class MarkdownChunker:
                 "latex": match.group(1).strip(),
                 "display": "block",
             })
+        # 块级公式 \[...\]
+        for match in re.finditer(r'\\\[(.*?)\\\]', text, re.DOTALL):
+            formulas.append({
+                "type": "formula",
+                "latex": match.group(1).strip(),
+                "display": "block",
+            })
         # 行内公式 $...$ — 使用负向回顾/前瞻避免匹配 $$
         for match in re.finditer(r'(?<!\$)\$(?!\$)([^\$]+)\$(?!\$)', text):
+            formulas.append({
+                "type": "formula",
+                "latex": match.group(1).strip(),
+                "display": "inline",
+            })
+        # 行内公式 \(...\)
+        for match in re.finditer(r'\\\((.+?)\\\)', text):
             formulas.append({
                 "type": "formula",
                 "latex": match.group(1).strip(),

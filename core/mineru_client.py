@@ -22,11 +22,13 @@ MinerU CLI 客户端封装
 """
 
 import hashlib
+from difflib import SequenceMatcher
 import os
 import re
 import shutil
 import subprocess
 import tempfile
+from urllib.parse import unquote
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -301,8 +303,21 @@ class MinerUClient:
         # 1. 解析 PDF 为 Markdown
         markdown_text, output_dir, image_paths = self.parse_pdf_to_markdown(str(pdf_path))
 
-        # 2. 将图片复制到项目知识库目录
-        copied_images = self._copy_images_to_kb(image_paths, subject, pdf_path.name, user_id=user_id)
+        # 2. 只复制 Markdown 实际引用的内容图片。
+        # MinerU 的 images/ 目录还包含公式 OCR 裁剪等中间产物；公式已经以
+        # LaTeX 写入 Markdown，再复制并交给 VLM 会造成重复识别、超时和媒体污染。
+        referenced_image_paths = self._filter_markdown_referenced_images(
+            markdown_text, image_paths
+        )
+        skipped_count = len(image_paths) - len(referenced_image_paths)
+        if skipped_count:
+            print(
+                f"[MinerUClient] 跳过 {skipped_count} 个 Markdown 未引用的 MinerU 辅助图片，"
+                f"保留 {len(referenced_image_paths)} 个内容图片"
+            )
+        copied_images = self._copy_images_to_kb(
+            referenced_image_paths, subject, pdf_path.name, user_id=user_id
+        )
 
         # 3. 将 Markdown 中的图片引用路径替换为本地知识库路径
         markdown_text = self._replace_image_paths(markdown_text, copied_images)
@@ -324,7 +339,7 @@ class MinerUClient:
             md_name = f"{md_stem}_{counter}.md"
             md_path = md_dir / md_name
             counter += 1
-        md_path.write_text(markdown_text, encoding="utf-8")
+        self._write_markdown_atomic(md_path, markdown_text)
         print(f"[MinerUClient] Markdown saved: {md_path}")
 
         # 4. 按标题层级分块（使用 MarkdownChunker v2.0）
@@ -374,7 +389,21 @@ class MinerUClient:
         # LA-035: 对含图片的 heading chunks 调用 VLM 生成描述，生成 image_pseudo chunks
         from core.image_concept_extractor import ImageConceptExtractor
         extractor = ImageConceptExtractor()
-        chunks = extractor.enrich_chunks_with_image_descriptions(chunks, subject=subject)
+
+        def persist_image_rename(old_relative_path: str, new_relative_path: str) -> None:
+            """Keep the saved Markdown valid even if a later VLM request is interrupted."""
+            nonlocal markdown_text
+            markdown_text = self._apply_image_renames(
+                markdown_text,
+                {old_relative_path: new_relative_path},
+            )
+            self._write_markdown_atomic(md_path, markdown_text)
+
+        chunks = extractor.enrich_chunks_with_image_descriptions(
+            chunks,
+            subject=subject,
+            rename_callback=persist_image_rename,
+        )
 
         # LA-035-P21 FIX: 如果 Markdown 中没有图片引用，但 MinerU 提取了图片，
         # 将这些图片作为独立 image_pseudo chunks 添加到 chunks 列表中。
@@ -395,13 +424,22 @@ class MinerUClient:
                 analyze_result = extractor._describe_image_with_context(img_path, context="")
 
                 if analyze_result:
-                    text, source = analyze_result
-                    is_formula = source == "vlm_formula"
+                    text, description_source = analyze_result
+                    is_formula = description_source == "vlm_formula"
                 else:
                     # 回退到占位符
                     text = f"[图片] {orig_name}"
-                    source = "placeholder"
+                    description_source = "placeholder"
                     is_formula = False
+
+                anchor = self._match_image_anchor(
+                    text=text,
+                    is_formula=is_formula,
+                    image_index=idx,
+                    image_count=len(copied_images),
+                    chunks=chunks,
+                )
+                anchor_meta = anchor.get("metadata", {}) if anchor else {}
 
                 # 构建 media_refs
                 media_refs = [{
@@ -428,9 +466,16 @@ class MinerUClient:
                     "metadata": {
                         "chunk_type": "image_pseudo",
                         "source_name": source_name,
+                        "source": source_name,
                         "subject": subject,
+                        "heading_path": anchor_meta.get("heading_path", ""),
+                        "heading_level": anchor_meta.get("heading_level", 0),
+                        "parent_id": anchor.get("id") if anchor else None,
+                        "page_number": anchor_meta.get(
+                            "page_number", metadata.get("page_number", 0)
+                        ),
                         "media_refs": media_refs,
-                        "description_source": source,
+                        "description_source": description_source,
                         "description_length": len(text),
                         "is_formula_image": is_formula,
                     },
@@ -439,6 +484,116 @@ class MinerUClient:
                 chunks.append(pseudo_chunk)
 
         return chunks
+
+    @staticmethod
+    def _markdown_image_names(markdown_text: str) -> set[str]:
+        """Return decoded basenames referenced by Markdown image syntax."""
+        names: set[str] = set()
+        for match in re.finditer(r'!\[[^\]]*\]\(([^)]+)\)', markdown_text):
+            raw_path = match.group(1).strip().strip("<>")
+            # MinerU emits plain relative paths, but decoding also handles spaces
+            # escaped as %20 without changing the stored Markdown.
+            path_without_query = unquote(raw_path.split("?", 1)[0].split("#", 1)[0])
+            name = Path(path_without_query).name
+            if name:
+                names.add(name)
+        return names
+
+    @classmethod
+    def _filter_markdown_referenced_images(
+        cls,
+        markdown_text: str,
+        image_paths: List[Path],
+    ) -> List[Path]:
+        """Exclude MinerU auxiliary crops that are not part of the document."""
+        referenced_names = cls._markdown_image_names(markdown_text)
+        return [path for path in image_paths if path.name in referenced_names]
+
+    @staticmethod
+    def _apply_image_renames(markdown_text: str, rename_map: Dict[str, str]) -> str:
+        """Apply knowledge-base image renames to persisted Markdown references."""
+        updated = markdown_text
+        for old_path, new_path in rename_map.items():
+            updated = updated.replace(
+                str(old_path).replace("\\", "/"),
+                str(new_path).replace("\\", "/"),
+            )
+        return updated
+
+    @staticmethod
+    def _write_markdown_atomic(md_path: Path, markdown_text: str) -> None:
+        """Atomically replace Markdown so an interrupted import cannot truncate it."""
+        temp_path: Optional[Path] = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                dir=str(md_path.parent),
+                prefix=f".{md_path.name}.",
+                suffix=".tmp",
+                delete=False,
+            ) as stream:
+                temp_path = Path(stream.name)
+                stream.write(markdown_text)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temp_path, md_path)
+        finally:
+            if temp_path and temp_path.exists():
+                temp_path.unlink(missing_ok=True)
+
+    @staticmethod
+    def _normalise_formula_text(value: str) -> str:
+        return re.sub(r"[^a-z0-9]+", "", (value or "").lower())
+
+    def _match_image_anchor(
+        self,
+        *,
+        text: str,
+        is_formula: bool,
+        image_index: int,
+        image_count: int,
+        chunks: List[Dict[str, Any]],
+    ) -> Optional[Dict[str, Any]]:
+        """Find the heading/paragraph that owns an unreferenced MinerU image."""
+        candidates = [
+            chunk for chunk in chunks
+            if chunk.get("metadata", {}).get("chunk_type") in ("heading", "paragraph")
+            and chunk.get("metadata", {}).get("heading_path")
+        ]
+        if not candidates:
+            return next(
+                (c for c in chunks if c.get("metadata", {}).get("chunk_type") == "document"),
+                None,
+            )
+
+        if is_formula:
+            needle = self._normalise_formula_text(text)
+            best = None
+            best_score = 0.0
+            if needle:
+                for candidate in candidates:
+                    haystack = self._normalise_formula_text(candidate.get("text", ""))
+                    if not haystack:
+                        continue
+                    score = SequenceMatcher(None, needle, haystack).ratio()
+                    if needle in haystack or haystack in needle:
+                        score = max(score, 0.95)
+                    if score > best_score:
+                        best, best_score = candidate, score
+            if best is not None and best_score >= 0.25:
+                return best
+
+        headings = [
+            chunk for chunk in candidates
+            if chunk.get("metadata", {}).get("chunk_type") == "heading"
+        ]
+        ordered = headings or candidates
+        position = min(
+            len(ordered) - 1,
+            int(image_index * len(ordered) / max(image_count, 1)),
+        )
+        return ordered[position]
 
     def _copy_images_to_kb(
         self,

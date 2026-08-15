@@ -59,20 +59,20 @@
               <button class="bank-btn del" @click="deleteBank(q)">删除</button>
             </span>
           </div>
-          <div class="question-text">{{ q.question }}</div>
+          <RichText class="question-text" :content="q.question" />
           <div v-if="q.options && q.options.length" class="question-options">
             <div v-for="(opt, j) in q.options" :key="j" class="option-item">
               <span class="option-label">{{ ['A', 'B', 'C', 'D', 'E', 'F'][j] || j }}</span>
-              <span class="option-text">{{ String(opt).replace(/^[A-Fa-f][\.．、]\s*/, '') }}</span>
+              <RichText class="option-text" :content="String(opt).replace(/^[A-Fa-f][\.．、]\s*/, '')" inline :markdown="false" />
             </div>
           </div>
           <div class="question-answer">
             <span class="answer-label">答案：</span>
-            <span class="answer-text">{{ Array.isArray(q.answer) ? q.answer.join('、') : q.answer }}</span>
+            <RichText class="answer-text" :content="Array.isArray(q.answer) ? q.answer.join('、') : q.answer" inline :markdown="false" />
           </div>
           <div v-if="q.explanation" class="question-explanation">
             <span class="explanation-label">解析：</span>
-            <span class="explanation-text">{{ q.explanation }}</span>
+            <RichText class="explanation-text" :content="q.explanation" inline />
           </div>
         </div>
 
@@ -148,20 +148,20 @@
                 {{ bloomLabel(q.bloom_level) }}
               </span>
             </div>
-            <div class="question-text">{{ q.question }}</div>
+            <RichText class="question-text" :content="q.question" />
             <div v-if="q.options && q.options.length" class="question-options">
               <div v-for="(opt, j) in q.options" :key="j" class="option-item">
                 <span class="option-label">{{ ['A', 'B', 'C', 'D', 'E', 'F'][j] || j }}</span>
-                <span class="option-text">{{ opt.replace(/^[A-Fa-f][\.．、]\s*/, '') }}</span>
+                <RichText class="option-text" :content="String(opt).replace(/^[A-Fa-f][\.．、]\s*/, '')" inline :markdown="false" />
               </div>
             </div>
             <div class="question-answer">
               <span class="answer-label">答案：</span>
-              <span class="answer-text">{{ q.answer }}</span>
+              <RichText class="answer-text" :content="Array.isArray(q.answer) ? q.answer.join('、') : q.answer" inline :markdown="false" />
             </div>
             <div class="question-explanation">
               <span class="explanation-label">解析：</span>
-              <span class="explanation-text">{{ q.explanation }}</span>
+              <RichText class="explanation-text" :content="q.explanation" inline />
             </div>
           </div>
         </div>
@@ -172,6 +172,7 @@
 
 <script setup>
 import { ref, computed, inject, watch } from 'vue'
+import RichText from './common/RichText.vue'
 import {
   apiQuiz, apiQuizBankSave, apiQuizBankList, apiQuizBankStats,
   apiQuizBankApprove, apiQuizBankDelete,

@@ -278,6 +278,62 @@ textarea {
 }
 
 /* Markdown 渲染基础 */
+.rich-text {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.rich-text > :first-child { margin-top: 0; }
+.rich-text > :last-child { margin-bottom: 0; }
+.rich-text-inline,
+.rich-text-inline > p { display: inline; margin: 0; }
+
+.math-segment.math-inline {
+  display: inline-block;
+  max-width: 100%;
+  vertical-align: -0.15em;
+}
+
+.math-segment.math-display {
+  display: block;
+  max-width: 100%;
+  margin: 0.75em 0;
+  padding: 0.35em 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  text-align: center;
+}
+
+.math-segment .katex-display { margin: 0; }
+.math-fallback { white-space: pre-wrap; overflow-wrap: anywhere; }
+
+.formula-media {
+  min-width: 0;
+  padding: 12px;
+  overflow: hidden;
+  background: color-mix(in srgb, var(--accent-primary, #5b5ce2) 7%, var(--bg-card, #fff));
+}
+
+.formula-media-label {
+  display: inline-block;
+  margin-bottom: 8px;
+  color: var(--text-muted, #667085);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+
+.formula-media-content {
+  overflow-x: auto;
+  overflow-y: hidden;
+  color: var(--text-primary, #1f2937);
+  text-align: center;
+}
+
+.formula-media-content .katex-display { margin: 0.35em 0; }
+.formula-media.compact { padding: 8px; font-size: 12px; }
+.formula-media.compact .formula-media-label { margin-bottom: 4px; }
+.formula-media-fallback { white-space: pre-wrap; overflow-wrap: anywhere; }
 .markdown-body {
   color: var(--text-primary);
   line-height: 1.8;

@@ -15,7 +15,9 @@ LA-MEDIA-UNIFY: 统一媒体路径解析模块
 
 from pathlib import Path
 from typing import Dict, Any, List, Optional, Union
+import json
 import os
+import re
 
 
 def resolve_media_path(
@@ -183,6 +185,7 @@ def resolve_media_list(
     media_refs: List[Dict[str, Any]],
     subject: Optional[str] = None,
     user_id: Optional[str] = None,
+    deduplicate: bool = False,
 ) -> List[Dict[str, Any]]:
     """
     批量解析 media_refs 列表。
@@ -196,6 +199,7 @@ def resolve_media_list(
         解析后的 media 列表，每个元素包含 url 字段
     """
     results = []
+    seen = set()
     for ref in media_refs:
         if not ref:
             continue
@@ -203,6 +207,17 @@ def resolve_media_list(
         # 合并原始字段和解析结果
         merged = dict(ref)
         merged.update(resolved)
+        if deduplicate:
+            if resolved.get("resolved"):
+                identity = ("resolved", resolved.get("relative_path"))
+            else:
+                identity = (
+                    "raw",
+                    json.dumps(ref, ensure_ascii=False, sort_keys=True, default=str),
+                )
+            if identity in seen:
+                continue
+            seen.add(identity)
         results.append(merged)
     return results
 
@@ -214,8 +229,8 @@ def _lookup_subject_registration(
     """
     MEDIA-P2-1: 在全局 subjects.db 与各用户私有 subjects.db 中查找学科注册信息。
 
-    与 backend_api._get_subject_anywhere 同一搜索顺序（core 层实现，避免反向依赖 app 层）：
-    全局 → 当前用户 → 其他用户。
+    当前用户 → 全局 → 其他用户。当前用户优先可避免同名私有学科
+    被解析成另一个 owner 的注册记录。
 
     Returns:
         学科字典（含 owner_id / visibility）或 None
@@ -223,7 +238,21 @@ def _lookup_subject_registration(
     from core.subject_manager import SubjectManager, get_subject as get_global_subject
     from config.settings import USERS_DIR
 
-    # 1. 查全局
+    # 1. 查指定用户私有，再查全局与其他用户
+    user_dbs: List[Path] = []
+    if user_id and user_id not in ("default", "anonymous"):
+        db = USERS_DIR / user_id / "subjects.db"
+        if db.exists():
+            user_dbs.append(db)
+    for db in user_dbs:
+        try:
+            sm = SubjectManager(db_path=str(db))
+            subj = sm.get_subject(subject_id)
+            if subj:
+                return subj
+        except Exception:
+            continue
+
     try:
         subj = get_global_subject(subject_id)
         if subj:
@@ -231,12 +260,8 @@ def _lookup_subject_registration(
     except Exception:
         pass
 
-    # 2. 查指定用户私有，再遍历其他用户
-    user_dbs: List[Path] = []
-    if user_id and user_id not in ("default", "anonymous"):
-        db = USERS_DIR / user_id / "subjects.db"
-        if db.exists():
-            user_dbs.append(db)
+    # 2. 遍历其他用户
+    user_dbs = []
     try:
         if USERS_DIR.exists():
             for user_dir in sorted(USERS_DIR.iterdir()):
@@ -258,6 +283,32 @@ def _lookup_subject_registration(
             continue
 
     return None
+
+
+def _find_renamed_hash_match(directory: Path, filename: str) -> Optional[Path]:
+    """Resolve an old MinerU filename after VLM title-based renaming.
+
+    Renaming keeps the eight-character content hash suffix, for example
+    ``tmp..._d0acf041.png`` -> ``多查询生成-d0acf041.png``.  Only a unique
+    match inside the already-authorized subject directory is accepted.
+    """
+    stem, suffix = Path(filename).stem, Path(filename).suffix
+    match = re.search(r"(?:^|[_-])([0-9a-fA-F]{8})$", stem)
+    if not match or not directory.is_dir():
+        return None
+    digest = match.group(1).lower()
+    matches = [
+        item for item in directory.glob(f"*{digest}{suffix}")
+        if item.is_file() and item.stem.lower().endswith(digest)
+    ]
+    return matches[0] if len(matches) == 1 else None
+
+
+def _find_in_media_dir(directory: Path, filename: str) -> Optional[Path]:
+    exact = directory / filename
+    if exact.is_file():
+        return exact
+    return _find_renamed_hash_match(directory, filename)
 
 
 def find_media_file(
@@ -303,13 +354,13 @@ def find_media_file(
             subject_dirs.extend(p for p in user_root.iterdir() if p.is_dir())
         for subject_dir in subject_dirs:
             user_img_dir = subject_dir / "media" / "images"
-            candidate = user_img_dir / safe_name
-            if candidate.is_file():
+            candidate = _find_in_media_dir(user_img_dir, safe_name)
+            if candidate:
                 return candidate
 
             user_thumb_dir = subject_dir / "media" / "thumbnails"
-            candidate = user_thumb_dir / safe_name
-            if candidate.is_file():
+            candidate = _find_in_media_dir(user_thumb_dir, safe_name)
+            if candidate:
                 return candidate
 
     # 1.5. MEDIA-P2-1: 私有学科被授权后数据仍在 owner 目录（授权≠公开≠数据迁移）。
@@ -327,8 +378,8 @@ def find_media_file(
                     if PermissionManager().can_read(user_id, subject, owner_id):
                         owner_subject_dir = USERS_KB_DIR / owner_id / subject
                         for sub in ("media/images", "media/thumbnails"):
-                            candidate = owner_subject_dir / sub / safe_name
-                            if candidate.is_file():
+                            candidate = _find_in_media_dir(owner_subject_dir / sub, safe_name)
+                            if candidate:
                                 return candidate
         except Exception:
             pass
@@ -337,13 +388,13 @@ def find_media_file(
     if subject:
         share_subject_dir = SHARE_KB_DIR / subject
         share_img_dir = share_subject_dir / "media" / "images"
-        candidate = share_img_dir / safe_name
-        if candidate.exists():
+        candidate = _find_in_media_dir(share_img_dir, safe_name)
+        if candidate:
             return candidate
 
         share_thumb_dir = share_subject_dir / "media" / "thumbnails"
-        candidate = share_thumb_dir / safe_name
-        if candidate.exists():
+        candidate = _find_in_media_dir(share_thumb_dir, safe_name)
+        if candidate:
             return candidate
 
     # 3. 旧结构: *_v1_images/

@@ -75,7 +75,7 @@
               class="media-item"
             >
               <!-- 图片 -->
-              <div v-if="ref.type === 'image'" class="media-image">
+              <div v-if="isImageRef(ref)" class="media-image">
                 <img
                   :src="getImageUrl(ref)"
                   :alt="ref.description || ref.alt || '图片'"
@@ -85,13 +85,12 @@
                 <div v-if="ref.description" class="media-caption">{{ ref.description }}</div>
               </div>
               <!-- 公式：LaTeX 渲染 -->
-              <div v-else-if="ref.type === 'formula'" class="media-formula">
-                <span class="formula-badge">公式</span>
-                <div
-                  class="formula-render"
-                  v-html="renderFormulaContent(ref)"
-                ></div>
-              </div>
+              <FormulaMedia
+                v-else-if="isFormulaRef(ref)"
+                class="media-formula"
+                :latex="formulaLatex(ref)"
+                :display="ref.display !== 'inline'"
+              />
               <!-- 表格 -->
               <div v-else-if="ref.type === 'table'" class="media-table">
                 <span class="table-badge">表格</span>
@@ -103,7 +102,7 @@
         <!-- P39-FIX: chunk 原文内容 -->
         <div v-if="isChunkNode && node.text" class="info-section">
           <div class="info-label">📝 原文内容</div>
-          <div class="info-text chunk-text">{{ node.text }}</div>
+          <RichText class="info-text chunk-text" :content="node.text" />
         </div>
         <div v-else-if="isChunkNode" class="info-section">
           <div class="info-label">📝 原文内容</div>
@@ -112,7 +111,7 @@
 
         <div v-if="node.parent_hint" class="info-section">
           <div class="info-label">父级关联</div>
-          <div class="info-text">{{ node.parent_hint }}</div>
+          <RichText class="info-text" :content="node.parent_hint" inline />
         </div>
 
         <!-- 来源引用（人类可读） -->
@@ -125,7 +124,7 @@
               class="source-ref-item"
             >
               <span class="source-ref-num">{{ idx + 1 }}.</span>
-              <span class="source-ref-text">{{ ref }}</span>
+              <RichText class="source-ref-text" :content="ref" inline />
             </div>
           </div>
         </div>
@@ -173,7 +172,7 @@
               <div class="concept-relation">
                 <span class="relation-tag">{{ relationLabel(c.relation) }}</span>
               </div>
-              <div v-if="c.description" class="concept-desc">{{ c.description }}</div>
+              <RichText v-if="c.description" class="concept-desc" :content="c.description" />
             </div>
           </div>
 
@@ -217,8 +216,9 @@
  */
 
 import { computed, ref, inject } from 'vue'
-import { renderLatex } from '../../utils/latex.js'
 import { withMediaAuth } from '../../utils/media.js'
+import FormulaMedia from '../common/FormulaMedia.vue'
+import RichText from '../common/RichText.vue'
 
 // LA-051-FIX: 注入学科状态，用于图片路径回退
 const subjectState = inject('subjectState')
@@ -359,15 +359,22 @@ function openImageModal(ref) {
   }
 }
 
-// 渲染公式内容：用 katex 渲染 LaTeX 字符串为 HTML
-function renderFormulaContent(ref) {
-  let latex = ref.latex || ref.description || ''
-  const display = ref.display === 'block'
-  if (!latex.trim()) return '<span class="formula-fallback">LaTeX 公式</span>'
-  // LA-035-P26: 修复 _escape_cypher_string 遗留问题 - 将 // 开头的 LaTeX 命令恢复为 \
-  // 例如 //sum -> \sum, //frac -> \frac
-  latex = latex.replace(/\/\//g, '\\')
-  return renderLatex(latex, display)
+function mediaType(ref) {
+  return String(ref?.type || ref?.media_type || '').toLowerCase()
+}
+
+function isFormulaRef(ref) {
+  const type = mediaType(ref)
+  return type.includes('formula') || type.includes('math') || type.includes('公式')
+}
+
+function isImageRef(ref) {
+  const type = mediaType(ref)
+  return type.includes('image') || type.includes('figure') || type.includes('图片')
+}
+
+function formulaLatex(ref) {
+  return ref?.latex || ref?.formula || ref?.description || ''
 }
 
 // 解析 source_refs（人类可读的来源引用字符串数组）
@@ -437,9 +444,6 @@ function relationLabel(relation) {
 </script>
 
 <style scoped>
-/* KaTeX 公式样式 */
-@import 'katex/dist/katex.min.css';
-
 .info-panel {
   position: absolute;
   right: 0;
@@ -450,7 +454,6 @@ function relationLabel(relation) {
   background: var(--bg-card, #fff);
   display: flex;
   flex-direction: column;
-  transition: width 0.3s ease;
 }
 
 .info-panel:not(.open) {

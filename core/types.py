@@ -14,7 +14,7 @@ LearnAnything 项目所有模块共享的类型定义。
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Literal, Optional, Tuple, Union
 from pydantic import BaseModel, Field, field_validator
 
 
@@ -27,6 +27,12 @@ class MediaRef(BaseModel):
     path: str = Field(default="", description="原始文件路径")
     thumbnail_path: Optional[str] = Field(default=None, description="缩略图路径")
     description: str = Field(default="", description="VLM 生成的描述或 alt 文本")
+    caption: str = Field(default="", description="媒体标题或 Markdown alt 文本")
+    latex: Optional[str] = Field(default=None, description="公式媒体的 LaTeX 正文")
+    display: Optional[Literal["inline", "block"]] = Field(
+        default=None,
+        description="公式显示方式：inline 行内或 block 块级",
+    )
     width: Optional[int] = Field(default=None, ge=0)
     height: Optional[int] = Field(default=None, ge=0)
     page_number: Optional[int] = Field(default=None, ge=0, description="所在页码")
@@ -204,6 +210,8 @@ class ExtractedConcept(BaseModel):
     extract_role: str = Field(default="DEFINES", description="提取角色（DEFINES/SOLUTION/APPLIED_TO 等）")
     description: str = Field(default="", description="概念描述")
     parent_hint: str = Field(default="", description="上层父概念提示（用于连接阶段）")
+    aliases: List[str] = Field(default_factory=list, description="原文明示的等价别名、缩写或全称")
+    alias_evidence: List[Dict[str, str]] = Field(default_factory=list, description="别名及其原文证据")
     source_chunk: str = Field(default="", description="来源 chunk ID")
     media_refs: List[MediaRef] = Field(default_factory=list, description="关联的多媒体引用")
     

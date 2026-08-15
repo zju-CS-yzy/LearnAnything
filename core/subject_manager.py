@@ -112,6 +112,7 @@ class SubjectManager:
                 raw_files_count INTEGER DEFAULT 0,
                 owner_id TEXT,
                 visibility TEXT DEFAULT 'public',
+                paradigm TEXT,
                 updated_at TEXT
             )
         ''')
@@ -134,6 +135,7 @@ class SubjectManager:
             ("raw_files_count", "INTEGER DEFAULT 0"),
             ("owner_id", "TEXT"),
             ("visibility", "TEXT DEFAULT 'public'"),
+            ("paradigm", "TEXT"),
             ("updated_at", "TEXT"),
         ]:
             if col not in existing:
@@ -252,6 +254,22 @@ class SubjectManager:
             if row:
                 return self._row_to_dict(row)
             return None
+        finally:
+            conn.close()
+
+    def set_paradigm(self, subject_id: str, paradigm: str) -> bool:
+        """Persist the graph paradigm in the subject's own registry."""
+        paradigm = str(paradigm or "").strip()
+        if not paradigm:
+            raise ValueError("paradigm must not be empty")
+        conn = self._get_conn()
+        try:
+            cursor = conn.execute(
+                "UPDATE subjects SET paradigm = ?, updated_at = ? WHERE id = ?",
+                (paradigm, datetime.now().isoformat(), subject_id),
+            )
+            conn.commit()
+            return cursor.rowcount > 0
         finally:
             conn.close()
 

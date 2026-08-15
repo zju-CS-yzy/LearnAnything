@@ -30,8 +30,13 @@ class VLMClient:
 
     # LA-050: 重试配置
     MAX_RETRIES = 3
+    MAX_TIMEOUT_RETRIES = 1
     BASE_RETRY_DELAY = 2  # 秒
-    REQUEST_TIMEOUT = 60  # 秒（从 300 缩短到 60，避免长时间挂起）
+    # requests 的二元组分别表示连接超时和响应读取超时。
+    # VLM 对复杂课件图片的推理经常超过 60 秒，因此给模型响应更充足的
+    # 时间；纯超时只额外重试一次，避免批量导入时单张坏图长期阻塞。
+    CONNECT_TIMEOUT = 15
+    READ_TIMEOUT = 180
     
     # 系统提示词 — 根据任务类型切换
     SYSTEM_PROMPTS = {
@@ -108,7 +113,8 @@ class VLMClient:
         调用智谱 VLM API（LA-050: 增加重试机制和降级策略）
 
         重试策略:
-            - 最多重试 MAX_RETRIES 次
+            - HTTP 可重试错误/连接错误最多重试 MAX_RETRIES 次
+            - 响应超时最多重试 MAX_TIMEOUT_RETRIES 次
             - 指数退避: delay = BASE_RETRY_DELAY * (2 ** attempt)
             - 仅对可重试错误（HTTP 429/500/502/503/504、超时、连接错误）进行重试
             - 对 400 类错误（请求参数错误）不重试
@@ -132,10 +138,13 @@ class VLMClient:
             "temperature": 0.3,
         }
 
+        request_timeout = (self.CONNECT_TIMEOUT, self.READ_TIMEOUT)
+        timeout_failures = 0
+
         # LA-050: 重试循环
         for attempt in range(self.MAX_RETRIES + 1):
             try:
-                resp = requests.post(url, headers=headers, json=payload, timeout=self.REQUEST_TIMEOUT)
+                resp = requests.post(url, headers=headers, json=payload, timeout=request_timeout)
                 
                 # 成功
                 if resp.status_code == 200:
@@ -174,14 +183,21 @@ class VLMClient:
 
             except requests.exceptions.Timeout:
                 # 超时 — 可重试
-                if attempt < self.MAX_RETRIES:
+                timeout_failures += 1
+                if timeout_failures <= self.MAX_TIMEOUT_RETRIES and attempt < self.MAX_RETRIES:
                     delay = self.BASE_RETRY_DELAY * (2 ** attempt)
-                    print(f"[VLMClient] LA-050: 请求超时，第 {attempt + 1}/{self.MAX_RETRIES} 次重试，"
-                          f"等待 {delay}s...")
+                    print(
+                        f"[VLMClient] LA-050: 请求超时（连接 {self.CONNECT_TIMEOUT}s / "
+                        f"响应 {self.READ_TIMEOUT}s），第 {timeout_failures}/{self.MAX_TIMEOUT_RETRIES} "
+                        f"次超时重试，等待 {delay}s..."
+                    )
                     time.sleep(delay)
                     continue
                 else:
-                    print(f"[VLMClient] LA-050: 重试耗尽（超时），返回 None 降级")
+                    print(
+                        f"[VLMClient] LA-050: 重试耗尽（超时；连接 {self.CONNECT_TIMEOUT}s / "
+                        f"响应 {self.READ_TIMEOUT}s），返回 None 降级"
+                    )
                     return None
 
             except requests.exceptions.ConnectionError as e:

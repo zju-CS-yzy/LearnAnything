@@ -19,13 +19,13 @@
         <!-- 描述 -->
         <div v-if="node.description" class="tooltip-section">
           <div class="tooltip-label">描述</div>
-          <div class="tooltip-description">{{ node.description }}</div>
+          <RichText class="tooltip-description" :content="node.description" />
         </div>
 
         <!-- P39-FIX: 原文摘要（chunk 节点） -->
         <div v-if="node.text" class="tooltip-section">
           <div class="tooltip-label">📝 原文摘要</div>
-          <div class="tooltip-description tooltip-text-preview">{{ textPreview }}</div>
+          <RichText class="tooltip-description tooltip-text-preview" :content="textPreview" />
         </div>
 
         <!-- 来源 Chunk -->
@@ -95,8 +95,13 @@
                 </div>
               </div>
               <!-- 公式：LaTeX 渲染 -->
-              <div v-else-if="isFormulaType(ref)" class="tooltip-media-formula" v-html="renderFormula(ref)">
-              </div>
+              <FormulaMedia
+                v-else-if="isFormulaType(ref)"
+                class="tooltip-media-formula"
+                :latex="formulaLatex(ref)"
+                :display="ref.display !== 'inline'"
+                compact
+              />
               <!-- 表格占位 -->
               <div v-else class="tooltip-media-text">
                 <span class="tooltip-media-icon">{{ getMediaIcon(ref) }}</span>
@@ -120,8 +125,9 @@
 
 <script setup>
 import { computed } from 'vue'
-import { renderLatex } from '../../utils/latex.js'
 import { withMediaAuth } from '../../utils/media.js'
+import FormulaMedia from '../common/FormulaMedia.vue'
+import RichText from '../common/RichText.vue'
 
 const props = defineProps({
   visible: { type: Boolean, default: false },
@@ -234,12 +240,8 @@ function isFormulaType(ref) {
   return t.includes('formula') || t.includes('公式') || t.includes('math')
 }
 
-// 渲染公式：使用 katex 渲染为 HTML
-function renderFormula(ref) {
-  const latex = ref.latex || ref.description || ''
-  const display = ref.display === 'block'
-  if (!latex.trim()) return '<span class="tooltip-media-icon">🧮</span> 公式'
-  return renderLatex(latex, display)
+function formulaLatex(ref) {
+  return ref.latex || ref.formula || ref.description || ''
 }
 
 function getMediaUrl(path) {
@@ -263,9 +265,6 @@ function onImageError(e) {
 </script>
 
 <style scoped>
-/* KaTeX 公式样式（全局引入 CSS 后配合 scoped 生效） */
-@import 'katex/dist/katex.min.css';
-
 .graph-node-tooltip {
   position: fixed;
   z-index: 9999;

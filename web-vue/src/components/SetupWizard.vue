@@ -102,7 +102,7 @@
           </div>
 
           <!-- 模型选择 -->
-          <div class="form-group">
+          <div v-if="currentFeatureInfo.hasModel !== false" class="form-group">
             <label>模型</label>
             <select v-model="config[currentFeature].model">
               <option value="">-- 选择模型 --</option>
@@ -247,6 +247,14 @@ const features = [
     description: 'PDF 结构化解析（标题层级、图片、公式提取）。需要 MinerU CLI 和 Token。',
     required: false,
   },
+  {
+    id: 'openalex',
+    name: '学术资料检索',
+    icon: '🔎',
+    description: '用于检索公开学术题录，并按 DOI 为缺少摘要的结果补齐可核验证据。',
+    required: false,
+    hasModel: false,
+  },
 ]
 
 const currentFeature = ref('llm')
@@ -259,13 +267,14 @@ const config = reactive({
   vlm: { provider: '', api_key: '', base_url: '', model: '', enabled: true, custom_model: '' },
   embedding: { provider: '', api_key: '', base_url: '', model: '', enabled: true, custom_model: '' },
   mineru: { provider: 'mineru', api_key: '', base_url: '', model: '', enabled: true, custom_model: '' },
+  openalex: { provider: 'openalex', api_key: '', base_url: 'https://api.openalex.org', model: '', enabled: true, custom_model: '' },
 })
 
 // 提供商列表
 const providers = ref([])
 
 // 错误信息
-const errors = reactive({ llm: '', llm_fallback: '', vlm: '', embedding: '', mineru: '' })
+const errors = reactive({ llm: '', llm_fallback: '', vlm: '', embedding: '', mineru: '', openalex: '' })
 
 // 测试结果
 const testResults = reactive({
@@ -274,6 +283,7 @@ const testResults = reactive({
   vlm: { status: 'pending', message: '' },
   embedding: { status: 'pending', message: '' },
   mineru: { status: 'pending', message: '' },
+  openalex: { status: 'pending', message: '' },
 })
 
 const testing = ref(false)
@@ -285,6 +295,7 @@ const configuredFeatures = reactive({
   vlm: false,
   embedding: false,
   mineru: false,
+  openalex: false,
 })
 
 // 计算属性
@@ -445,6 +456,7 @@ function applyRecommendation(scheme) {
     config.embedding = { provider: 'siliconflow', api_key: '', base_url: '', model: 'BAAI/bge-large-zh-v1.5', enabled: true, custom_model: '' }
     config.mineru = { provider: 'mineru', api_key: '', base_url: '', model: '', enabled: true, custom_model: '' }
   }
+  config.openalex = { provider: 'openalex', api_key: '', base_url: 'https://api.openalex.org', model: '', enabled: true, custom_model: '' }
 }
 
 function closeWizard() {

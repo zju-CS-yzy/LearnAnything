@@ -9,6 +9,9 @@ Embedding 模型管理器 (LA-DEPLOY-FEAT)
 import time
 import threading
 import hashlib
+import math
+import random
+import re
 from typing import List, Optional
 
 import numpy as np
@@ -62,6 +65,18 @@ class ApiEmbeddingClient:
     支持批量调用，内置指数退避重试和请求间隔控制。
     """
 
+    # embedding-3 documents a 3072-token limit per input. Keep headroom for
+    # differences between the local estimate and the provider tokenizer.
+    MAX_ESTIMATED_INPUT_TOKENS = 2800
+    MAX_ESTIMATED_BATCH_TOKENS = 7000
+    MAX_BATCH_ITEMS = 32
+    TRANSPORT_RECOVERY_COOLDOWN = 3.0
+    _CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+    _TOKEN_PARTS = re.compile(
+        r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]"
+        r"|[A-Za-z0-9_]+|[^\s]"
+    )
+
     def __init__(
         self,
         api_key: Optional[str] = None,
@@ -69,7 +84,7 @@ class ApiEmbeddingClient:
         model: Optional[str] = None,
         dimensions: Optional[int] = None,
         timeout: int = 30,
-        max_retries: int = 3,
+        max_retries: int = 4,
     ):
         # LA-DEPLOY-FEAT: 按功能模块读取配置
         cfg = get_embedding_config()
@@ -80,7 +95,99 @@ class ApiEmbeddingClient:
         self.timeout = timeout
         self.max_retries = max_retries
         self._last_request_time = 0.0
-        self._min_interval = 0.05  # 请求间隔 50ms，避免触发限流
+        self._min_interval = 0.15
+        self._session = None
+        self._request_lock = threading.RLock()
+
+    def _get_session(self):
+        """Reuse healthy TLS connections and recreate the pool after SSL EOF."""
+        import requests
+
+        if getattr(self, "_session", None) is None:
+            self._session = requests.Session()
+        return self._session
+
+    def _reset_session(self) -> None:
+        session = getattr(self, "_session", None)
+        self._session = None
+        if session is not None:
+            try:
+                session.close()
+            except Exception:
+                pass
+
+    @staticmethod
+    def _is_transient_error(exc: Exception) -> bool:
+        import requests
+
+        if isinstance(exc, (
+            requests.exceptions.SSLError,
+            requests.exceptions.ConnectionError,
+            requests.exceptions.Timeout,
+        )):
+            return True
+        status = getattr(getattr(exc, "response", None), "status_code", None)
+        return status in {408, 425, 429, 500, 502, 503, 504}
+
+    @staticmethod
+    def _retry_delay(attempt: int) -> float:
+        return min(8.0, 2 ** max(0, attempt - 1)) + random.uniform(0.0, 0.75)
+
+    @classmethod
+    def _estimated_token_cost(cls, part: str) -> int:
+        if re.fullmatch(r"[A-Za-z0-9_]+", part):
+            # English/code BPE averages roughly four characters per token,
+            # while short words still consume at least one token.
+            return max(1, math.ceil(len(part) / 4))
+        return 1
+
+    @classmethod
+    def _prepare_input(cls, value: object) -> str:
+        """Return API-safe text without changing the input/output cardinality."""
+        text = value if isinstance(value, str) else str(value or "")
+        text = cls._CONTROL_CHARS.sub(" ", text)
+        # Replace isolated surrogate code points before requests serializes the
+        # payload. They occasionally appear in OCR output from damaged PDFs.
+        text = text.encode("utf-8", errors="replace").decode("utf-8")
+        if not text.strip():
+            return " "
+
+        token_total = 0
+        cut_at = len(text)
+        for match in cls._TOKEN_PARTS.finditer(text):
+            token_total += cls._estimated_token_cost(match.group(0))
+            if token_total > cls.MAX_ESTIMATED_INPUT_TOKENS:
+                cut_at = match.start()
+                break
+        return text[:cut_at].rstrip() or " "
+
+    @classmethod
+    def _estimated_tokens(cls, text: str) -> int:
+        return sum(
+            cls._estimated_token_cost(match.group(0))
+            for match in cls._TOKEN_PARTS.finditer(text)
+        )
+
+    @classmethod
+    def _make_batches(cls, texts: List[str]) -> List[List[str]]:
+        """Pack inputs by both item count and the model's 8K context budget."""
+        batches: List[List[str]] = []
+        current: List[str] = []
+        current_tokens = 0
+        for text in texts:
+            cost = max(1, cls._estimated_tokens(text))
+            if current and (
+                len(current) >= cls.MAX_BATCH_ITEMS
+                or current_tokens + cost > cls.MAX_ESTIMATED_BATCH_TOKENS
+            ):
+                batches.append(current)
+                current = []
+                current_tokens = 0
+            current.append(text)
+            current_tokens += cost
+        if current:
+            batches.append(current)
+        return batches
 
     def _request(self, texts: List[str]) -> List[List[float]]:
         """发送单批 embedding 请求，含重试逻辑。"""
@@ -109,12 +216,13 @@ class ApiEmbeddingClient:
                 time.sleep(self._min_interval - elapsed)
 
             try:
-                response = requests.post(
-                    url,
-                    headers=headers,
-                    json=payload,
-                    timeout=self.timeout,
-                )
+                with self._request_lock:
+                    response = self._get_session().post(
+                        url,
+                        headers=headers,
+                        json=payload,
+                        timeout=(10, self.timeout),
+                    )
                 self._last_request_time = time.time()
 
                 if response.status_code == 200:
@@ -124,6 +232,11 @@ class ApiEmbeddingClient:
                     # 确保返回顺序与输入一致
                     indexed = {item.get("index", i): item["embedding"] for i, item in enumerate(data.get("data", []))}
                     embeddings = [indexed.get(i, indexed.get(str(i), [])) for i in range(len(texts))]
+                    if len(embeddings) != len(texts) or any(not item for item in embeddings):
+                        raise RuntimeError(
+                            f"Embedding API 返回数量不完整: expected={len(texts)}, "
+                            f"actual={sum(bool(item) for item in embeddings)}"
+                        )
                     return embeddings
 
                 # 400/500 等错误 -> 打印详细业务错误码
@@ -136,12 +249,19 @@ class ApiEmbeddingClient:
                     print(f"[Embedding]   错误消息: {error_message}")
                     print(f"[Embedding]   请求模型: {self.model}")
                     print(f"[Embedding]   请求文本数: {len(texts)}")
-                    print(f"[Embedding]   首条文本长度: {len(texts[0]) if texts else 0}")
+                    lengths = [len(text) for text in texts]
+                    print(f"[Embedding]   文本长度范围: {min(lengths, default=0)}-{max(lengths, default=0)}")
+                    print(
+                        f"[Embedding]   估算 Token 总数: "
+                        f"{sum(self._estimated_tokens(text) for text in texts)}"
+                    )
                 except Exception:
                     print(f"[Embedding] ERROR: API 返回错误 (HTTP {response.status_code}): {response.text[:200]}")
 
                 # 429 限流 -> 退避重试
                 if response.status_code == 429:
+                    if attempt == self.max_retries:
+                        response.raise_for_status()
                     wait = 2 ** attempt
                     print(f"[Embedding] WARNING: 限流 (429)，等待 {wait}s 后重试 ({attempt}/{self.max_retries})")
                     time.sleep(wait)
@@ -150,21 +270,36 @@ class ApiEmbeddingClient:
                 # 400 等客户端错误 -> 通常重试无用，但按配置重试
                 if response.status_code == 400:
                     print(f"[Embedding] WARNING: 请求参数错误 (400)，通常重试无法解决")
-                    # 仍然尝试重试，但可能无效
+                    # Retrying an identical invalid payload only delays a graph
+                    # build. encode() will bisect the batch and isolate the bad
+                    # input instead.
+                    response.raise_for_status()
 
                 # 其他错误 -> 直接抛出
                 response.raise_for_status()
 
-            except requests.exceptions.Timeout:
-                print(f"[Embedding] WARNING: 请求超时，重试 ({attempt}/{self.max_retries})")
+            except requests.exceptions.Timeout as exc:
                 if attempt == self.max_retries:
                     raise
-                time.sleep(2 ** attempt)
+                wait = self._retry_delay(attempt)
+                print(
+                    f"[Embedding] WARNING: 请求超时，{wait:.1f}s 后重试 "
+                    f"({attempt}/{self.max_retries}): {exc}"
+                )
+                time.sleep(wait)
             except requests.exceptions.RequestException as e:
-                print(f"[Embedding] WARNING: 请求异常: {e}，重试 ({attempt}/{self.max_retries})")
+                if getattr(getattr(e, "response", None), "status_code", None) == 400:
+                    raise
                 if attempt == self.max_retries:
                     raise
-                time.sleep(2 ** attempt)
+                if isinstance(e, (requests.exceptions.SSLError, requests.exceptions.ConnectionError)):
+                    self._reset_session()
+                wait = self._retry_delay(attempt)
+                print(
+                    f"[Embedding] WARNING: 瞬时网络/SSL异常，已重建连接池，"
+                    f"{wait:.1f}s 后重试 ({attempt}/{self.max_retries}): {e}"
+                )
+                time.sleep(wait)
 
         raise RuntimeError("Embedding API 调用失败，已耗尽重试次数")
 
@@ -178,25 +313,73 @@ class ApiEmbeddingClient:
         if not texts:
             return []
 
-        BATCH_SIZE = 32  # 智谱 embedding-3 最大支持64条，保守用32
+        prepared = [self._prepare_input(text) for text in texts]
+        changed = sum(original != clean for original, clean in zip(texts, prepared))
+        if changed:
+            print(f"[Embedding] INFO: 已清洗或截断 {changed}/{len(texts)} 条输入")
+
         all_embeddings = []
         fallback = HashEmbeddingFunction(dim=self.dimensions)
 
-        for i in range(0, len(texts), BATCH_SIZE):
-            batch = texts[i : i + BATCH_SIZE]
+        def request_resilient(batch: List[str]) -> List[List[float]]:
+            """Keep valid API embeddings when one member makes a batch invalid."""
             try:
-                embeddings = self._request(batch)
-                all_embeddings.extend(embeddings)
+                return self._request(batch)
+            except Exception as exc:
+                status = getattr(getattr(exc, "response", None), "status_code", None)
+                if status == 400 and len(batch) > 1:
+                    midpoint = len(batch) // 2
+                    print(
+                        f"[Embedding] WARNING: 参数错误批次二分隔离 "
+                        f"({len(batch)} -> {midpoint}+{len(batch) - midpoint})"
+                    )
+                    return request_resilient(batch[:midpoint]) + request_resilient(batch[midpoint:])
+                if status == 400 and len(batch) == 1:
+                    print("[Embedding] WARNING: 单条输入仍被 API 拒绝，仅对该条使用降级 embedding")
+                    return fallback.encode(batch).tolist()
+                raise
+
+        batches = self._make_batches(prepared)
+        if len(batches) > 1:
+            print(
+                f"[Embedding] INFO: {len(prepared)} 条输入按条数/Token预算拆为 "
+                f"{len(batches)} 批"
+            )
+        batch_results: List[Optional[List[List[float]]]] = [None] * len(batches)
+        deferred: List[tuple[int, List[str], Exception]] = []
+        for batch_index, batch in enumerate(batches):
+            try:
+                batch_results[batch_index] = request_resilient(batch)
             except Exception as e:
-                print(f"[Embedding] WARNING: API 批量调用失败，对 {len(batch)} 条文本使用降级 embedding")
-                print(f"[Embedding]   错误: {e}")
-                # 逐条降级
-                for text in batch:
-                    try:
-                        emb = fallback.encode([text])[0]
-                        all_embeddings.append(emb.tolist() if hasattr(emb, 'tolist') else emb)
-                    except Exception:
-                        all_embeddings.append([0.0] * self.dimensions)
+                if not self._is_transient_error(e):
+                    raise
+                deferred.append((batch_index, batch, e))
+                print(
+                    f"[Embedding] WARNING: 第 {batch_index + 1}/{len(batches)} 批遇到瞬时故障，"
+                    "延后到其余批次完成后重试"
+                )
+
+        if deferred:
+            print(
+                f"[Embedding] INFO: {len(deferred)} 个失败批次将在 "
+                f"{self.TRANSPORT_RECOVERY_COOLDOWN:.1f}s 冷却后重试"
+            )
+            time.sleep(self.TRANSPORT_RECOVERY_COOLDOWN)
+            for batch_index, batch, first_error in deferred:
+                try:
+                    self._reset_session()
+                    batch_results[batch_index] = request_resilient(batch)
+                except Exception as retry_error:
+                    raise RuntimeError(
+                        "Embedding 服务持续不可用；为避免在同一向量库混用 API 与 "
+                        f"HashEmbedding，已中止本次写入。batch={batch_index + 1}/"
+                        f"{len(batches)}, first_error={first_error}, retry_error={retry_error}"
+                    ) from retry_error
+
+        for result in batch_results:
+            if result is None:
+                raise RuntimeError("Embedding 批次结果缺失，已中止写入")
+            all_embeddings.extend(result)
 
         return all_embeddings
 

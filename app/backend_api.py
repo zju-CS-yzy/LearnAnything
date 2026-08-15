@@ -37,7 +37,7 @@ import sqlite3  # LA-044: 对话上下文会话列表查询
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form, BackgroundTasks, Header, Query, Depends
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse, FileResponse
+from fastapi.responses import StreamingResponse, FileResponse, JSONResponse
 from pydantic import BaseModel, Field
 from typing import List, Dict, Any, Optional, Union
 import uuid
@@ -85,6 +85,7 @@ from app.auth import (
     resolve_legacy_user_id as _shared_resolve_legacy_user_id,
 )
 from app.admin_api import router as admin_router
+from app.gap_api import router as gap_router
 
 
 # ========== Global instances ==========
@@ -204,6 +205,7 @@ async def visualization_workaround(request, call_next):
 # LA-DEPLOY: 注册配置向导路由
 app.include_router(setup_router)
 app.include_router(admin_router)
+app.include_router(gap_router)
 
 
 # ========== 评测会话存储 ==========
@@ -593,11 +595,12 @@ class ConfigResponse(BaseModel):
     vlm: LLMConfigItem
     embedding: LLMConfigItem
     mineru: LLMConfigItem
+    openalex: LLMConfigItem
 
 @app.get("/api/config", response_model=ConfigResponse)
 def get_config(admin_user_id: str = Depends(require_admin)):
     """
-    LLM-ROBUST: 获取应用配置（LLM/VLM/Embedding/MinerU）。
+    LLM-ROBUST: 获取应用配置（LLM/VLM/Embedding/MinerU/OpenAlex）。
     
     返回当前加载的 api_config.ini 配置，包含主 LLM 和备用 LLM(fallback)。
     API Key 只返回是否已配置的占位值，不暴露任何片段。
@@ -625,6 +628,7 @@ def get_config(admin_user_id: str = Depends(require_admin)):
         vlm=_to_item(cfg.vlm),
         embedding=_to_item(cfg.embedding),
         mineru=_to_item(cfg.mineru),
+        openalex=_to_item(cfg.openalex),
     )
 
 
@@ -635,6 +639,7 @@ class ConfigUpdateRequest(BaseModel):
     vlm: Optional[LLMConfigItem] = None
     embedding: Optional[LLMConfigItem] = None
     mineru: Optional[LLMConfigItem] = None
+    openalex: Optional[LLMConfigItem] = None
 
 @app.put("/api/config")
 def update_config(
@@ -679,6 +684,7 @@ def update_config(
     cfg.vlm = _merge_item("vlm", cfg.vlm, request.vlm)
     cfg.embedding = _merge_item("embedding", cfg.embedding, request.embedding)
     cfg.mineru = _merge_item("mineru", cfg.mineru, request.mineru)
+    cfg.openalex = _merge_item("openalex", cfg.openalex, request.openalex)
     
     update_app_config(cfg)
     _write_audit_event(admin_user_id, "config.update.legacy", {})
@@ -3662,9 +3668,72 @@ def build_knowledge_graph(
         if body.get("with_semantic", True):
             semantic_result = builder.extract_all_concepts()
             if with_dedupe:
-                dedupe_result = builder.dedupe_concepts()
+                dedupe_result = builder.dedupe_concepts(require_review_complete=True)
+                dedupe_report = dedupe_result.get("dedupe_report", {})
+                if dedupe_report.get("status") == "waiting_merge_review":
+                    from core.merge_review_store import MergeReviewStore
+                    review_store = MergeReviewStore(builder.graph_store.data_dir)
+                    review_run = review_store.create_waiting_run(
+                        subject=subject,
+                        user_id=effective_user_id,
+                        paradigm=paradigm,
+                        options={
+                            "paradigm": paradigm,
+                            "granularity": granularity,
+                            "llm_provider": llm_provider,
+                            "with_semantic": True,
+                            "with_dedupe": True,
+                        },
+                        candidates=dedupe_report.get("unresolved_review_candidates", []),
+                    )
+                    # LLM advice is non-binding: build remains paused until the
+                    # reviewer confirms every candidate.  Failures degrade to
+                    # the existing manual workflow instead of failing the build.
+                    try:
+                        _generate_merge_advice(
+                            review_store, review_run["build_id"], builder.vector_store,
+                            paradigm=paradigm, llm_provider=llm_provider,
+                        )
+                        review_run = review_store.get_run(review_run["build_id"])
+                    except Exception as advisor_exc:
+                        print(f"[ConceptMergeAdvisor] pre-review failed (non-blocking): {advisor_exc}")
+                    return JSONResponse(status_code=202, content={
+                        "subject": subject,
+                        "paradigm": paradigm,
+                        **result,
+                        "semantic": semantic_result,
+                        "dedupe": dedupe_result,
+                        "status": "waiting_merge_review",
+                        "build_id": review_run["build_id"],
+                        "merge_review": review_run,
+                    })
             # Phase 2.5: 构建语义连接
             link_result = builder.link_concepts(paradigm=paradigm)
+
+        # The selected paradigm is subject state, not a transient build option.
+        # Persist it before the frontend reloads the graph or Gap Flow runs.
+        _persist_subject_paradigm(subject, paradigm, effective_user_id)
+
+        gap_result = None
+        if body.get("with_semantic", True):
+            try:
+                from app.gap_api import detect_and_reconcile_gaps
+                from config.settings import get_subject_gap_db_path
+                from core.gap_store import GapStore
+
+                registration = _get_subject_anywhere(subject, effective_user_id) or {}
+                owner_id = registration.get("owner_id") or "system"
+                data_user_id = owner_id if registration.get("visibility") == "private" else None
+                gap_result = detect_and_reconcile_gaps(
+                    subject=subject,
+                    paradigm_id=paradigm,
+                    gap_store=GapStore(get_subject_gap_db_path(subject, data_user_id), subject),
+                    graph_store=builder.graph_store,
+                    detect_root_gaps=True,
+                )
+            except Exception as gap_exc:
+                # A graph build remains usable if Gap detection cannot complete.
+                print(f"[build_knowledge_graph] Gap reconcile failed (non-blocking): {gap_exc}")
 
         # Phase 2.6: 计算图中心性（PageRank）- 非阻塞
         try:
@@ -3684,11 +3753,269 @@ def build_knowledge_graph(
             "semantic": semantic_result,
             "dedupe": dedupe_result,
             "link": link_result,
+            "gaps": gap_result,
         }
     except Exception as e:
         import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"图谱构建失败: {str(e)}")
+
+
+def _merge_review_context(subject: str, effective_user_id: str):
+    from core.merge_review_store import MergeReviewStore
+    from core.permission_manager import PermissionManager
+    registration = _get_subject_anywhere(subject, effective_user_id)
+    if not registration:
+        raise HTTPException(status_code=404, detail="学科不存在")
+    owner_id = registration.get("owner_id") or "system"
+    visibility = registration.get("visibility") or "public"
+    if not PermissionManager().can_read(effective_user_id, subject, owner_id, visibility):
+        raise HTTPException(status_code=403, detail="无权访问该学科")
+    if effective_user_id not in ("anonymous", "default"):
+        graph_store = _get_user_context_from_header(effective_user_id).get_user_graph_store(subject)
+    else:
+        graph_store = _get_accessible_graph_store(subject, effective_user_id)
+    return graph_store, MergeReviewStore(graph_store.data_dir)
+
+
+def _require_merge_review_write(subject: str, effective_user_id: str) -> None:
+    from core.permission_manager import PermissionManager
+    registration = _get_subject_anywhere(subject, effective_user_id)
+    owner_id = (registration or {}).get("owner_id") or "system"
+    if effective_user_id in ("anonymous", "default"):
+        raise HTTPException(status_code=401, detail="需要登录后审核概念合并")
+    if not PermissionManager().can_write(effective_user_id, subject, owner_id):
+        raise HTTPException(status_code=403, detail="仅 owner 或 maintainer 可审核概念合并")
+
+
+def _generate_merge_advice(
+    store, build_id: str, vector_store, *, paradigm: str,
+    llm_provider: Optional[str] = None, force: bool = False,
+) -> Dict[str, Any]:
+    from core.concept_merge_advisor import ConceptMergeAdvisor, detect_advice_conflicts
+
+    candidates = store.list_candidates(build_id)
+    selected = [
+        item for item in candidates
+        if not item.get("decision") and (
+            force or item.get("advisor_status") in {None, "pending", "failed"}
+        )
+    ]
+    if selected:
+        advisor = ConceptMergeAdvisor(
+            llm_provider=llm_provider,
+            source_loader=vector_store.get_by_ids,
+        )
+        records = advisor.advise(selected, paradigm)
+        store.save_advice(build_id, records)
+
+    refreshed = store.list_candidates(build_id)
+    conflicts = detect_advice_conflicts(refreshed)
+    store.set_advice_conflicts(build_id, conflicts)
+    return {
+        "build": store.get_run(build_id),
+        "candidates": store.list_candidates(build_id),
+        "processed": len(selected),
+        "conflict_count": len(conflicts),
+    }
+
+
+@app.get("/api/knowledge-graph/{subject}/builds/{build_id}")
+def get_graph_build_run(
+    subject: str, build_id: str,
+    x_user_id: Optional[str] = Header(None, alias="X-User-ID"),
+    authorization: Optional[str] = Header(None),
+):
+    effective_user_id = get_current_user_id(x_user_id, authorization)
+    _require_merge_review_write(subject, effective_user_id)
+    _, store = _merge_review_context(subject, effective_user_id)
+    run = store.get_run(build_id)
+    if not run or run["subject"] != subject:
+        raise HTTPException(status_code=404, detail="构建任务不存在")
+    return run
+
+
+@app.get("/api/knowledge-graph/{subject}/merge-review/pending")
+def get_pending_merge_review(
+    subject: str,
+    x_user_id: Optional[str] = Header(None, alias="X-User-ID"),
+    authorization: Optional[str] = Header(None),
+):
+    effective_user_id = get_current_user_id(x_user_id, authorization)
+    _require_merge_review_write(subject, effective_user_id)
+    _, store = _merge_review_context(subject, effective_user_id)
+    return {"build": store.latest_waiting_run(subject, effective_user_id)}
+
+
+@app.get("/api/knowledge-graph/{subject}/builds/{build_id}/merge-candidates")
+def list_merge_candidates(
+    subject: str, build_id: str,
+    x_user_id: Optional[str] = Header(None, alias="X-User-ID"),
+    authorization: Optional[str] = Header(None),
+):
+    effective_user_id = get_current_user_id(x_user_id, authorization)
+    _require_merge_review_write(subject, effective_user_id)
+    _, store = _merge_review_context(subject, effective_user_id)
+    run = store.get_run(build_id)
+    if not run or run["subject"] != subject:
+        raise HTTPException(status_code=404, detail="构建任务不存在")
+    return {"build": run, "candidates": store.list_candidates(build_id)}
+
+
+@app.put("/api/knowledge-graph/{subject}/builds/{build_id}/merge-candidates/{candidate_id}")
+def review_merge_candidate(
+    subject: str, build_id: str, candidate_id: str, body: Dict[str, Any],
+    x_user_id: Optional[str] = Header(None, alias="X-User-ID"),
+    authorization: Optional[str] = Header(None),
+):
+    effective_user_id = get_current_user_id(x_user_id, authorization)
+    _require_merge_review_write(subject, effective_user_id)
+    _, store = _merge_review_context(subject, effective_user_id)
+    try:
+        return store.save_decision(
+            build_id, candidate_id,
+            decision=body.get("decision", ""),
+            relation_decision=body.get("relation_decision", ""),
+            canonical_name=body.get("canonical_name", ""),
+        )
+    except KeyError:
+        raise HTTPException(status_code=404, detail="合并候选不存在")
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+
+@app.post("/api/knowledge-graph/{subject}/builds/{build_id}/merge-review/advice")
+def generate_merge_advice(
+    subject: str, build_id: str, body: Dict[str, Any] = None,
+    x_user_id: Optional[str] = Header(None, alias="X-User-ID"),
+    authorization: Optional[str] = Header(None),
+):
+    effective_user_id = get_current_user_id(x_user_id, authorization)
+    _require_merge_review_write(subject, effective_user_id)
+    graph_store, store = _merge_review_context(subject, effective_user_id)
+    run = store.get_run(build_id)
+    if not run or run["subject"] != subject:
+        raise HTTPException(status_code=404, detail="构建任务不存在")
+    if run["status"] != "waiting_merge_review":
+        raise HTTPException(status_code=409, detail="该构建任务当前不在合并审核阶段")
+    body = body or {}
+    if effective_user_id not in ("anonymous", "default"):
+        vector_store = _get_user_context_from_header(effective_user_id).get_user_vector_store(subject)
+    else:
+        raise HTTPException(status_code=401, detail="需要登录后生成 LLM 预审建议")
+    try:
+        return _generate_merge_advice(
+            store, build_id, vector_store, paradigm=run["paradigm"],
+            llm_provider=run["options"].get("llm_provider"),
+            force=bool(body.get("force", False)),
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"LLM 预审生成失败：{exc}")
+
+
+@app.post("/api/knowledge-graph/{subject}/builds/{build_id}/merge-review/accept-advisor")
+def accept_merge_advice(
+    subject: str, build_id: str, body: Dict[str, Any] = None,
+    x_user_id: Optional[str] = Header(None, alias="X-User-ID"),
+    authorization: Optional[str] = Header(None),
+):
+    effective_user_id = get_current_user_id(x_user_id, authorization)
+    _require_merge_review_write(subject, effective_user_id)
+    _, store = _merge_review_context(subject, effective_user_id)
+    run = store.get_run(build_id)
+    if not run or run["subject"] != subject:
+        raise HTTPException(status_code=404, detail="构建任务不存在")
+    body = body or {}
+    try:
+        threshold = float(body.get("threshold", 0.9))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=422, detail="threshold 必须是 0 到 1 之间的数字")
+    if not 0 <= threshold <= 1:
+        raise HTTPException(status_code=422, detail="threshold 必须是 0 到 1 之间的数字")
+    accepted = store.accept_high_confidence_advice(build_id, threshold=threshold)
+    return {
+        "accepted_count": len(accepted),
+        "accepted": accepted,
+        "build": store.get_run(build_id),
+        "candidates": store.list_candidates(build_id),
+    }
+
+
+@app.post("/api/knowledge-graph/{subject}/builds/{build_id}/merge-review/submit")
+def submit_merge_review(
+    subject: str, build_id: str,
+    x_user_id: Optional[str] = Header(None, alias="X-User-ID"),
+    authorization: Optional[str] = Header(None),
+):
+    from core.graph_builder import GraphBuilder
+
+    effective_user_id = get_current_user_id(x_user_id, authorization)
+    _require_merge_review_write(subject, effective_user_id)
+    graph_store, store = _merge_review_context(subject, effective_user_id)
+    run = store.get_run(build_id)
+    if not run or run["subject"] != subject:
+        raise HTTPException(status_code=404, detail="构建任务不存在")
+    try:
+        decisions = store.decision_map(build_id)
+        canonical_names = store.canonical_name_map(build_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+
+    options = run["options"]
+    if effective_user_id not in ("anonymous", "default"):
+        ctx = _get_user_context_from_header(effective_user_id)
+        vector_store = ctx.get_user_vector_store(subject)
+        builder = GraphBuilder(
+            f"{subject}_v1", paradigm=run["paradigm"], vector_store=vector_store,
+            graph_store=graph_store, llm_provider=options.get("llm_provider"),
+        )
+    else:
+        builder = GraphBuilder(
+            f"{subject}_v1", paradigm=run["paradigm"], graph_store=graph_store,
+            llm_provider=options.get("llm_provider"),
+        )
+    store.update_status(build_id, "resuming")
+    try:
+        dedupe = builder.dedupe_concepts(
+            require_review_complete=True,
+            review_decisions=decisions,
+            canonical_name_decisions=canonical_names,
+        )
+        link = builder.link_concepts(paradigm=run["paradigm"])
+        centrality_count = 0
+        try:
+            centrality_count = len(builder.graph_store.compute_and_cache_centrality())
+        except Exception as centrality_exc:
+            print(
+                "[submit_merge_review] PageRank refresh failed (non-blocking): "
+                f"{centrality_exc}"
+            )
+        _persist_subject_paradigm(subject, run["paradigm"], effective_user_id)
+        gap_result = None
+        try:
+            from app.gap_api import detect_and_reconcile_gaps
+            from config.settings import get_subject_gap_db_path
+            from core.gap_store import GapStore
+            registration = _get_subject_anywhere(subject, effective_user_id) or {}
+            owner_id = registration.get("owner_id") or "system"
+            data_user_id = owner_id if registration.get("visibility") == "private" else None
+            gap_result = detect_and_reconcile_gaps(
+                subject=subject, paradigm_id=run["paradigm"],
+                gap_store=GapStore(get_subject_gap_db_path(subject, data_user_id), subject),
+                graph_store=builder.graph_store, detect_root_gaps=True,
+            )
+        except Exception as gap_exc:
+            print(f"[submit_merge_review] Gap reconcile failed (non-blocking): {gap_exc}")
+        completed_result = {
+            "status": "completed", "build_id": build_id,
+            "dedupe": dedupe, "link": link, "centrality_count": centrality_count,
+            "gaps": gap_result,
+        }
+        store.update_status(build_id, "completed", completed_result)
+        return completed_result
+    except Exception:
+        store.update_status(build_id, "failed")
+        raise
 
 
 @app.get("/api/knowledge-graph/{subject}/stats")
@@ -4082,7 +4409,7 @@ def _get_chunk_meta(graph_store, chunk_id: str) -> dict:
 @app.get("/api/knowledge-graph/{subject}/concepts")
 def list_graph_concepts(
     subject: str,
-    limit: int = 2000,
+    limit: Optional[int] = Query(default=None, ge=1),
     x_user_id: Optional[str] = Header(None, alias="X-User-ID"),
     authorization: Optional[str] = Header(None),
 ):
@@ -4093,7 +4420,7 @@ def list_graph_concepts(
     """
     effective_user_id = get_current_user_id(x_user_id, authorization)
     import csv
-    from core.graph_store import GraphStore
+    from core.media_resolver import resolve_media_list
 
     try:
         # 1. 从 CSV 读取额外字段（description, parent_hint）
@@ -4168,6 +4495,12 @@ def list_graph_concepts(
                 else:
                     source_refs.append(chunk_id)  # fallback
             
+            media_refs = resolve_media_list(
+                node.get("media_refs", []),
+                subject=subject,
+                user_id=effective_user_id,
+                deduplicate=True,
+            )
             concepts.append({
                 "id": db_id,
                 "name": node["name"] or csv_info.get("name", ""),
@@ -4176,7 +4509,7 @@ def list_graph_concepts(
                 "parent_hint": csv_info.get("parent_hint", ""),
                 "source_chunks": source_chunk_ids,
                 "source_refs": source_refs,
-                "media_refs": node.get("media_refs", []),
+                "media_refs": media_refs,
                 "is_virtual": node.get("is_virtual", False),  # LA-046
             })
 
@@ -4210,7 +4543,7 @@ def list_graph_concepts(
 @app.get("/api/knowledge-graph/{subject}/concept-links")
 def list_concept_links(
     subject: str,
-    limit: int = 500,
+    limit: Optional[int] = Query(default=None, ge=1),
     x_user_id: Optional[str] = Header(None, alias="X-User-ID"),
     authorization: Optional[str] = Header(None),
 ):
@@ -4239,13 +4572,28 @@ def list_concept_links(
 
 
 @app.get("/api/knowledge-graph/{subject}/paradigm")
-def get_paradigm_config(subject: str):
+def get_paradigm_config(
+    subject: str,
+    x_user_id: Optional[str] = Header(None, alias="X-User-ID"),
+    authorization: Optional[str] = Header(None),
+):
     """
     LA-052: 获取指定学科的范式配置（供前端动态渲染使用）。
     """
     try:
         # 从学科配置读取范式ID
-        paradigm_id = _get_subject_paradigm(subject)
+        effective_user_id = get_current_user_id(x_user_id, authorization)
+        registration = _get_subject_anywhere(subject, effective_user_id)
+        if registration:
+            from core.permission_manager import PermissionManager
+            if not PermissionManager().can_read(
+                effective_user_id,
+                subject,
+                registration.get("owner_id") or "system",
+                registration.get("visibility") or "public",
+            ):
+                raise HTTPException(status_code=403, detail="无权访问该学科")
+        paradigm_id = _get_subject_paradigm(subject, effective_user_id)
         
         # 从 YAML 加载范式配置
         from core.semantic_linker import _PARADIGMS_YAML
@@ -4400,7 +4748,7 @@ def delete_paradigm_api(paradigm_id: str):
         raise HTTPException(status_code=500, detail=f"删除范式失败: {str(e)}")
 
 
-def _get_subject_paradigm(subject: str) -> str:
+def _get_subject_paradigm(subject: str, user_id: Optional[str] = None) -> str:
     """
     获取学科使用的范式ID。
     优先从学科配置文件读取，fallback 到默认范式。
@@ -4408,7 +4756,12 @@ def _get_subject_paradigm(subject: str) -> str:
     import json
     from config.settings import PROJECT_ROOT
     
-    # 尝试读取学科配置
+    # Registry is the authoritative, user-scoped source.
+    registration = _get_subject_anywhere(subject, user_id)
+    if registration and registration.get("paradigm"):
+        return str(registration["paradigm"])
+
+    # Legacy read-only fallback for existing deployments.
     subject_config_path = PROJECT_ROOT / "config" / "subjects" / f"{subject}.json"
     if subject_config_path.exists():
         try:
@@ -4434,6 +4787,25 @@ def _get_subject_paradigm(subject: str) -> str:
     
     # 默认 fallback
     return "engineering"
+
+
+def _persist_subject_paradigm(subject: str, paradigm: str, user_id: Optional[str]) -> None:
+    """Store a build's paradigm in the registry that owns the subject."""
+    from core.subject_manager import SubjectManager
+    from config.settings import DATA_ROOT, USERS_DIR
+
+    registration = _get_subject_anywhere(subject, user_id)
+    if not registration:
+        raise ValueError(f"学科不存在，无法保存范式: {subject}")
+    owner_id = registration.get("owner_id") or "system"
+    visibility = registration.get("visibility") or "public"
+    db_path = (
+        USERS_DIR / owner_id / "subjects.db"
+        if visibility == "private" and owner_id != "system"
+        else DATA_ROOT / "subjects.db"
+    )
+    if not SubjectManager(db_path=str(db_path)).set_paradigm(subject, paradigm):
+        raise ValueError(f"学科注册记录不存在，无法保存范式: {subject}")
 
 
 # ========== 批量语义提取 + 去重 ==========

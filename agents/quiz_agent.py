@@ -148,6 +148,8 @@ Bloom 认知层次标注规则：
 
 注意：
 - 所有内容必须是中文（技术术语可保留英文）
+- 涉及数学表达时必须使用可渲染的标准 LaTeX：行内公式使用 $...$，独立公式使用 $$...$$
+- JSON 字符串中的 LaTeX 反斜杠必须正确转义，例如 \\frac、\\gamma；不要使用 Markdown 代码块包裹公式
 - 确保 JSON 格式完全正确，可以被 Python json.loads 解析
 - 不同题型的 type 字段必须严格匹配：single_choice / multiple_choice / true_false / fill_blank / short_answer
 """
@@ -190,6 +192,8 @@ QUIZ_GENERATION_PROMPT = """你是一个专业的教育出题专家。请基于�
 注意：
 - options 数组中每个元素必须包含 "A. "、"B. " 等前缀
 - 所有内容必须是中文（技术术语可保留英文）
+- 涉及数学表达时必须使用可渲染的标准 LaTeX：行内公式使用 $...$，独立公式使用 $$...$$
+- JSON 字符串中的 LaTeX 反斜杠必须正确转义，例如 \\frac、\\gamma；不要使用 Markdown 代码块包裹公式
 - 确保 JSON 格式完全正确，可以被 Python json.loads 解析
 """
 # 规则生成备用 Prompt（当 LLM 不可用时，改进的规则方法）

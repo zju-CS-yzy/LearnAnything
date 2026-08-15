@@ -14,6 +14,40 @@ export const COLORS = {
   depends_on: '#9b59b6',
 }
 
+// 概念类型使用稳定的语义色，而不是按范式统一涂色。
+// 所有颜色均与白色正文保持足够对比；节点卡片中的类型文字同时提供非颜色线索。
+export const CONCEPT_TYPE_COLORS = Object.freeze({
+  requirement: '#C0392B',
+  sub_requirement: '#C0392B',
+  technology: '#2874A6',
+  sub_technology: '#2874A6',
+  concept: '#237A45',
+  definition: '#2563EB',
+  law: '#7E22CE',
+  application: '#C2410C',
+  extension: '#0F766E',
+})
+
+export const CONCEPT_TYPE_BORDER_COLORS = Object.freeze({
+  requirement: '#922B21',
+  sub_requirement: '#922B21',
+  technology: '#1B4F72',
+  sub_technology: '#1B4F72',
+  concept: '#196F3D',
+  definition: '#1D4ED8',
+  law: '#6B21A8',
+  application: '#9A3412',
+  extension: '#115E59',
+})
+
+export function getConceptTypeColor(type) {
+  return CONCEPT_TYPE_COLORS[type] || CONCEPT_TYPE_COLORS.concept
+}
+
+export function getConceptTypeBorderColor(type) {
+  return CONCEPT_TYPE_BORDER_COLORS[type] || CONCEPT_TYPE_BORDER_COLORS.concept
+}
+
 /**
  * 构建完整的 Cytoscape 样式数组
  */
@@ -56,6 +90,25 @@ export function buildCyStyles() {
         'border-color': COLORS.selected,
       }
     },
+    // Gap Flow M2: frontend-only placeholder; never persisted as CanonicalConcept.
+    {
+      selector: 'node[?isVirtualGap]',
+      style: {
+        'label': 'data(label)',
+        'width': 34,
+        'height': 34,
+        'shape': 'ellipse',
+        'background-color': '#fff8f0',
+        'background-opacity': 0.75,
+        'border-width': 3,
+        'border-style': 'dashed',
+        'border-color': '#e67e22',
+        'color': '#9a4d08',
+        'font-size': '10px',
+        'font-weight': 700,
+        'text-outline-width': 0,
+      }
+    },
     // ========== 概念节点样式（UML 类图卡片风格）==========
     {
       selector: 'node[type="concept"], node[type="requirement"], node[type="sub_requirement"], node[type="technology"], node[type="sub_technology"], node[type="definition"], node[type="law"], node[type="application"], node[type="extension"]',
@@ -91,11 +144,36 @@ export function buildCyStyles() {
         'background-color': '#3498db',
       }
     },
-    // 通用概念（含 Phase 2 提取的 definition/law/application/extension）-- 背景色绿色
+    // 通用概念
     {
-      selector: 'node[type="concept"], node[type="definition"], node[type="law"], node[type="application"], node[type="extension"]',
+      selector: 'node[type="concept"]',
       style: {
-        'background-color': '#2ecc71',
+        'background-color': CONCEPT_TYPE_COLORS.concept,
+      }
+    },
+    // Theory 范式：定义、规律、应用、扩展使用可辨识的语义色。
+    {
+      selector: 'node[type="definition"]',
+      style: {
+        'background-color': CONCEPT_TYPE_COLORS.definition,
+      }
+    },
+    {
+      selector: 'node[type="law"]',
+      style: {
+        'background-color': CONCEPT_TYPE_COLORS.law,
+      }
+    },
+    {
+      selector: 'node[type="application"]',
+      style: {
+        'background-color': CONCEPT_TYPE_COLORS.application,
+      }
+    },
+    {
+      selector: 'node[type="extension"]',
+      style: {
+        'background-color': CONCEPT_TYPE_COLORS.extension,
       }
     },
     // ========== 文档树节点卡片风格（P34）==========
@@ -189,6 +267,24 @@ export function buildCyStyles() {
         'border-color': COLORS.selected,
       }
     },
+    // Gap completion: supplemented records resolve to real concepts, not virtual nodes.
+    {
+      selector: 'node.gap-supplemented-node',
+      style: {
+        'border-width': 5,
+        'border-color': '#2f9e62',
+      }
+    },
+    {
+      selector: 'node.gap-completion-focus',
+      style: {
+        'border-width': 5,
+        'border-color': '#15864c',
+        'underlay-color': '#43b977',
+        'underlay-opacity': 0.24,
+        'underlay-padding': 12,
+      }
+    },
     // 使用角度值精确固定在节点边界：
     // - 0deg = 12点钟方向（上中）
     // - 90deg = 3点钟方向（右中）<- 源端点
@@ -224,6 +320,26 @@ export function buildCyStyles() {
         'arrow-scale': 0.8,
       }
     },
+    {
+      selector: 'edge[type="VIRTUAL_GAP_EDGE"]',
+      style: {
+        'line-color': '#d59a61',
+        'target-arrow-color': '#d59a61',
+        'line-style': 'dashed',
+        'width': 2,
+        'opacity': 0.82,
+        'target-arrow-shape': 'triangle',
+        'arrow-scale': 0.7,
+      }
+    },
+    {
+      selector: 'edge.gap-skip-edge',
+      style: {
+        'line-style': 'dashed',
+        'opacity': 0.14,
+        'width': 1,
+      }
+    },
     // SOLUTION: 概念层"解决"关系
     {
       selector: 'edge[type="SOLUTION"]',
@@ -244,6 +360,51 @@ export function buildCyStyles() {
         'target-arrow-color': COLORS.depends_on,
         'line-style': 'dashed',
         'width': 1.5,
+        'target-arrow-shape': 'triangle',
+        'arrow-scale': 0.8,
+      }
+    },
+    // Theory paradigm semantic relationships.
+    {
+      selector: 'edge[type="DEFINES"]',
+      style: {
+        'line-color': '#2980b9',
+        'target-arrow-color': '#2980b9',
+        'line-style': 'solid',
+        'width': 2,
+        'target-arrow-shape': 'triangle',
+        'arrow-scale': 0.8,
+      }
+    },
+    {
+      selector: 'edge[type="HAS_LAW"]',
+      style: {
+        'line-color': '#8e44ad',
+        'target-arrow-color': '#8e44ad',
+        'line-style': 'solid',
+        'width': 2,
+        'target-arrow-shape': 'triangle',
+        'arrow-scale': 0.8,
+      }
+    },
+    {
+      selector: 'edge[type="APPLIES_TO"]',
+      style: {
+        'line-color': '#16a085',
+        'target-arrow-color': '#16a085',
+        'line-style': 'solid',
+        'width': 2,
+        'target-arrow-shape': 'triangle',
+        'arrow-scale': 0.8,
+      }
+    },
+    {
+      selector: 'edge[type="EXTENDS"]',
+      style: {
+        'line-color': '#d35400',
+        'target-arrow-color': '#d35400',
+        'line-style': 'dashed',
+        'width': 2,
         'target-arrow-shape': 'triangle',
         'arrow-scale': 0.8,
       }

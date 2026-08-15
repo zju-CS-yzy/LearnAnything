@@ -118,6 +118,26 @@ class VectorStore:
 
         return {"ids": ids, "documents": docs, "metadatas": metas}
 
+    def get_by_ids(self, ids: List[str]) -> List[Dict[str, Any]]:
+        """Return documents for exact IDs while preserving the requested order."""
+        ordered_ids = [str(item) for item in ids if str(item or "").strip()]
+        if not ordered_ids:
+            return []
+        placeholders = ",".join("?" for _ in ordered_ids)
+        rows = self._conn.execute(
+            f"SELECT id, text, metadata FROM documents WHERE id IN ({placeholders})",
+            ordered_ids,
+        ).fetchall()
+        by_id = {
+            row[0]: {
+                "id": row[0],
+                "text": row[1],
+                "metadata": json.loads(row[2]) if row[2] else {},
+            }
+            for row in rows
+        }
+        return [by_id[item] for item in ordered_ids if item in by_id]
+
     def count(self) -> int:
         """返回集合文档数。"""
         cursor = self._conn.execute("SELECT COUNT(*) FROM documents")
@@ -219,6 +239,48 @@ class VectorStore:
                 (doc_id, doc["text"], meta, emb_json)
             )
         self._conn.commit()
+
+    def replace_source_chunks(
+        self,
+        source_name: str,
+        documents: List[Dict[str, Any]],
+        chunk_types: Optional[List[str]] = None,
+    ) -> int:
+        """Atomically replace selected chunks belonging to one source file."""
+        if not documents:
+            return 0
+        embeddings = self._embedding.embed([doc["text"] for doc in documents])
+        types = chunk_types or ["document", "heading", "paragraph", "image_pseudo"]
+        placeholders = ",".join("?" for _ in types)
+        conn = self._conn
+        try:
+            conn.execute("BEGIN")
+            conn.execute(
+                f"""DELETE FROM documents
+                    WHERE COALESCE(
+                        json_extract(metadata, '$.source'),
+                        json_extract(metadata, '$.source_name')
+                    ) = ?
+                    AND json_extract(metadata, '$.chunk_type') IN ({placeholders})""",
+                (source_name, *types),
+            )
+            for doc, emb in zip(documents, embeddings):
+                if hasattr(emb, "tolist"):
+                    emb = emb.tolist()
+                conn.execute(
+                    "INSERT OR REPLACE INTO documents (id, text, metadata, embedding) VALUES (?, ?, ?, ?)",
+                    (
+                        doc.get("id", self._generate_id(doc["text"])),
+                        doc["text"],
+                        json.dumps(doc.get("metadata", {}), ensure_ascii=False),
+                        json.dumps(emb, ensure_ascii=False),
+                    ),
+                )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        return len(documents)
 
     def query(self, query_text: str, n_results: int = 10, where: Optional[Dict] = None) -> List[Dict[str, Any]]:
         """向量检索：计算 query embedding 与所有文档的 cosine similarity，返回 Top-K。"""

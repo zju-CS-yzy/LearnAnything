@@ -58,6 +58,10 @@ class GraphBuilder:
         """
         print(f"[GraphBuilder] Starting Phase 1 build for {self.collection_name}")
 
+        structure_refresh = None
+        if force_rebuild:
+            structure_refresh = self._refresh_saved_markdown_structure()
+
         # 1. 初始化图数据库 Schema
         self.graph_store.init_schema(force=force_rebuild)
 
@@ -90,10 +94,102 @@ class GraphBuilder:
             "adjacent_to_edges": adjacent_count,
             "graph_stats": stats,
             "status": "success",
+            "structure_refresh": structure_refresh,
         }
 
         print(f"[GraphBuilder] Phase 1 build completed: {result}")
         return result
+
+    def _refresh_saved_markdown_structure(self) -> Dict[str, Any]:
+        """Re-chunk saved MinerU Markdown before a force rebuild.
+
+        This makes parser fixes applicable to already imported PDFs without a
+        second upload or MinerU API call. Existing image pseudo chunks and
+        media references are retained and re-anchored to the refreshed tree.
+        """
+        from core.markdown_chunker import MarkdownChunker
+        from core.mineru_client import MinerUClient
+
+        md_dir = self.graph_store.data_dir / "md"
+        if not md_dir.is_dir():
+            return {"documents": 0, "chunks": 0}
+
+        existing = self.vector_store.list_all(limit=100000)
+        by_source: Dict[str, List[Dict[str, Any]]] = {}
+        for chunk in existing:
+            meta = chunk.get("metadata", {})
+            source = meta.get("source") or meta.get("source_name") or ""
+            if source:
+                by_source.setdefault(source, []).append(chunk)
+
+        refreshed_documents = 0
+        refreshed_chunks = 0
+        chunker = MarkdownChunker()
+        image_matcher = object.__new__(MinerUClient)
+
+        for md_path in sorted(md_dir.glob("*.md")):
+            source = next(
+                (
+                    name for name in by_source
+                    if Path(name).stem == md_path.stem
+                ),
+                f"{md_path.stem}.pdf",
+            )
+            source_chunks = by_source.get(source, [])
+            if not source_chunks:
+                continue
+            base_meta = next(
+                (
+                    dict(item.get("metadata", {}))
+                    for item in source_chunks
+                    if item.get("metadata", {}).get("chunk_type") == "document"
+                ),
+                {"source": source},
+            )
+            base_meta["source"] = source
+            for structural_key in (
+                "chunk_type", "heading_path", "heading_level", "parent_id",
+                "child_ids", "paragraph_ids", "paragraph_index", "line_range",
+                "image_refs", "media_refs", "formula_count", "table_lines",
+                "is_code_block",
+            ):
+                base_meta.pop(structural_key, None)
+            new_structure = chunker.chunk_markdown(
+                md_path.read_text(encoding="utf-8"), base_meta
+            )
+
+            images = [
+                item for item in source_chunks
+                if item.get("metadata", {}).get("chunk_type") == "image_pseudo"
+            ]
+            for index, image in enumerate(images):
+                meta = dict(image.get("metadata", {}))
+                anchor = image_matcher._match_image_anchor(
+                    text=image.get("text", ""),
+                    is_formula=bool(meta.get("is_formula_image")),
+                    image_index=index,
+                    image_count=len(images),
+                    chunks=new_structure,
+                )
+                anchor_meta = anchor.get("metadata", {}) if anchor else {}
+                meta.update({
+                    "source": source,
+                    "source_name": source,
+                    "heading_path": anchor_meta.get("heading_path", ""),
+                    "heading_level": anchor_meta.get("heading_level", 0),
+                    "parent_id": anchor.get("id") if anchor else None,
+                    "page_number": anchor_meta.get("page_number", meta.get("page_number", 0)),
+                })
+                image["metadata"] = meta
+                image["source"] = source
+
+            replacement = new_structure + images
+            refreshed_chunks += self.vector_store.replace_source_chunks(
+                source, replacement
+            )
+            refreshed_documents += 1
+
+        return {"documents": refreshed_documents, "chunks": refreshed_chunks}
 
     def increment_update(self, new_chunks: List[Dict[str, Any]]) -> Dict[str, Any]:
         """
@@ -219,6 +315,10 @@ class GraphBuilder:
                 if h_text.strip():
                     heading_context += h_text.strip() + "\n"
             heading_context = heading_context.strip()[:300]  # 截断到300字符，避免占用过多token
+            # Heading chunks aggregate descendant text and media for document-tree
+            # display. Their formula refs duplicate paragraph refs and must not be
+            # attached wholesale to every concept extracted from the heading group.
+            # The individual paragraph/image chunks below remain the source of truth.
             
             # 准备批量提取的输入（只包含非 heading 的 chunk）
             batch_chunks = []
@@ -365,7 +465,12 @@ class GraphBuilder:
 
         return []
 
-    def dedupe_concepts(self) -> Dict[str, Any]:
+    def dedupe_concepts(
+        self,
+        require_review_complete: bool = False,
+        review_decisions: Dict[tuple, str] = None,
+        canonical_name_decisions: Dict[tuple, str] = None,
+    ) -> Dict[str, Any]:
         """
         对全局概念空间进行去重。
 
@@ -376,10 +481,18 @@ class GraphBuilder:
 
         # 复用同一个 GraphStore 实例，避免 KùzuDB 锁冲突
         deduper = ConceptDeduper(self.collection_name, graph_store=self.graph_store)
-        stats = deduper.get_deduped_stats()
+        # 去重是有写入副作用的阶段，只允许执行一次；统计与 CSV 复用同一结果。
+        concepts = deduper.dedupe_all(
+            review_decisions=review_decisions,
+            require_review_complete=require_review_complete,
+            canonical_name_decisions=canonical_name_decisions,
+        )
+        stats = deduper.get_deduped_stats(concepts=concepts)
 
         # 导出表格
-        csv_path = deduper.export_table()
+        csv_path = ""
+        if getattr(deduper, "last_report", {}).get("persisted", True):
+            csv_path = deduper.export_table(concepts=concepts)
 
         return {
             "status": "success",

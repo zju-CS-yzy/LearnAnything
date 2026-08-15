@@ -167,7 +167,8 @@ class ConceptRetriever:
                 rel_types = "|".join(edge_types)
                 cypher = f"""
                     MATCH (c:CanonicalConcept)-[r:{rel_types}]-(n:CanonicalConcept)
-                    WHERE c.canonical_id IN [{frontier_str}]
+                    WHERE NOT n.canonical_id STARTS WITH '__virtual_'
+                      AND c.canonical_id IN [{frontier_str}]
                     RETURN DISTINCT n.canonical_id, n.name, n.concept_type,
                            n.description, n.parent_hint, n.aliases
                     LIMIT {max_nodes * 2}
@@ -175,7 +176,8 @@ class ConceptRetriever:
             else:
                 cypher = f"""
                     MATCH (c:CanonicalConcept)-[r]-(n:CanonicalConcept)
-                    WHERE c.canonical_id IN [{frontier_str}]
+                    WHERE NOT n.canonical_id STARTS WITH '__virtual_'
+                      AND c.canonical_id IN [{frontier_str}]
                     RETURN DISTINCT n.canonical_id, n.name, n.concept_type,
                            n.description, n.parent_hint, n.aliases
                     LIMIT {max_nodes * 2}
@@ -287,10 +289,12 @@ class ConceptRetriever:
         # 查询度数
         in_cypher = f"""
             MATCH (c:CanonicalConcept {{canonical_id: '{canonical_id}'}})<-[:SOLUTION|:DEPENDS_ON|:HAS_DETAIL]-(n)
+            WHERE NOT n.canonical_id STARTS WITH '__virtual_'
             RETURN count(n) as in_degree
         """
         out_cypher = f"""
             MATCH (c:CanonicalConcept {{canonical_id: '{canonical_id}'}})-[:SOLUTION|:DEPENDS_ON|:HAS_DETAIL]->(n)
+            WHERE NOT n.canonical_id STARTS WITH '__virtual_'
             RETURN count(n) as out_degree
         """
 
@@ -368,6 +372,7 @@ class ConceptRetriever:
 
         cypher = f"""
             MATCH (c:CanonicalConcept {{name: '{safe_name}'}})
+            WHERE NOT c.canonical_id STARTS WITH '__virtual_'
             RETURN c.canonical_id, c.name, c.concept_type, c.description,
                    c.parent_hint, c.aliases, c.source_chunks
             LIMIT 1
@@ -400,7 +405,8 @@ class ConceptRetriever:
         # P0-QUIZ-DEBUG: 打印 Cypher 查询
         cypher = f"""
             MATCH (c:CanonicalConcept)
-            WHERE c.name CONTAINS '{safe_name}' OR '{safe_name}' CONTAINS c.name
+            WHERE NOT c.canonical_id STARTS WITH '__virtual_'
+              AND (c.name CONTAINS '{safe_name}' OR '{safe_name}' CONTAINS c.name)
             RETURN c.canonical_id, c.name, c.concept_type, c.description,
                    c.parent_hint, c.aliases, c.source_chunks
             LIMIT 10
@@ -457,7 +463,8 @@ class ConceptRetriever:
 
         cypher = f"""
             MATCH (c:CanonicalConcept)
-            WHERE c.aliases CONTAINS '{safe_name}'
+            WHERE NOT c.canonical_id STARTS WITH '__virtual_'
+              AND c.aliases CONTAINS '{safe_name}'
             RETURN c.canonical_id, c.name, c.concept_type, c.description,
                    c.parent_hint, c.aliases, c.source_chunks
             LIMIT 1
@@ -500,7 +507,8 @@ class ConceptRetriever:
 
         cypher = f"""
             MATCH (c:CanonicalConcept)
-            WHERE c.canonical_id IN [{id_str}]
+            WHERE NOT c.canonical_id STARTS WITH '__virtual_'
+              AND c.canonical_id IN [{id_str}]
             RETURN c.canonical_id, c.name, c.concept_type, c.description,
                    c.parent_hint, c.aliases, c.source_chunks
         """
@@ -516,7 +524,8 @@ class ConceptRetriever:
             try:
                 cypher = f"""
                     MATCH (c:CanonicalConcept)
-                    WHERE c.canonical_id IN [{id_str}]
+                    WHERE NOT c.canonical_id STARTS WITH '__virtual_'
+                      AND c.canonical_id IN [{id_str}]
                     RETURN c.canonical_id, c.name, c.concept_type, c.description,
                            c.parent_hint
                 """
@@ -593,6 +602,7 @@ class ConceptRetriever:
 
         cypher = """
             MATCH (c:CanonicalConcept)
+            WHERE NOT c.canonical_id STARTS WITH '__virtual_'
             RETURN c.canonical_id, c.name, c.concept_type, c.description,
                    c.parent_hint, c.aliases, c.source_chunks
             LIMIT 1000
@@ -609,6 +619,7 @@ class ConceptRetriever:
             try:
                 cypher = """
                     MATCH (c:CanonicalConcept)
+                    WHERE NOT c.canonical_id STARTS WITH '__virtual_'
                     RETURN c.canonical_id, c.name, c.concept_type, c.description, c.parent_hint
                     LIMIT 1000
                 """

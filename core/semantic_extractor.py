@@ -249,17 +249,27 @@ _SEMANTIC_EXTRACTION_BASE_PROMPT = """你是一个知识概念分析专家。你
 
 1. 提取 3-8 个核心概念（概念数量根据片段信息密度调整，信息密度高则多提取，低则少提取）
 2. 每个概念包含：
-   - name: 概念名称（简洁、2-8个中文或1-5个英文单词）
+   - name: 概念名称（必须使用简体中文；英文术语应翻译为通行中文名称）
    - concept_type: 概念类型（从当前范式中选择）
    - relation: 与当前片段的关系类型（从当前范式中选择）
    - description: 一句话说明为什么这个片段包含这个概念（20-60字）
    - parent_hint: 如果文本明确提到此概念的上层关联概念（如"为了解决X而提出Y"中的X），填写那个概念的名称；否则留空
+   - aliases: 仅填写原文明示与 name 完全等价的别名、缩写或全称；相关技术、阶段、系统、应用不得作为别名
+   - alias_evidence: aliases 的逐项证据，格式为 [{"alias": "别名", "evidence": "原文中的短语"}]；没有明确证据时留空数组
 
 3. 判断标准：
    - 只提取【知识片段】区域中**明确提及**或**直接关联**的概念
    - 不要提取【知识片段】区域中仅"附带提及"的概念（如背景知识、假设前提）
    - 注意：概念名称必须能在【知识片段】原文中找到直接对应的表述或明确含义，避免生成"完整聚合""微调嵌入"这类脱离上下文的概念名
    - **绝对禁止**从本提示词的指令文字、示例说明、格式要求中提取概念
+
+## 输出语言（当前版本强制）
+
+- `name`、`description`、`parent_hint` 必须使用简体中文，即使知识片段是英文。
+- 英文原名、标准缩写和英文全称保留在 `aliases` 中；例如 name 使用“检索增强生成”，aliases 可包含“RAG”和“Retrieval-Augmented Generation”。
+- `alias_evidence.evidence` 必须忠实保留原文证据，不要为了中文化而改写引文。
+- 数学符号、公式、模型代号和 `concept_type` / `relation` 枚举值保持原样。
+- 不允许同一批结果中的概念名称一部分使用中文、一部分使用英文。
 
 4. 输出严格 JSON 数组格式，不要包含任何解释性文字。
 """
@@ -316,6 +326,38 @@ class SemanticExtractor:
     def get_valid_relations(self) -> List[str]:
         """获取当前范式支持的关系类型列表。"""
         return list(PARADIGMS.get(self.paradigm, PARADIGMS[_DEFAULT_PARADIGM]).get("relations", {}).keys())
+
+    @staticmethod
+    def _normalize_alias_fields(concept: Dict[str, Any], name: str) -> tuple[List[str], List[Dict[str, str]]]:
+        """Validate explicit equivalence evidence without inventing aliases downstream."""
+        raw_aliases = concept.get("aliases", [])
+        if isinstance(raw_aliases, str):
+            raw_aliases = [raw_aliases]
+        aliases: List[str] = []
+        seen = {name.casefold().strip()}
+        if isinstance(raw_aliases, list):
+            for value in raw_aliases:
+                alias = str(value or "").strip()[:120]
+                key = alias.casefold()
+                if alias and key not in seen:
+                    seen.add(key)
+                    aliases.append(alias)
+
+        evidence_by_alias: Dict[str, Dict[str, str]] = {}
+        raw_evidence = concept.get("alias_evidence", [])
+        if isinstance(raw_evidence, list):
+            for item in raw_evidence:
+                if not isinstance(item, dict):
+                    continue
+                alias = str(item.get("alias") or "").strip()[:120]
+                evidence = str(item.get("evidence") or "").strip()[:240]
+                if alias and evidence and alias.casefold() in {a.casefold() for a in aliases}:
+                    evidence_by_alias[alias.casefold()] = {"alias": alias, "evidence": evidence}
+
+        # An alias without source evidence is unsafe for automatic merging.
+        evidence = [evidence_by_alias[a.casefold()] for a in aliases if a.casefold() in evidence_by_alias]
+        evidenced_aliases = [item["alias"] for item in evidence]
+        return evidenced_aliases, evidence
 
     def extract_concepts(self, chunk_text: str, media_context: List[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
         """
@@ -407,12 +449,16 @@ class SemanticExtractor:
                 if rel not in valid_relations:
                     rel = valid_relations[0] if valid_relations else "DEFINES"
 
+                aliases, alias_evidence = self._normalize_alias_fields(c, name)
+
                 validated.append({
                     "name": name,
                     "concept_type": ctype,
                     "relation": rel,
                     "description": c.get("description", "").strip()[:200],
                     "parent_hint": c.get("parent_hint", "").strip(),
+                    "aliases": aliases,
+                    "alias_evidence": alias_evidence,
                     "paradigm": self.paradigm,
                 })
 
@@ -539,7 +585,7 @@ class SemanticExtractor:
 输出严格 JSON 格式，外层是一个对象，键为 chunk_id，值为该 chunk 的概念数组：
 {
   "chunk_id_1": [
-    {"name": "概念名", "concept_type": "...", "relation": "...", "description": "...", "parent_hint": "..."}
+    {"name": "概念名", "concept_type": "...", "relation": "...", "description": "...", "parent_hint": "...", "aliases": [], "alias_evidence": []}
   ],
   "chunk_id_2": [...]
 }
@@ -597,12 +643,16 @@ class SemanticExtractor:
                     if rel not in valid_relations:
                         rel = valid_relations[0] if valid_relations else "DEFINES"
 
+                    aliases, alias_evidence = self._normalize_alias_fields(c, name)
+
                     validated.append({
                         "name": name,
                         "concept_type": ctype,
                         "relation": rel,
                         "description": c.get("description", "").strip()[:200],
                         "parent_hint": c.get("parent_hint", "").strip(),
+                        "aliases": aliases,
+                        "alias_evidence": alias_evidence,
                         "paradigm": self.paradigm,
                     })
 

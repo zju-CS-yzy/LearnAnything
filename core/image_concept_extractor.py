@@ -26,7 +26,7 @@ import json
 import re
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from PIL import Image as PILImage
 
@@ -58,12 +58,14 @@ class ImageConceptExtractor:
         self.vlm = vlm_client or VLMClient()
         self._description_cache: Dict[str, str] = {}  # 图片路径 → 描述缓存
         self._formula_cache: Dict[str, str] = {}      # LA-035-P21: 图片路径 → LaTeX 缓存
+        self.last_rename_map: Dict[str, str] = {}
     
     def enrich_chunks_with_image_descriptions(
         self,
         chunks: List[Dict[str, Any]],
         subject: str = "generic",
         base_dir: Optional[Path] = None,
+        rename_callback: Optional[Callable[[str, str], None]] = None,
     ) -> List[Dict[str, Any]]:
         """
         对 chunks 中的图片进行 VLM 描述，增强 chunk 文本内容。
@@ -73,12 +75,14 @@ class ImageConceptExtractor:
             chunks: MarkdownChunker 输出的 chunk 列表
             subject: 学科名称（用于图片路径解析）
             base_dir: 基础目录（用于解析相对路径，如 MinerU 输出目录）
+            rename_callback: 图片成功重命名后的持久化回调（旧相对路径，新相对路径）
         
         Returns:
             增强后的 chunk 列表（新增了图片伪文本 chunks）
         """
         result = []
         rename_map = {}  # old_relative_path -> new_relative_path
+        self.last_rename_map = {}
         
         for chunk in chunks:
             result.append(chunk)
@@ -117,7 +121,11 @@ class ImageConceptExtractor:
                 if rename_result:
                     old_rel = img_ref.get("relative_path", "")
                     if old_rel:
-                        rename_map[old_rel] = rename_result["relative_path"]
+                        new_rel = rename_result["relative_path"]
+                        rename_map[old_rel] = new_rel
+                        self.last_rename_map[old_rel] = new_rel
+                        if rename_callback:
+                            rename_callback(old_rel, new_rel)
                     # 更新 img_ref 指向新路径（直接修改原 chunk 的引用）
                     img_ref.update(rename_result)
                 
@@ -657,56 +665,68 @@ class ImageConceptExtractor:
         处理 image_refs、media_refs 以及 concepts 中的 media_refs 三种路径存储位置。
         LA-035-P27-fix: 修复 concept 级别 media_refs 未被更新的问题，导致知识图谱节点引用旧文件名。
         """
+        normalized_renames = {
+            str(old).replace("\\", "/"): str(new).replace("\\", "/")
+            for old, new in rename_map.items()
+        }
+
+        def update_ref(ref: Dict[str, Any]) -> None:
+            """Update refs that store the old location in any supported path field."""
+            if not isinstance(ref, dict):
+                return
+            values = [
+                str(ref.get(key) or "").replace("\\", "/")
+                for key in ("relative_path", "path", "full_path", "thumbnail_path")
+            ]
+            for old_rel, new_rel in normalized_renames.items():
+                old_name, new_name = Path(old_rel).name, Path(new_rel).name
+                if not any(
+                    value == old_rel or (value and Path(value).name == old_name)
+                    for value in values
+                ):
+                    continue
+                ref["relative_path"] = new_rel
+                for key in ("path", "full_path", "thumbnail_path"):
+                    value = ref.get(key)
+                    if not isinstance(value, str) or not value:
+                        continue
+                    normalized = value.replace("\\", "/")
+                    if Path(normalized).name == old_name:
+                        ref[key] = normalized[: -len(old_name)] + new_name
+                # A paragraph-level Markdown ref often has only ``path``.
+                # Store the canonical KB-relative path as well as updating it.
+                if not ref.get("path") or str(ref.get("path")).replace("\\", "/") == old_rel:
+                    ref["path"] = new_rel
+                return
+
         for chunk in chunks:
+            # Markdown text itself can contain image links; metadata-only updates
+            # leave stale paths in vector storage and in later document rebuilds.
+            chunk_text = chunk.get("text")
+            if isinstance(chunk_text, str):
+                for old_rel, new_rel in normalized_renames.items():
+                    chunk_text = chunk_text.replace(
+                        str(old_rel).replace("\\", "/"),
+                        str(new_rel).replace("\\", "/"),
+                    )
+                chunk["text"] = chunk_text
+
             # 1. 更新 image_refs
             for ref in chunk.get("metadata", {}).get("image_refs", []):
-                old_rel = ref.get("relative_path", "")
-                if old_rel in rename_map:
-                    new_rel = rename_map[old_rel]
-                    ref["relative_path"] = new_rel
-                    if "path" in ref:
-                        old_name = Path(old_rel).name
-                        new_name = Path(new_rel).name
-                        ref["path"] = str(ref["path"]).replace(old_name, new_name)
-                    if "thumbnail_path" in ref:
-                        old_name = Path(old_rel).name
-                        new_name = Path(new_rel).name
-                        ref["thumbnail_path"] = str(ref["thumbnail_path"]).replace(old_name, new_name)
+                update_ref(ref)
             
             # 2. 更新 chunk 级别的 media_refs
             for ref in chunk.get("metadata", {}).get("media_refs", []):
                 if ref.get("type") != "image":
                     continue
-                old_rel = ref.get("relative_path", "")
-                if old_rel in rename_map:
-                    new_rel = rename_map[old_rel]
-                    ref["relative_path"] = new_rel
-                    if "path" in ref:
-                        old_name = Path(old_rel).name
-                        new_name = Path(new_rel).name
-                        ref["path"] = str(ref["path"]).replace(old_name, new_name)
-                    if "thumbnail_path" in ref:
-                        old_name = Path(old_rel).name
-                        new_name = Path(new_rel).name
-                        ref["thumbnail_path"] = str(ref["thumbnail_path"]).replace(old_name, new_name)
+                update_ref(ref)
             
             # LA-035-P27-fix: 3. 更新 concepts 中的 media_refs（知识图谱节点引用）
             for concept in chunk.get("metadata", {}).get("concepts", []):
                 for ref in concept.get("media_refs", []):
                     if ref.get("type") != "image":
                         continue
-                    old_rel = ref.get("relative_path", "")
-                    if old_rel in rename_map:
-                        new_rel = rename_map[old_rel]
-                        ref["relative_path"] = new_rel
-                        if "path" in ref:
-                            old_name = Path(old_rel).name
-                            new_name = Path(new_rel).name
-                            ref["path"] = str(ref["path"]).replace(old_name, new_name)
-                        if "thumbnail_path" in ref:
-                            old_name = Path(old_rel).name
-                            new_name = Path(new_rel).name
-                            ref["thumbnail_path"] = str(ref["thumbnail_path"]).replace(old_name, new_name)
+                    update_ref(ref)
 
     def _create_pseudo_chunk(
         self,
@@ -746,6 +766,7 @@ class ImageConceptExtractor:
         media_ref = dict(img_ref)  # 复制，避免修改原始
         # LA-051-DIR: 从 parent_chunk metadata 提取 subject
         subject = parent_chunk.get("metadata", {}).get("subject", "generic")
+        user_id = parent_chunk.get("metadata", {}).get("user_id")
         # LA-FIX: kb_path 可能是 str（来自 rename_result），转为 Path
         if kb_path:
             kb_path = Path(kb_path)
@@ -758,7 +779,7 @@ class ImageConceptExtractor:
             media_ref["path"] = str(kb_path)
             media_ref["relative_path"] = rel_path  # 覆盖旧的 MinerU 文件名
             # LA-051-DIR: 正确推断缩略图路径（新结构）
-            thumb_dir = get_subject_thumbnails_dir(subject)
+            thumb_dir = get_subject_thumbnails_dir(subject, user_id)
             thumb_path = thumb_dir / kb_path.name
             if thumb_path.exists():
                 try:

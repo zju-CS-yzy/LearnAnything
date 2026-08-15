@@ -6,7 +6,7 @@ ParadigmLoader: 从 YAML 配置文件加载范式定义
 import yaml
 from pathlib import Path
 from typing import Dict, Any, List
-from config.settings import BASE_DIR
+from config.settings import PROJECT_ROOT
 
 class ParadigmLoader:
     """
@@ -26,7 +26,7 @@ class ParadigmLoader:
     
     def _load_config(self):
         """从 YAML 文件加载配置。"""
-        config_path = BASE_DIR / "config" / "paradigms.yaml"
+        config_path = PROJECT_ROOT / "config" / "paradigms.yaml"
         
         if not config_path.exists():
             raise FileNotFoundError(f"Paradigm config not found: {config_path}")

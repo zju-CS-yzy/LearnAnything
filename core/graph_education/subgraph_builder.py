@@ -206,6 +206,7 @@ class SubgraphBuilder:
         cypher = f"""
             MATCH (c:CanonicalConcept {{canonical_id: '{center.canonical_id}'}})
                    -[r:SOLUTION|DEPENDS_ON|HAS_DETAIL]-(n:CanonicalConcept)
+            WHERE NOT n.canonical_id STARTS WITH '__virtual_'
             RETURN DISTINCT n.canonical_id, n.name, n.concept_type, n.description, 
                    n.parent_hint, n.aliases
             LIMIT {max_nodes}
@@ -257,6 +258,9 @@ class SubgraphBuilder:
             ValueError: 两点间无路径
         """
         conn = self.graph_store._ensure_db()
+        # shortestPath may traverse hidden legacy virtual nodes. The filtered
+        # BFS applies the real-concept predicate at every hop.
+        return self._build_chain_bfs(start, end, max_nodes)
         
         # 使用 Cypher 查询最短路径
         cypher = f"""
@@ -337,7 +341,9 @@ class SubgraphBuilder:
             
             cypher = f"""
                 MATCH (c:CanonicalConcept)-[r:SOLUTION|DEPENDS_ON|HAS_DETAIL]-(n:CanonicalConcept)
-                WHERE c.canonical_id IN [{frontier_str}]
+                WHERE NOT c.canonical_id STARTS WITH '__virtual_'
+                  AND NOT n.canonical_id STARTS WITH '__virtual_'
+                  AND c.canonical_id IN [{frontier_str}]
                 RETURN DISTINCT c.canonical_id as source_id, n.canonical_id as target_id, 
                        n.name, n.concept_type, n.description, n.parent_hint, n.aliases
                 LIMIT {max_nodes * 2}
@@ -488,7 +494,9 @@ class SubgraphBuilder:
         
         cypher = f"""
             MATCH (a:CanonicalConcept)-[r:SOLUTION|DEPENDS_ON|HAS_DETAIL]-(b:CanonicalConcept)
-            WHERE a.canonical_id IN [{id_str}] AND b.canonical_id IN [{id_str}]
+            WHERE NOT a.canonical_id STARTS WITH '__virtual_'
+              AND NOT b.canonical_id STARTS WITH '__virtual_'
+              AND a.canonical_id IN [{id_str}] AND b.canonical_id IN [{id_str}]
             RETURN a.canonical_id, b.canonical_id
         """
         
@@ -531,6 +539,7 @@ class SubgraphBuilder:
             cypher = f"""
                 MATCH (c:CanonicalConcept {{canonical_id: '{current}'}})
                        -[:SOLUTION|DEPENDS_ON|HAS_DETAIL]-(n:CanonicalConcept)
+                WHERE NOT n.canonical_id STARTS WITH '__virtual_'
                 RETURN n.canonical_id
                 LIMIT 50
             """
@@ -589,6 +598,7 @@ class SubgraphBuilder:
             cypher = f"""
                 MATCH (c:CanonicalConcept {{canonical_id: '{target.canonical_id}'}})
                        <-[:DEPENDS_ON]-(p:CanonicalConcept)
+                WHERE NOT p.canonical_id STARTS WITH '__virtual_'
                 RETURN p.canonical_id, p.name, p.concept_type, p.description, p.parent_hint, p.aliases
                 LIMIT 3
             """
@@ -619,7 +629,8 @@ class SubgraphBuilder:
         
         cypher = f"""
             MATCH (c:CanonicalConcept)
-            WHERE c.canonical_id IN [{id_str}]
+            WHERE NOT c.canonical_id STARTS WITH '__virtual_'
+              AND c.canonical_id IN [{id_str}]
             RETURN c.canonical_id, c.name, c.concept_type, c.description, 
                    c.parent_hint, c.aliases
         """

@@ -53,6 +53,11 @@ def config_state():
             model="text-embedding-3-large",
         ),
         mineru=FeatureConfig(provider="mineru", api_key="secret-mineru"),
+        openalex=FeatureConfig(
+            provider="openalex",
+            api_key="secret-openalex",
+            base_url="https://api.openalex.org",
+        ),
     )
 
 
@@ -63,7 +68,7 @@ def client(monkeypatch, users, config_state, tmp_path):
     monkeypatch.setattr(
         setup_api,
         "check_all_features",
-        lambda: {"llm": True, "vlm": True, "embedding": True, "mineru": True},
+        lambda: {"llm": True, "vlm": True, "embedding": True, "mineru": True, "openalex": True},
     )
     monkeypatch.setattr(setup_api, "AUDIT_LOG_PATH", tmp_path / "admin_audit.jsonl")
     monkeypatch.delenv("LEARNANYTHING_ALLOW_PRIVATE_API_ENDPOINTS", raising=False)
@@ -112,7 +117,9 @@ def test_config_requires_system_administrator(client, users):
     payload_text = response.text
     assert "secret-" not in payload_text
     assert response.json()["llm"]["configured"] is True
+    assert response.json()["openalex"]["configured"] is True
     assert "api_key" not in response.json()["llm"]
+    assert "api_key" not in response.json()["openalex"]
 
 
 def test_public_setup_status_does_not_expose_filesystem_path(client):
@@ -181,3 +188,18 @@ def test_provider_change_requires_a_new_secret(client, users):
     )
     assert response.status_code == 400
     assert "new API Key" in response.json()["detail"]
+
+
+def test_openalex_update_keeps_existing_secret(client, users, config_state, monkeypatch):
+    captured = {}
+    monkeypatch.setattr(setup_api, "update_config", lambda config: captured.setdefault("config", config))
+
+    response = client.post(
+        "/api/setup/config",
+        headers=_bearer(users["admin_token"]),
+        json={"openalex": {"provider": "openalex", "api_key": "", "enabled": True}},
+    )
+
+    assert response.status_code == 200
+    assert captured["config"].openalex.api_key == "secret-openalex"
+    assert "secret-openalex" not in response.text

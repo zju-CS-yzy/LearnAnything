@@ -75,6 +75,31 @@ class GraphStore:
     # 反向映射（数据库表名 → YAML 名）
     RELATION_NAME_REVERSE = {v: k for k, v in RELATION_NAME_MAP.items()}
 
+    CANONICAL_RELATION_TYPES = (
+        "SOLUTION", "DEPENDS_ON", "DEPEND_ON", "HAS_DETAIL", "DEFINES",
+        "REQUIRES", "HAS_LAW", "APPLIES_TO", "EXTENDS", "IMPLEMENTS",
+        "HAS_SUB", "HAS_IMPL",
+    )
+
+    @staticmethod
+    def is_legacy_virtual_concept(node: Dict[str, Any]) -> bool:
+        """Recognise every historical virtual-gap signature used by LA-046."""
+        raw_virtual = node.get("is_virtual")
+        marked = (
+            raw_virtual is True
+            or (isinstance(raw_virtual, str) and raw_virtual.lower() in ("true", "1"))
+            or (isinstance(raw_virtual, int) and raw_virtual == 1)
+        )
+        canonical_id = str(node.get("id") or node.get("canonical_id") or "")
+        description = str(node.get("description") or "")
+        source_chunks = node.get("source_chunks") or ""
+        return (
+            marked
+            or canonical_id.startswith("__virtual_")
+            or description.startswith("[VIRTUAL]")
+            or "__virtual__" in str(source_chunks)
+        )
+
     SCHEMA_DEFINITIONS = [
         # Layer 1: Chunk 节点（文档片段）
         """CREATE NODE TABLE Chunk (
@@ -100,6 +125,8 @@ class GraphStore:
             extract_role STRING,
             description STRING,
             parent_hint STRING,
+            aliases STRING,
+            alias_evidence STRING,
             source_chunk STRING,
             media_refs STRING,
             PRIMARY KEY(extracted_id)
@@ -246,7 +273,7 @@ class GraphStore:
 
         return self._conn
 
-    def _execute(self, conn, cypher):
+    def _execute(self, conn, cypher, parameters: Optional[Dict[str, Any]] = None):
         """
         线程安全地执行 Cypher 查询。
 
@@ -254,7 +281,7 @@ class GraphStore:
         并发调用会导致进程崩溃。通过类锁保护所有查询操作。
         """
         with GraphStore._conn_lock:
-            return conn.execute(cypher)
+            return conn.execute(cypher, parameters) if parameters is not None else conn.execute(cypher)
 
     def delete_all(self):
         """
@@ -348,7 +375,7 @@ class GraphStore:
         if detector is not None:
             if detector.would_form_cycle(source_id, target_id):
                 cycle_path = detector._find_cycle_path(source_id, target_id)
-                print(f"[GraphStore] LA-055: 🚫 拒绝环边 | "
+                print(f"[GraphStore] LA-055: [CYCLE-REJECTED] 拒绝环边 | "
                       f"{source_id} --[{relation_type}]--> {target_id} | "
                       f"环路径: {' -> '.join(cycle_path + [source_id])}")
                 if raise_on_cycle:
@@ -373,13 +400,181 @@ class GraphStore:
             # 3. 更新内存中的 CycleDetector
             if detector is not None:
                 detector.add_edge(source_id, target_id, raise_on_cycle=False)
-            print(f"[GraphStore] LA-055: ✅ 写入边 | "
+            print(f"[GraphStore] LA-055: [OK] 写入边 | "
                   f"{source_id} --[{relation_type}]--> {target_id}")
             return True
         except Exception as e:
-            print(f"[GraphStore] LA-055: ❌ 写入边失败 | "
+            print(f"[GraphStore] LA-055: [ERROR] 写入边失败 | "
                   f"{source_id} --[{relation_type}]--> {target_id} | {e}")
             return False
+
+    # ========== Gap Flow M1: idempotent concept/edge operations ==========
+
+    def get_canonical_concept(self, canonical_id: str) -> Optional[Dict[str, Any]]:
+        """Return one real canonical concept, excluding legacy virtual nodes."""
+        safe_id = self._escape_cypher_string(canonical_id)
+        conn = self._ensure_db()
+        try:
+            result = self._execute(conn, f"""
+                MATCH (c:CanonicalConcept {{canonical_id: '{safe_id}'}})
+                RETURN c.canonical_id, c.name, c.concept_type, c.description,
+                       c.is_virtual, c.aliases, c.source_chunks
+                LIMIT 1
+            """)
+            if not result.has_next():
+                return None
+            row = result.get_next()
+            is_virtual = (
+                row[4] is True
+                or (isinstance(row[4], str) and row[4].lower() in ("true", "1"))
+                or (isinstance(row[4], int) and row[4] == 1)
+            )
+            item = {
+                "canonical_id": row[0],
+                "name": row[1] or "",
+                "concept_type": row[2] or "",
+                "description": row[3] or "",
+                "aliases": self._parse_json_list(row[5]),
+                "source_chunks": self._parse_json_list(row[6]),
+                "is_virtual": is_virtual,
+            }
+            if self.is_legacy_virtual_concept(item):
+                return None
+            item["is_virtual"] = False
+            return item
+        except Exception as exc:
+            # Old schemas may not expose is_virtual.
+            if "is_virtual" not in str(exc):
+                raise
+            result = self._execute(conn, f"""
+                MATCH (c:CanonicalConcept {{canonical_id: '{safe_id}'}})
+                RETURN c.canonical_id, c.name, c.concept_type, c.description
+                LIMIT 1
+            """)
+            if not result.has_next():
+                return None
+            row = result.get_next()
+            item = {
+                "canonical_id": row[0], "name": row[1] or "",
+                "concept_type": row[2] or "", "description": row[3] or "",
+                "is_virtual": False,
+            }
+            return None if self.is_legacy_virtual_concept(item) else item
+
+    def ensure_gap_concept(
+        self,
+        *,
+        canonical_id: str,
+        name: str,
+        concept_type: str,
+        description: str,
+        evidence: str = "",
+        aliases: Optional[List[str]] = None,
+        source_chunks: Optional[List[str]] = None,
+    ) -> tuple[Dict[str, Any], bool]:
+        """Create a real concept once and return ``(concept, was_created)``."""
+        existing = self.get_canonical_concept(canonical_id)
+        if existing is not None:
+            if existing["concept_type"] != concept_type:
+                raise ValueError(
+                    f"concept '{canonical_id}' has type '{existing['concept_type']}', "
+                    f"expected '{concept_type}'"
+                )
+            return existing, False
+        payload = {
+            "id": canonical_id,
+            "name": name,
+            "concept_type": concept_type,
+            "description": description + (f"\nEvidence: {evidence}" if evidence else ""),
+            "parent_hint": "",
+            "aliases": list(aliases or []),
+            "source_chunks": list(source_chunks or []),
+            "type_votes": {concept_type: 1},
+            "media_refs": [],
+        }
+        if self.add_canonical_concepts([payload]) != 1:
+            raise RuntimeError(f"failed to create canonical concept '{canonical_id}'")
+        created = self.get_canonical_concept(canonical_id)
+        if created is None:
+            raise RuntimeError(f"canonical concept '{canonical_id}' was not persisted")
+        return created, True
+
+    def canonical_edge_exists(
+        self, source_id: str, target_id: str, relation_type: str
+    ) -> bool:
+        table = self._rel_table_name(relation_type)
+        if not table.replace("_", "").isalnum():
+            raise ValueError(f"invalid relation type: {relation_type}")
+        source = self._escape_cypher_string(source_id)
+        target = self._escape_cypher_string(target_id)
+        result = self._execute(self._ensure_db(), f"""
+            MATCH (a:CanonicalConcept {{canonical_id: '{source}'}})
+                  -[r:{table}]->
+                  (b:CanonicalConcept {{canonical_id: '{target}'}})
+            RETURN COUNT(r)
+        """)
+        return bool(result.has_next() and int(result.get_next()[0]) > 0)
+
+    def ensure_canonical_edge(
+        self,
+        source_id: str,
+        target_id: str,
+        relation_type: str,
+        confidence: float = 1.0,
+    ) -> bool:
+        """Ensure an edge exists; return True only when this call created it."""
+        if self.get_canonical_concept(source_id) is None:
+            raise ValueError(f"source concept '{source_id}' not found")
+        if self.get_canonical_concept(target_id) is None:
+            raise ValueError(f"target concept '{target_id}' not found")
+        if self.canonical_edge_exists(source_id, target_id, relation_type):
+            return False
+        table = self._rel_table_name(relation_type)
+        if not table.replace("_", "").isalnum():
+            raise ValueError(f"invalid relation type: {relation_type}")
+        # add_canonical_edge owns cycle checking and detector updates.
+        if not self.add_canonical_edge(
+            source_id, target_id, table, confidence=confidence, raise_on_cycle=True
+        ):
+            raise RuntimeError(
+                f"failed to create edge {source_id} -[{relation_type}]-> {target_id}"
+            )
+        return True
+
+    def remove_canonical_edge(
+        self, source_id: str, target_id: str, relation_type: str
+    ) -> bool:
+        """Delete a specific canonical edge, returning whether it existed."""
+        if not self.canonical_edge_exists(source_id, target_id, relation_type):
+            return False
+        table = self._rel_table_name(relation_type)
+        source = self._escape_cypher_string(source_id)
+        target = self._escape_cypher_string(target_id)
+        self._execute(self._ensure_db(), f"""
+            MATCH (a:CanonicalConcept {{canonical_id: '{source}'}})
+                  -[r:{table}]->
+                  (b:CanonicalConcept {{canonical_id: '{target}'}})
+            DELETE r
+        """)
+        # Removal invalidates the incremental detector snapshot.
+        self._reset_cycle_detector()
+        return True
+
+    def delete_gap_concept_if_orphan(self, canonical_id: str) -> bool:
+        """Compensation helper: delete a newly created concept only if isolated."""
+        safe_id = self._escape_cypher_string(canonical_id)
+        conn = self._ensure_db()
+        linked = self._execute(conn, f"""
+            MATCH (c:CanonicalConcept {{canonical_id: '{safe_id}'}})-[r]-()
+            RETURN COUNT(r)
+        """)
+        if linked.has_next() and int(linked.get_next()[0]) > 0:
+            return False
+        self._execute(conn, f"""
+            MATCH (c:CanonicalConcept {{canonical_id: '{safe_id}'}})
+            DELETE c
+        """)
+        return True
 
         """
 
@@ -498,6 +693,18 @@ class GraphStore:
                 except Exception as alt_e:
                     print(f"[GraphStore] 升级 ExtractedConcept 失败: {alt_e}")
 
+        # 概念解析 v2：保留原文明示的等价别名与证据，供候选召回和审核使用。
+        for field_name in ("aliases", "alias_evidence"):
+            try:
+                self._execute(conn, f"MATCH (e:ExtractedConcept) RETURN e.{field_name} LIMIT 1")
+            except Exception as e:
+                if field_name in str(e):
+                    print(f"[GraphStore] 升级 ExtractedConcept.{field_name}: {self.collection_name}")
+                    try:
+                        self._execute(conn, f"ALTER TABLE ExtractedConcept ADD {field_name} STRING")
+                    except Exception as alt_e:
+                        print(f"[GraphStore] 升级 ExtractedConcept.{field_name} 失败: {alt_e}")
+
         # 检查 CanonicalConcept 是否有 is_virtual（LA-046）
         try:
             self._execute(conn, "MATCH (c:CanonicalConcept) RETURN c.is_virtual LIMIT 1")
@@ -535,7 +742,7 @@ class GraphStore:
         已存在的表会被忽略（KùzuDB CREATE IF NOT EXISTS 语义）。
         """
         try:
-            yaml_path = KNOWLEDGE_BASE_DIR.parent / "config" / "paradigms.yaml"
+            yaml_path = PROJECT_ROOT / "config" / "paradigms.yaml"
             if not yaml_path.exists():
                 return
             with open(yaml_path, "r", encoding="utf-8") as f:
@@ -632,6 +839,30 @@ class GraphStore:
         text = "".join(c for c in text if c >= " " or c in "\t")
         return text
 
+    @staticmethod
+    def _json_value(value: Any, empty: str = "") -> str:
+        """Serialize structured values for parameterized Kùzu writes.
+
+        Cypher string interpolation consumes JSON backslashes, corrupting LaTeX
+        such as ``\\mu`` into invalid JSON. Parameters preserve the payload byte
+        for byte and are therefore mandatory for media/formula fields.
+        """
+        if value in (None, [], {}):
+            return empty
+        return json.dumps(value, ensure_ascii=False)
+
+    @staticmethod
+    def _parse_json_list(value: Any) -> List[Any]:
+        if isinstance(value, list):
+            return value
+        if not value:
+            return []
+        try:
+            parsed = json.loads(value)
+            return parsed if isinstance(parsed, list) else []
+        except (TypeError, json.JSONDecodeError):
+            return [item.strip() for item in str(value).split(",") if item.strip()]
+
 
     def _sanitize_media_refs(self, media_refs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """
@@ -709,7 +940,11 @@ class GraphStore:
 
             heading_path = self._escape_cypher_string(meta.get("heading_path", ""))
 
-            source = self._escape_cypher_string(meta.get("source", ""))
+            # Legacy MinerU image_pseudo chunks used source_name only.  Keep
+            # rebuilds of existing vector stores connected to their document.
+            source = self._escape_cypher_string(
+                meta.get("source", "") or meta.get("source_name", "")
+            )
 
             page_numbers = meta.get("page_numbers", meta.get("page_number", [0]))
 
@@ -779,10 +1014,7 @@ class GraphStore:
                     "height": height or 0,
                 }]
 
-            # LA-035-P26: 用 _escape_cypher_string_safe 保留 JSON 中的反斜杠
-            media_refs_json = self._escape_cypher_string_safe(
-                json.dumps(media_refs_raw, ensure_ascii=False) if media_refs_raw else ""
-            )
+            media_refs_json = self._json_value(media_refs_raw)
 
             cypher = (
 
@@ -808,7 +1040,7 @@ class GraphStore:
 
                 f"height: {height},"
 
-                f"media_refs: '{media_refs_json}'"
+                f"media_refs: $media_refs"
 
                 f"}})"
 
@@ -816,7 +1048,7 @@ class GraphStore:
 
             try:
 
-                self._execute(conn, cypher)
+                self._execute(conn, cypher, {"media_refs": media_refs_json})
 
                 added += 1
 
@@ -955,6 +1187,20 @@ class GraphStore:
                         created += 1
                     except Exception as e:
                         print(f"[GraphStore] heading→child BELONGS_TO failed: {e}")
+                else:
+                    # A stale or inferred heading path must not turn the child
+                    # into an isolated root. Preserve reachability at document
+                    # level and allow a later re-import to refine the anchor.
+                    doc_id = doc_by_source.get(src)
+                    if doc_id:
+                        try:
+                            self._execute(conn, f"""
+                                MATCH (a:Chunk {{chunk_id: '{esc(doc_id)}'}}), (b:Chunk {{chunk_id: '{esc(child['id'])}'}})
+                                CREATE (a)-[:BELONGS_TO]->(b)
+                            """)
+                            created += 1
+                        except Exception as e:
+                            print(f"[GraphStore] doc→unmatched child BELONGS_TO failed: {e}")
             else:
                 # P35-FIX: heading_path 为空的节点直接关联到对应 document
                 doc_id = doc_by_source.get(src)
@@ -1065,7 +1311,7 @@ class GraphStore:
 
         conn = self._ensure_db()
         nodes = self._get_canonical_nodes(conn)
-        edges = self._get_semantic_edges(conn)
+        edges = self._get_semantic_edges(conn, set(nodes))
 
         pagerank = self._compute_pagerank(nodes, edges)
 
@@ -1091,21 +1337,40 @@ class GraphStore:
         return {}
 
     def _get_canonical_nodes(self, conn) -> List[str]:
-        result = self._execute(conn, "MATCH (c:CanonicalConcept) RETURN c.canonical_id AS id")
-        nodes = []
-        while result.has_next():
-            row = result.get_next()
-            nodes.append(row[0])
-        return nodes
+        try:
+            result = self._execute(
+                conn,
+                "MATCH (c:CanonicalConcept) RETURN c.canonical_id, c.is_virtual, "
+                "c.description, c.source_chunks",
+            )
+            nodes = []
+            while result.has_next():
+                row = result.get_next()
+                item = {
+                    "id": row[0], "is_virtual": row[1],
+                    "description": row[2], "source_chunks": row[3],
+                }
+                if not self.is_legacy_virtual_concept(item):
+                    nodes.append(row[0])
+            return nodes
+        except Exception:
+            result = self._execute(conn, "MATCH (c:CanonicalConcept) RETURN c.canonical_id")
+            nodes = []
+            while result.has_next():
+                canonical_id = result.get_next()[0]
+                if not str(canonical_id).startswith("__virtual_"):
+                    nodes.append(canonical_id)
+            return nodes
 
-    def _get_semantic_edges(self, conn) -> List[tuple]:
+    def _get_semantic_edges(self, conn, real_ids: Optional[Set[str]] = None) -> List[tuple]:
         edges = []
         for rel_type in ["SOLUTION", "DEPENDS_ON", "HAS_DETAIL"]:
             try:
                 result = self._execute(conn, f"MATCH (a:CanonicalConcept)-[:{rel_type}]-(b:CanonicalConcept) RETURN a.canonical_id, b.canonical_id")
                 while result.has_next():
                     row = result.get_next()
-                    edges.append((row[0], row[1]))
+                    if real_ids is None or (row[0] in real_ids and row[1] in real_ids):
+                        edges.append((row[0], row[1]))
             except Exception:
                 pass
         return edges
@@ -1489,15 +1754,14 @@ class GraphStore:
             parent_hint = self._escape_cypher_string(
                 concept.get("parent_hint", "")
             )
+            aliases_json = self._json_value(concept.get("aliases", []), empty="[]")
+            alias_evidence_json = self._json_value(concept.get("alias_evidence", []), empty="[]")
 
             # LA-035: 多媒体引用
             media_refs = concept.get("media_refs", [])
             # LA-035-P27-fix: 清理路径格式（relative_path 优先，反斜杠替换为正斜杠）
             media_refs = self._sanitize_media_refs(media_refs)
-            # LA-035-P26: 用 _escape_cypher_string_safe 保留 JSON 中的反斜杠
-            media_refs_json = self._escape_cypher_string_safe(
-                json.dumps(media_refs, ensure_ascii=False) if media_refs else ""
-            )
+            media_refs_json = self._json_value(media_refs)
 
             # 创建 ExtractedConcept 节点
             merge_cypher = f"""
@@ -1510,19 +1774,27 @@ class GraphStore:
                     e.extract_role = '{extract_role}',
                     e.description = '{description}',
                     e.parent_hint = '{parent_hint}',
+                    e.aliases = $aliases,
+                    e.alias_evidence = $alias_evidence,
                     e.source_chunk = '{chunk_id}',
-                    e.media_refs = '{media_refs_json}'
+                    e.media_refs = $media_refs
                 ON MATCH SET
                     e.name = '{concept_name}',
                     e.concept_type = '{concept_type}',
                     e.extract_role = '{extract_role}',
                     e.description = '{description}',
                     e.parent_hint = '{parent_hint}',
+                    e.aliases = $aliases,
+                    e.alias_evidence = $alias_evidence,
                     e.source_chunk = '{chunk_id}',
-                    e.media_refs = '{media_refs_json}'
+                    e.media_refs = $media_refs
             """
             try:
-                self._execute(conn, merge_cypher)
+                self._execute(conn, merge_cypher, {
+                    "aliases": aliases_json,
+                    "alias_evidence": alias_evidence_json,
+                    "media_refs": media_refs_json,
+                })
             except Exception as e:
                 print(f"[GraphStore] 创建 ExtractedConcept 节点失败 {extracted_id}: {e}")
                 continue
@@ -1574,20 +1846,25 @@ class GraphStore:
             description = self._escape_cypher_string(cc.get("description", ""))
             parent_hint = self._escape_cypher_string(cc.get("parent_hint", ""))
 
-            import json
-            aliases = json.dumps(cc.get("aliases", []), ensure_ascii=False)
-            source_chunks = json.dumps(cc.get("source_chunks", []), ensure_ascii=False)
+            aliases = self._json_value(cc.get("aliases", []), empty="[]")
+            source_chunks = self._json_value(cc.get("source_chunks", []), empty="[]")
 
             type_votes = cc.get("type_votes", {})
             if not type_votes:
                 type_votes = {concept_type: 1} if concept_type else {}
-            type_votes_json = json.dumps(type_votes, ensure_ascii=False)
+            type_votes_json = self._json_value(type_votes, empty="{}")
 
             # LA-035: 多媒体引用
             media_refs = cc.get("media_refs", [])
             # LA-035-P27-fix: 清理路径格式（relative_path 优先，反斜杠替换为正斜杠）
             media_refs = self._sanitize_media_refs(media_refs)
-            media_refs_json = json.dumps(media_refs, ensure_ascii=False) if media_refs else ""
+            media_refs_json = self._json_value(media_refs)
+            structured_parameters = {
+                "aliases": aliases,
+                "source_chunks": source_chunks,
+                "type_votes": type_votes_json,
+                "media_refs": media_refs_json,
+            }
 
             # 创建 CanonicalConcept 节点
             # LA-035: 兼容旧数据库（可能缺少 media_refs 字段）
@@ -1601,19 +1878,19 @@ class GraphStore:
                     c.concept_type = '{concept_type}',
                     c.description = '{description}',
                     c.parent_hint = '{parent_hint}',
-                    c.aliases = '{aliases}',
-                    c.source_chunks = '{source_chunks}',
-                    c.type_votes = '{type_votes_json}',
-                    c.media_refs = '{media_refs_json}'
+                    c.aliases = $aliases,
+                    c.source_chunks = $source_chunks,
+                    c.type_votes = $type_votes,
+                    c.media_refs = $media_refs
                 ON MATCH SET
                     c.name = '{name}',
                     c.concept_type = '{concept_type}',
                     c.description = '{description}',
                     c.parent_hint = '{parent_hint}',
-                    c.aliases = '{aliases}',
-                    c.source_chunks = '{source_chunks}',
-                    c.type_votes = '{type_votes_json}',
-                    c.media_refs = '{media_refs_json}'
+                    c.aliases = $aliases,
+                    c.source_chunks = $source_chunks,
+                    c.type_votes = $type_votes,
+                    c.media_refs = $media_refs
             """
             fallback_merge_cypher = f"""
                 MERGE (c:CanonicalConcept {{
@@ -1624,25 +1901,25 @@ class GraphStore:
                     c.concept_type = '{concept_type}',
                     c.description = '{description}',
                     c.parent_hint = '{parent_hint}',
-                    c.aliases = '{aliases}',
-                    c.source_chunks = '{source_chunks}',
-                    c.type_votes = '{type_votes_json}'
+                    c.aliases = $aliases,
+                    c.source_chunks = $source_chunks,
+                    c.type_votes = $type_votes
                 ON MATCH SET
                     c.name = '{name}',
                     c.concept_type = '{concept_type}',
                     c.description = '{description}',
                     c.parent_hint = '{parent_hint}',
-                    c.aliases = '{aliases}',
-                    c.source_chunks = '{source_chunks}',
-                    c.type_votes = '{type_votes_json}'
+                    c.aliases = $aliases,
+                    c.source_chunks = $source_chunks,
+                    c.type_votes = $type_votes
             """
             try:
-                self._execute(conn, full_merge_cypher)
+                self._execute(conn, full_merge_cypher, structured_parameters)
                 added += 1
             except Exception as e:
                 if "media_refs" in str(e):
                     try:
-                        self._execute(conn, fallback_merge_cypher)
+                        self._execute(conn, fallback_merge_cypher, structured_parameters)
                         added += 1
                     except Exception as e2:
                         print(f"[GraphStore] 创建 CanonicalConcept 节点失败 {canonical_id}: {e2}")
@@ -1711,6 +1988,8 @@ class GraphStore:
                         "description": c.get("description", ""),
 
                         "parent_hint": c.get("parent_hint", ""),
+                        "aliases": c.get("aliases", []),
+                        "alias_evidence": c.get("alias_evidence", []),
                         "media_refs": c.get("media_refs", []),
 
                     }
@@ -1850,7 +2129,9 @@ class GraphStore:
 
 
 
-    def get_canonical_concepts(self, limit: int = 500) -> List[Dict[str, Any]]:
+    def get_canonical_concepts(
+        self, limit: Optional[int] = 500, *, include_virtual: bool = False
+    ) -> List[Dict[str, Any]]:
 
         """
 
@@ -1871,23 +2152,28 @@ class GraphStore:
         nodes = []
 
         # ENG-P2-3: limit 强制 int，杜绝字符串拼接注入
-        limit = int(limit)
+        normalized_limit = None if limit is None else int(limit)
+        if normalized_limit is not None and normalized_limit < 0:
+            raise ValueError("limit must be non-negative or None")
+        query_limit = normalized_limit if include_virtual else None
+        limit_clause = "" if query_limit is None else f"LIMIT {query_limit}"
 
         try:
             # LA-035: 兼容旧数据库（可能缺少 media_refs 字段）
             try:
                 result = self._execute(conn, f"""
                     MATCH (c:CanonicalConcept)
-                    RETURN c.canonical_id, c.name, c.concept_type, c.description, c.parent_hint, c.source_chunks, c.media_refs, c.is_virtual
-                    LIMIT {limit}
+                    RETURN c.canonical_id, c.name, c.concept_type, c.description,
+                           c.parent_hint, c.aliases, c.source_chunks, c.media_refs, c.is_virtual
+                    {limit_clause}
                 """)
                 while result.has_next():
                     row = result.get_next()
                     import json
                     media_refs = []
-                    if row[6]:
+                    if row[7]:
                         try:
-                            raw = row[6]
+                            raw = row[7]
                             # P0-INT-5: 修复旧数据中 _escape_cypher_string 遗留问题
                             # 旧数据将 JSON 中的 \\ 替换为 //，需要先恢复
                             if isinstance(raw, str) and '//' in raw:
@@ -1901,23 +2187,25 @@ class GraphStore:
                         "type": row[2],
                         "description": row[3],
                         "parent_hint": row[4],
-                        "source_chunks": row[5],
+                        "aliases": self._parse_json_list(row[5]),
+                        "source_chunks": row[6],
                         "media_refs": media_refs,
                         # LA-052 FIX: 正确读取 is_virtual（支持 BOOL/STRING/INT）
                         "is_virtual": (
-                            (isinstance(row[7], bool) and row[7]) or
-                            (isinstance(row[7], str) and row[7].lower() in ('true', '1')) or
-                            (isinstance(row[7], int) and row[7] == 1)
-                        ) if row[7] is not None else False,
+                            (isinstance(row[8], bool) and row[8]) or
+                            (isinstance(row[8], str) and row[8].lower() in ('true', '1')) or
+                            (isinstance(row[8], int) and row[8] == 1)
+                        ) if row[8] is not None else False,
                     })
             except Exception as schema_e:
-                if "media_refs" in str(schema_e):
+                if "media_refs" in str(schema_e) or "is_virtual" in str(schema_e):
                     # 旧数据库，回退到旧查询
                     print(f"[GraphStore] 旧数据库兼容模式：{self.collection_name}")
                     result = self._execute(conn, f"""
                         MATCH (c:CanonicalConcept)
-                        RETURN c.canonical_id, c.name, c.concept_type, c.description, c.parent_hint, c.source_chunks
-                        LIMIT {limit}
+                        RETURN c.canonical_id, c.name, c.concept_type, c.description,
+                               c.parent_hint, c.aliases, c.source_chunks
+                        {limit_clause}
                     """)
                     while result.has_next():
                         row = result.get_next()
@@ -1927,7 +2215,8 @@ class GraphStore:
                             "type": row[2],
                             "description": row[3],
                             "parent_hint": row[4],
-                            "source_chunks": row[5],
+                            "aliases": self._parse_json_list(row[5]),
+                            "source_chunks": row[6],
                             "media_refs": [],
                             "is_virtual": False,
                         })
@@ -1945,7 +2234,12 @@ class GraphStore:
 
 
 
-        return nodes
+        if include_virtual:
+            return nodes
+        real_nodes = [
+            node for node in nodes if not self.is_legacy_virtual_concept(node)
+        ]
+        return real_nodes if normalized_limit is None else real_nodes[:normalized_limit]
 
 
 
@@ -2062,7 +2356,8 @@ class GraphStore:
                 result = self._execute(conn, f"""
                     MATCH (e:ExtractedConcept)
                     RETURN e.extracted_id, e.name, e.concept_type, e.extract_role,
-                           e.description, e.parent_hint, e.source_chunk, e.media_refs
+                           e.description, e.parent_hint, e.source_chunk, e.media_refs,
+                           e.aliases, e.alias_evidence
                     LIMIT {limit}
                 """)
                 while result.has_next():
@@ -2073,6 +2368,16 @@ class GraphStore:
                             media_refs = json.loads(row[7])
                         except:
                             pass
+                    aliases = []
+                    alias_evidence = []
+                    try:
+                        aliases = json.loads(row[8]) if row[8] else []
+                    except Exception:
+                        pass
+                    try:
+                        alias_evidence = json.loads(row[9]) if row[9] else []
+                    except Exception:
+                        pass
                     nodes.append({
                         "id": row[0],
                         "name": row[1],
@@ -2082,19 +2387,39 @@ class GraphStore:
                         "parent_hint": row[5],
                         "source_chunk": row[6],
                         "media_refs": media_refs,
+                        "aliases": aliases,
+                        "alias_evidence": alias_evidence,
                     })
             except Exception as schema_e:
-                if "media_refs" in str(schema_e):
+                if any(field in str(schema_e) for field in ("media_refs", "aliases", "alias_evidence")):
                     # 旧数据库，回退到旧查询
                     print(f"[GraphStore] 旧数据库兼容模式（ExtractedConcept）: {self.collection_name}")
-                    result = self._execute(conn, f"""
-                        MATCH (e:ExtractedConcept)
-                        RETURN e.extracted_id, e.name, e.concept_type, e.extract_role,
-                               e.description, e.parent_hint, e.source_chunk
-                        LIMIT {limit}
-                    """)
+                    has_media_refs = True
+                    try:
+                        result = self._execute(conn, f"""
+                            MATCH (e:ExtractedConcept)
+                            RETURN e.extracted_id, e.name, e.concept_type, e.extract_role,
+                                   e.description, e.parent_hint, e.source_chunk, e.media_refs
+                            LIMIT {limit}
+                        """)
+                    except Exception as media_schema_e:
+                        if "media_refs" not in str(media_schema_e):
+                            raise
+                        has_media_refs = False
+                        result = self._execute(conn, f"""
+                            MATCH (e:ExtractedConcept)
+                            RETURN e.extracted_id, e.name, e.concept_type, e.extract_role,
+                                   e.description, e.parent_hint, e.source_chunk
+                            LIMIT {limit}
+                        """)
                     while result.has_next():
                         row = result.get_next()
+                        media_refs = []
+                        if has_media_refs:
+                            try:
+                                media_refs = json.loads(row[7]) if row[7] else []
+                            except Exception:
+                                pass
                         nodes.append({
                             "id": row[0],
                             "name": row[1],
@@ -2103,7 +2428,9 @@ class GraphStore:
                             "description": row[4],
                             "parent_hint": row[5],
                             "source_chunk": row[6],
-                            "media_refs": [],
+                            "media_refs": media_refs,
+                            "aliases": [],
+                            "alias_evidence": [],
                         })
                 else:
                     raise
@@ -2216,7 +2543,9 @@ class GraphStore:
 
 
 
-    def get_concept_links(self, limit: int = 500) -> List[Dict[str, Any]]:
+    def get_concept_links(
+        self, limit: Optional[int] = 500, *, include_virtual: bool = False
+    ) -> List[Dict[str, Any]]:
 
         """
 
@@ -2234,13 +2563,18 @@ class GraphStore:
 
         conn = self._ensure_db()
 
+        normalized_limit = None if limit is None else int(limit)
+        if normalized_limit is not None and normalized_limit < 0:
+            raise ValueError("limit must be non-negative or None")
+        limit_clause = "" if normalized_limit is None else f"LIMIT {normalized_limit}"
+
         edges = []
 
 
 
         # 语义层关系类型（包含语义推断生成??SOLUTION/DEPENDS_ON ??chunk-level ??DEFINES/REQUIRES 等）
 
-        rel_types = ["SOLUTION", "DEPENDS_ON", "DEPEND_ON", "DEFINES", "REQUIRES", "HAS_LAW", "APPLIES_TO", "EXTENDS", "IMPLEMENTS", "HAS_SUB", "HAS_IMPL"]
+        rel_types = self.CANONICAL_RELATION_TYPES
         # LA-052: 注意：DEPENDS_ON（旧，有S）和 DEPEND_ON（新，无S）都保留，兼容旧数据库
 
         for rel_type in rel_types:
@@ -2253,7 +2587,7 @@ class GraphStore:
 
                     RETURN p.canonical_id, c.canonical_id, r.confidence
 
-                    LIMIT {limit}
+                    {limit_clause}
 
                 """)
 
@@ -2279,7 +2613,61 @@ class GraphStore:
 
 
 
-        return edges
+        if include_virtual:
+            return edges if normalized_limit is None else edges[:normalized_limit]
+        real_ids = {
+            node["id"]
+            for node in self.get_canonical_concepts(limit=None, include_virtual=False)
+        }
+        real_edges = [
+            edge for edge in edges
+            if edge["source"] in real_ids and edge["target"] in real_ids
+        ]
+        return real_edges if normalized_limit is None else real_edges[:normalized_limit]
+
+    def inspect_legacy_virtual_concepts(self) -> List[Dict[str, Any]]:
+        """Return legacy virtual concepts with incident real-concept edges."""
+        virtuals = [
+            dict(node)
+            for node in self.get_canonical_concepts(limit=None, include_virtual=True)
+            if self.is_legacy_virtual_concept(node)
+        ]
+        if not virtuals:
+            return []
+        edges = self.get_concept_links(limit=None, include_virtual=True)
+        virtual_ids = {node["id"] for node in virtuals}
+        for node in virtuals:
+            node_id = node["id"]
+            node["incoming"] = [
+                edge for edge in edges
+                if edge["target"] == node_id and edge["source"] not in virtual_ids
+            ]
+            node["outgoing"] = [
+                edge for edge in edges
+                if edge["source"] == node_id and edge["target"] not in virtual_ids
+            ]
+        return virtuals
+
+    def delete_legacy_virtual_concepts(self, canonical_ids: List[str]) -> int:
+        """Detach-delete verified legacy virtual concepts and invalidate caches."""
+        conn = self._ensure_db()
+        known = {node["id"] for node in self.inspect_legacy_virtual_concepts()}
+        deleted = 0
+        for canonical_id in dict.fromkeys(canonical_ids):
+            if canonical_id not in known:
+                raise ValueError(f"'{canonical_id}' is not a legacy virtual concept")
+            safe_id = self._escape_cypher_string(canonical_id)
+            self._execute(
+                conn,
+                f"MATCH (c:CanonicalConcept {{canonical_id: '{safe_id}'}}) DETACH DELETE c",
+            )
+            deleted += 1
+        if deleted:
+            cache_path = self._get_centrality_cache_path()
+            if cache_path.exists():
+                cache_path.unlink()
+            self._cycle_detector = None
+        return deleted
 
 
 

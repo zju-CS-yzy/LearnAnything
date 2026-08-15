@@ -8,6 +8,7 @@ Setup Wizard API — 首次启动配置向导 (LA-DEPLOY-FEAT)
     - vlm:       视觉处理（图片描述、表格提取、公式识别）
     - embedding: 文本向量化（语义搜索）
     - mineru:    PDF 结构化解析
+    - openalex:  学术题录检索与 DOI 摘要补齐
 """
 
 import ipaddress
@@ -51,6 +52,7 @@ class SetupConfigRequest(BaseModel):
     vlm: Optional[FeatureConfigRequest] = None
     embedding: Optional[FeatureConfigRequest] = None
     mineru: Optional[FeatureConfigRequest] = None
+    openalex: Optional[FeatureConfigRequest] = None
     mineru_cli_path: Optional[str] = Field(None, description="MinerU CLI 路径")
 
 
@@ -89,7 +91,7 @@ class ProviderInfo(BaseModel):
 
 router = APIRouter(prefix="/api/setup", tags=["setup"])
 
-FEATURE_NAMES = ("llm", "llm_fallback", "vlm", "embedding", "mineru")
+FEATURE_NAMES = ("llm", "llm_fallback", "vlm", "embedding", "mineru", "openalex")
 AUDIT_LOG_PATH = DATA_ROOT / "logs" / "admin_audit.jsonl"
 _AUDIT_LOCK = threading.Lock()
 
@@ -270,6 +272,7 @@ async def get_config(admin_user_id: str = Depends(require_admin)):
         "vlm": serialize(cfg.vlm),
         "embedding": serialize(cfg.embedding),
         "mineru": serialize(cfg.mineru),
+        "openalex": serialize(cfg.openalex),
         "mineru_cli_path": cfg.mineru_cli_path,
     }
 
@@ -341,6 +344,8 @@ async def test_feature_api(
         result = _test_vlm(api_key, base_url, model)
     elif feature == "embedding":
         result = _test_embedding(api_key, base_url, model)
+    elif feature == "openalex":
+        result = _test_openalex(api_key, base_url)
     else:
         result = _test_mineru(api_key)
 
@@ -355,6 +360,41 @@ async def test_feature_api(
 
 
 # ========== 测试实现 ==========
+
+def _test_openalex(api_key: str, base_url: str) -> TestResult:
+    """Test the configured OpenAlex key without exposing it in logs or responses."""
+    start = time.time()
+    try:
+        response = requests.get(
+            f"{base_url.rstrip('/')}/works",
+            params={"filter": "has_abstract:true", "per_page": 1, "api_key": api_key},
+            headers={"User-Agent": "LearnAnything/1.0 (academic evidence search)"},
+            timeout=15,
+            allow_redirects=False,
+        )
+        latency = (time.time() - start) * 1000
+        if response.status_code == 200:
+            return TestResult(
+                feature="openalex", provider="openalex", model="",
+                success=True, message="OpenAlex 连接成功",
+                latency_ms=round(latency, 1),
+            )
+        return TestResult(
+            feature="openalex", provider="openalex", model="",
+            success=False,
+            message=f"OpenAlex API 错误 (HTTP {response.status_code})",
+            latency_ms=round(latency, 1),
+        )
+    except requests.exceptions.Timeout:
+        return TestResult(
+            feature="openalex", provider="openalex", model="",
+            success=False, message="请求超时，请检查网络连接",
+        )
+    except Exception as exc:
+        return TestResult(
+            feature="openalex", provider="openalex", model="",
+            success=False, message=f"连接失败: {str(exc)[:200]}",
+        )
 
 def _test_llm(api_key: str, base_url: str, model: str) -> TestResult:
     """测试语言处理 API（LA-DEPLOY-FIX: 严格使用用户传入的 model）"""

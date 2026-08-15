@@ -109,7 +109,7 @@
                   <span class="context-path">{{ chunk.metadata?.heading_path || '—' }}</span>
                 </td>
                 <td class="col-text">
-                  <div class="chunk-text">{{ chunk.text }}</div>
+                  <RichText class="chunk-text" :content="chunk.text" />
                 </td>
               </tr>
             </tbody>
@@ -171,6 +171,7 @@
 </template>
 
 <script setup>
+import RichText from './common/RichText.vue'
 import { ref, computed, inject, onMounted, watch } from 'vue'
 import PermissionModal from './PermissionModal.vue'
 

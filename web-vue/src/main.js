@@ -1,5 +1,6 @@
 import { createApp } from 'vue'
 import App from './App.vue'
+import 'katex/dist/katex.min.css'
 import './styles/global.css'
 
 // 创建 Vue 应用实例

@@ -373,6 +373,149 @@ export async function apiReviewChange(changeId, approve, note = '') {
   })
 }
 
+// ========== GAP-WORKFLOW M2: Gap Flow API ==========
+
+function gapBase(subject) {
+  return `/api/knowledge-graph/${encodeURIComponent(subject)}/gaps`
+}
+
+export async function apiListGaps(subject, options = {}) {
+  const { status = 'open', missingType = null, limit = 200, offset = 0 } = options
+  const params = new URLSearchParams()
+  if (status === null) params.set('status', 'all')
+  else if (status) params.set('status', status)
+  if (missingType) params.set('missing_type', missingType)
+  params.set('limit', String(limit))
+  params.set('offset', String(offset))
+  return fetchApi(`${gapBase(subject)}?${params.toString()}`)
+}
+
+export async function apiListAllGaps(subject, options = {}) {
+  const pageSize = 200
+  let offset = 0
+  let total = 0
+  const items = []
+  do {
+    const page = await apiListGaps(subject, { ...options, limit: pageSize, offset })
+    total = page.total || 0
+    items.push(...(page.items || []))
+    offset += pageSize
+  } while (items.length < total)
+  return { subject_id: subject, total, items }
+}
+
+export async function apiGapSummary(subject) {
+  return fetchApi(`${gapBase(subject)}/summary`)
+}
+
+export async function apiReconcileGaps(subject, paradigmId = null, detectRootGaps = true) {
+  return fetchApi(`${gapBase(subject)}/reconcile`, {
+    method: 'POST',
+    body: JSON.stringify({ paradigm_id: paradigmId, detect_root_gaps: detectRootGaps }),
+  })
+}
+
+export async function apiIgnoreGap(subject, gapId, version) {
+  return fetchApi(`${gapBase(subject)}/${encodeURIComponent(gapId)}/ignore`, {
+    method: 'POST',
+    body: JSON.stringify({ version }),
+  })
+}
+
+export async function apiReopenGap(subject, gapId, version) {
+  return fetchApi(`${gapBase(subject)}/${encodeURIComponent(gapId)}/reopen`, {
+    method: 'POST',
+    body: JSON.stringify({ version }),
+  })
+}
+
+export async function apiSupplementGap(subject, gapId, version, concepts) {
+  return fetchApi(`${gapBase(subject)}/${encodeURIComponent(gapId)}/supplement`, {
+    method: 'POST',
+    body: JSON.stringify({ version, concepts }),
+  })
+}
+
+export async function apiCreateGapProposal(subject, gapId, version) {
+  return fetchApi(`${gapBase(subject)}/${encodeURIComponent(gapId)}/proposals`, {
+    method: 'POST',
+    body: JSON.stringify({ version }),
+  })
+}
+
+export async function apiGetLatestGapProposal(subject, gapId) {
+  return fetchApi(`${gapBase(subject)}/${encodeURIComponent(gapId)}/proposals/latest`)
+}
+
+export async function apiListGapProposals(subject, gapId, limit = 30) {
+  return fetchApi(
+    `${gapBase(subject)}/${encodeURIComponent(gapId)}/proposals?limit=${encodeURIComponent(limit)}`,
+  )
+}
+
+export async function apiGetGapProposal(subject, gapId, proposalId) {
+  return fetchApi(
+    `${gapBase(subject)}/${encodeURIComponent(gapId)}/proposals/${encodeURIComponent(proposalId)}`,
+  )
+}
+
+export async function apiAcceptGapProposal(subject, gapId, proposalId, version, concepts = null) {
+  return fetchApi(
+    `${gapBase(subject)}/${encodeURIComponent(gapId)}/proposals/${encodeURIComponent(proposalId)}/accept`,
+    {
+      method: 'POST',
+      body: JSON.stringify({ version, concepts }),
+    },
+  )
+}
+
+export async function apiRejectGapProposal(subject, gapId, proposalId) {
+  return fetchApi(
+    `${gapBase(subject)}/${encodeURIComponent(gapId)}/proposals/${encodeURIComponent(proposalId)}/reject`,
+    { method: 'POST' },
+  )
+}
+
+export async function apiSearchGapExternalEvidence(subject, gapId, proposalId, queries = []) {
+  return fetchApi(
+    `${gapBase(subject)}/${encodeURIComponent(gapId)}/proposals/${encodeURIComponent(proposalId)}/external-search`,
+    {
+      method: 'POST',
+      body: JSON.stringify({ queries }),
+    },
+  )
+}
+
+export async function apiImportGapExternalEvidence(subject, gapId, proposalId, version, resultIds) {
+  return fetchApi(
+    `${gapBase(subject)}/${encodeURIComponent(gapId)}/proposals/${encodeURIComponent(proposalId)}/external-import`,
+    {
+      method: 'POST',
+      body: JSON.stringify({ version, result_ids: resultIds }),
+    },
+  )
+}
+
+export async function apiDeactivateGapExternalEvidence(subject, gapId, proposalId, version, chunkId) {
+  return fetchApi(
+    `${gapBase(subject)}/${encodeURIComponent(gapId)}/proposals/${encodeURIComponent(proposalId)}/external-deactivate`,
+    {
+      method: 'POST',
+      body: JSON.stringify({ version, chunk_id: chunkId }),
+    },
+  )
+}
+
+export async function apiAcquireGapExternalFulltext(subject, gapId, proposalId, version, resultId) {
+  return fetchApi(
+    `${gapBase(subject)}/${encodeURIComponent(gapId)}/proposals/${encodeURIComponent(proposalId)}/external-fulltext`,
+    {
+      method: 'POST',
+      body: JSON.stringify({ version, result_id: resultId }),
+    },
+  )
+}
+
 // ========== LLM-ROBUST-11: Token 用量追踪 API ==========
 
 // 获取月度用量统计

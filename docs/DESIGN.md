@@ -1701,6 +1701,12 @@ def would_form_cycle(graph, source, target):
 
 ### 14.3 断裂点可视化与用户协作填充
 
+> **2026-08-12 架构更新**：本节及 14.4 是早期“VirtualGap 直接写入
+> `CanonicalConcept`”方案。后续实现改为 GapRecord 独立持久化、API 返回 Gap、
+> 前端合成占位节点，避免虚拟知识污染检索与图算法。目标架构、状态机、权限矩阵和
+> M0–M3 实施顺序以 [`design-gap-flow.md`](design-gap-flow.md) 为准；现有
+> `is_virtual` 逻辑只作为 M3 历史迁移来源。
+
 #### 14.3.1 核心概念
 
 | 术语 | 定义 | 视觉表现 |

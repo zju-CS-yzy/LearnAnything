@@ -117,12 +117,12 @@
                 <span v-if="item.bloom_level" class="bloom-tag tag">{{ bloomLabel(item.bloom_level) }}</span>
                 <span class="wrong-count">❌ {{ item.wrong_count }} 次</span>
               </div>
-              <div class="mistake-question">{{ item.question_text }}</div>
+              <RichText class="mistake-question" :content="item.question_text" />
               <div class="mistake-answers">
-                <span class="user-wrong">你的答案：{{ item.user_answer || '(未作答)' }}</span>
-                <span class="correct-answer">正确答案：{{ item.correct_answer }}</span>
+                <span class="user-wrong">你的答案：<RichText :content="item.user_answer || '(未作答)'" inline :markdown="false" /></span>
+                <span class="correct-answer">正确答案：<RichText :content="item.correct_answer" inline :markdown="false" /></span>
               </div>
-              <div v-if="item.explanation" class="mistake-explanation">{{ item.explanation }}</div>
+              <RichText v-if="item.explanation" class="mistake-explanation" :content="item.explanation" />
               <div class="mistake-actions">
                 <button
                   class="btn btn-sm"
@@ -337,6 +337,7 @@
 
 <script setup>
 import { ref, computed, inject, watch, onMounted, nextTick } from 'vue'
+import RichText from './common/RichText.vue'
 import * as echarts from 'echarts'
 import {
   apiProgressChart,

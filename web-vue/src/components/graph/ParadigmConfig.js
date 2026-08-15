@@ -8,6 +8,25 @@ let cachedConfig = null
 let currentSubject = null
 let loadPromise = null
 
+// These relations are part of the persisted canonical graph contract. Keep
+// them layout-visible even while the paradigm request is still loading or has
+// fallen back, otherwise a freshly supplemented concept can be mistaken for a
+// new zero-indegree root despite both replacement edges being present.
+const CANONICAL_SEMANTIC_RELATIONS = new Set([
+  'SOLUTION',
+  'DEPENDS_ON',
+  'IMPLEMENTS',
+  'DEPEND_ON',
+  'HAS_DETAIL',
+  'DEFINES',
+  'REQUIRES',
+  'HAS_LAW',
+  'APPLIES_TO',
+  'EXTENDS',
+  'HAS_SUB',
+  'HAS_IMPL',
+])
+
 // LA-051-P2-FIX: 获取认证 headers
 function getAuthHeaders() {
   const saved = localStorage.getItem('la_current_user')
@@ -68,8 +87,11 @@ export async function loadParadigmConfig(subject) {
  * @returns {boolean}
  */
 export function isSemanticEdge(edgeType) {
-  if (!cachedConfig) return false
-  return cachedConfig.relations && cachedConfig.relations[edgeType] !== undefined
+  // Gap Flow M2 renders this edge only in Cytoscape. Treat it as semantic for
+  // layout purposes while keeping it out of persisted paradigm definitions.
+  if (edgeType === 'VIRTUAL_GAP_EDGE') return true
+  if (CANONICAL_SEMANTIC_RELATIONS.has(edgeType)) return true
+  return Boolean(cachedConfig?.relations && cachedConfig.relations[edgeType] !== undefined)
 }
 
 /**

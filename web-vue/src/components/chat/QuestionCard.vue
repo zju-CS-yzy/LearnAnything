@@ -46,7 +46,7 @@
             {{ bloomLabel(q.bloom_level) }}
           </span>
           <span v-if="!isEval && inBankFlags[i]" class="qc-inbank">已在题库</span>
-          <span class="qc-stem-preview">{{ q.question }}</span>
+          <RichText class="qc-stem-preview" :content="q.question" inline :markdown="false" />
           <!-- 测评提交后的对错标记 -->
           <span v-if="isEval && submitted && detailFor(q, i)" class="qc-verdict">
             {{ detailFor(q, i).is_correct ? '✅' : '❌' }}
@@ -55,7 +55,7 @@
         </div>
 
         <div v-if="expanded[i]" class="qc-item-body">
-          <div class="qc-stem">{{ q.question }}</div>
+          <RichText class="qc-stem" :content="q.question" />
 
           <!-- 测评作答中：选项点选（单字母答案，与评测页一致） -->
           <template v-if="isEval && evalActive">
@@ -68,7 +68,7 @@
                 @click="answers[i] = letter(j)"
               >
                 <span class="qc-choice-label">{{ letter(j) }}</span>
-                <span class="qc-choice-text">{{ stripPrefix(opt) }}</span>
+                <RichText class="qc-choice-text" :content="stripPrefix(opt)" inline :markdown="false" />
               </div>
             </div>
             <textarea
@@ -82,18 +82,18 @@
 
           <!-- 非作答态：只读选项列表 -->
           <div v-else-if="q.options && q.options.length" class="qc-options">
-            <div v-for="(opt, j) in q.options" :key="j" class="qc-option">{{ opt }}</div>
+            <RichText v-for="(opt, j) in q.options" :key="j" class="qc-option" :content="opt" :markdown="false" />
           </div>
 
           <!-- 测评提交后：该题评分反馈 -->
           <div v-if="isEval && submitted && detailFor(q, i)" class="qc-answer-block">
             <div class="qc-answer-row">
               <span class="qc-label">你的答案</span>
-              <span class="qc-answer-text">{{ detailFor(q, i).user_answer || '（未作答）' }}</span>
+              <RichText class="qc-answer-text" :content="detailFor(q, i).user_answer || '（未作答）'" inline :markdown="false" />
             </div>
             <div class="qc-answer-row">
               <span class="qc-label">参考答案</span>
-              <span class="qc-answer-text">{{ detailFor(q, i).correct_answer }}</span>
+              <RichText class="qc-answer-text" :content="detailFor(q, i).correct_answer" inline :markdown="false" />
             </div>
             <div class="qc-answer-row">
               <span class="qc-label">得分</span>
@@ -101,7 +101,7 @@
             </div>
             <div v-if="detailFor(q, i).feedback" class="qc-answer-row">
               <span class="qc-label">反馈</span>
-              <span class="qc-explanation-text">{{ detailFor(q, i).feedback }}</span>
+              <RichText class="qc-explanation-text" :content="detailFor(q, i).feedback" inline />
             </div>
           </div>
 
@@ -113,11 +113,11 @@
             <div v-if="showAnswer[i]" class="qc-answer-block">
               <div class="qc-answer-row">
                 <span class="qc-label">答案</span>
-                <span class="qc-answer-text">{{ formatAnswer(q) }}</span>
+                <RichText class="qc-answer-text" :content="formatAnswer(q)" inline :markdown="false" />
               </div>
               <div v-if="q.explanation" class="qc-answer-row">
                 <span class="qc-label">解析</span>
-                <span class="qc-explanation-text">{{ q.explanation }}</span>
+                <RichText class="qc-explanation-text" :content="q.explanation" inline />
               </div>
             </div>
           </template>
@@ -160,6 +160,7 @@
 <script setup>
 import { computed, onMounted, reactive, ref } from 'vue'
 import { apiQuizBankSave, apiQuizBankCheck, apiEvalSubmit } from '../../composables/useApi.js'
+import RichText from '../common/RichText.vue'
 
 const props = defineProps({
   questions: { type: Array, required: true },

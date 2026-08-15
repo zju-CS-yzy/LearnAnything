@@ -310,7 +310,7 @@ class SemanticLinker:
         virtual_nodes_created = 0
         gap_edges_detected = 0
         if fallback_config.get("create_virtual_nodes", False):
-            all_edges, gap_info = self._process_gaps_and_virtual_nodes(
+            all_edges, gap_info = self._detect_gaps_without_virtual_nodes(
                 all_edges, paradigm_config, paradigm
             )
             virtual_nodes_created = gap_info.get("virtual_nodes", 0)
@@ -451,6 +451,7 @@ class SemanticLinker:
         """
         edges = []
         transitions = config["transitions"]
+        paradigm_config = _PARADIGMS_YAML.get(paradigm, {})
         existing_pairs = set()  # 避免重复边
 
         # 加载 "原始名称 → canonical ID" 映射表
@@ -525,13 +526,21 @@ class SemanticLinker:
                     # 跳过自环
                     if matched_parent["id"] == child["id"]:
                         continue
+
+                    # Enforce the paradigm's child -> allowed parent types.
+                    # This is the authoritative post-extraction validation and
+                    # also covers hints that resolve across chunks/documents.
+                    parent_rules = paradigm_config.get("parent_rules", {})
+                    allowed_parent_types = parent_rules.get(child.get("type"))
+                    if allowed_parent_types is not None and matched_parent.get("type") not in allowed_parent_types:
+                        continue
                     
                     # 如果匹配到的 parent 类型和期望的 upper_type 不同，调整关系类型
                     actual_relation = relation_type
                     if matched_parent.get("type") != upper_type:
                         # 跨层级连接：根据实际类型调整关系
                         actual_relation = self._determine_cross_level_relation(
-                            matched_parent.get("type"), child.get("type")
+                            matched_parent.get("type"), child.get("type"), paradigm
                         )
 
                     edges.append({
@@ -548,7 +557,6 @@ class SemanticLinker:
 
         # 策略4: 【循环范式】同类型 parent_hint（如 technology->technology）
         # 这些连接会被 gap 检测识别为同类型 gap，自动创建虚拟 requirement 节点
-        paradigm_config = _PARADIGMS_YAML.get(paradigm, {})
         if paradigm_config.get("cyclic") and paradigm_config.get("gap_rules", {}).get("detect_by_same_type", False):
             for concept_type in level_groups:
                 nodes = level_groups.get(concept_type, [])
@@ -778,6 +786,31 @@ class SemanticLinker:
                     print(f"       --{oe['relation_type']}--> {oe.get('child_name', oe['child_id'][:20])}")
 
         return new_edges, {"gap_edges": gap_edges, "virtual_nodes": len(virtual_nodes)}
+
+    def _detect_gaps_without_virtual_nodes(
+        self,
+        edges: List[Dict[str, Any]],
+        paradigm_config: dict,
+        paradigm: str = "",
+    ) -> Tuple[List[Dict[str, Any]], Dict[str, int]]:
+        """M3 compatibility hook: count legacy gaps but keep only real edges.
+
+        GapDetector/GapStore now own gap materialisation.  Keeping the original
+        real edge is important because the subsequent reconcile uses it as the
+        structural evidence for a stable GapRecord.
+        """
+        gap_edges = 0
+        for edge in edges:
+            source_type = self._get_concept_type(edge.get("parent_id", ""))
+            target_type = self._get_concept_type(edge.get("child_id", ""))
+            if self._calculate_gap(source_type, target_type, paradigm_config) > 0:
+                gap_edges += 1
+        if gap_edges:
+            print(
+                f"[SemanticLinker] Gap Flow: detected {gap_edges} gaps; "
+                "legacy virtual-node writes are disabled"
+            )
+        return list(edges), {"gap_edges": gap_edges, "virtual_nodes": 0}
 
     def _infer_missing_type(self, parent_type: str, child_type: str, paradigm_config: dict) -> Optional[str]:
         """推断 gap 中间缺失的类型。"""

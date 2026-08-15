@@ -356,10 +356,164 @@ function adjustEdgeCurvature(cy) {
  * 原理：chunk_id 的命名规则保证了字典序反映原文顺序
  * 例如：md_文件名_p_1_hash < md_文件名_p_2_hash
  */
-export function runConceptLayout(cy) {
+function isLayoutCopyNode(node) {
+  return Boolean(node?.length) && String(node.data('isCopy')) === '1'
+}
+
+function isVirtualGapNode(node) {
+  return Boolean(node?.length) && (
+    node.data('isVirtualGap') === true ||
+    String(node.data('isVirtualGap')) === '1' ||
+    node.data('type') === 'virtual_gap'
+  )
+}
+
+function canonicalNodeId(node) {
+  if (!node?.length) return ''
+  return node.data('originalId') || node.id()
+}
+
+function traceUniqueParentPath(startId, incomingByTarget, maxNodes) {
+  const path = [startId]
+  const seen = new Set(path)
+  let currentId = startId
+
+  while (path.length <= maxNodes) {
+    const parentIds = [...new Set(
+      (incomingByTarget.get(currentId) || []).map(edge => edge.source().id()),
+    )]
+    if (parentIds.length === 0) return path
+    // 后校验必须保守：父节点不唯一时无法进行同步路径比较。
+    if (parentIds.length !== 1) return null
+
+    const parentId = parentIds[0]
+    if (seen.has(parentId)) return null
+    seen.add(parentId)
+    path.push(parentId)
+    currentId = parentId
+  }
+  return null
+}
+
+function redundantCopyPath(cy, tree, copyId, incomingByTarget, outgoingBySource) {
+  const copyNode = cy.getElementById(copyId)
+  if (!isLayoutCopyNode(copyNode)) return null
+
+  const originalId = copyNode.data('originalId')
+  if (!originalId || !tree.nodes.has(originalId)) return null
+  const originalNode = cy.getElementById(originalId)
+  if (!originalNode.length || isLayoutCopyNode(originalNode)) return null
+
+  const originalPath = traceUniqueParentPath(originalId, incomingByTarget, tree.nodes.size)
+  const copyPath = traceUniqueParentPath(copyId, incomingByTarget, tree.nodes.size)
+  if (!originalPath || !copyPath) return null
+
+  // 从原节点与副本同步向根查询。副本侧每一层只能是 Gap，或原路径
+  // 同层节点的 copy；必须在相同深度汇合到同一个真实节点。
+  const maxComparableDepth = Math.min(originalPath.length, copyPath.length)
+  let convergenceDepth = -1
+  for (let depth = 1; depth < maxComparableDepth; depth++) {
+    if (originalPath[depth] === copyPath[depth]) {
+      convergenceDepth = depth
+      break
+    }
+
+    const originalLevelNode = cy.getElementById(originalPath[depth])
+    const copyLevelNode = cy.getElementById(copyPath[depth])
+    if (!originalLevelNode.length || !copyLevelNode.length) return null
+    if (isVirtualGapNode(copyLevelNode)) continue
+    if (!isLayoutCopyNode(copyLevelNode)) return null
+    if (canonicalNodeId(copyLevelNode) !== canonicalNodeId(originalLevelNode)) return null
+  }
+  if (convergenceDepth < 0) return null
+
+  const removableIds = new Set(copyPath.slice(0, convergenceDepth))
+  // 删除路径上的节点不能承载任何路径外子树；否则保守保留整个分支。
+  for (const nodeId of removableIds) {
+    const node = cy.getElementById(nodeId)
+    if (!isVirtualGapNode(node) && !isLayoutCopyNode(node)) return null
+    const hasExternalChild = (outgoingBySource.get(nodeId) || [])
+      .some(edge => !removableIds.has(edge.target().id()))
+    if (hasExternalChild) return null
+  }
+
+  return {
+    copyId,
+    originalId,
+    removableIds,
+  }
+}
+
+/**
+ * 树后校验：只修改已生成树的成员集合，不修改根、全局节点或边。
+ * 因此跨树副本仍可在其所属树中使用，冗余路径只从当前树页面排除。
+ */
+export function pruneRedundantCopyPaths(cy, trees, visibleEdges) {
+  const excludedNodeIds = new Set()
+  let redundantCopyCount = 0
+
+  ;(trees || []).forEach(tree => {
+    if (!tree?.nodes?.size) return
+    const incomingByTarget = new Map()
+    const outgoingBySource = new Map()
+    visibleEdges.forEach(edge => {
+      const sourceId = edge.source().id()
+      const targetId = edge.target().id()
+      if (!tree.nodes.has(sourceId) || !tree.nodes.has(targetId)) return
+      if (!incomingByTarget.has(targetId)) incomingByTarget.set(targetId, [])
+      if (!outgoingBySource.has(sourceId)) outgoingBySource.set(sourceId, [])
+      incomingByTarget.get(targetId).push(edge)
+      outgoingBySource.get(sourceId).push(edge)
+    })
+
+    const treeExcluded = new Set()
+    const treeGapIds = new Set()
+    const treeCopyIds = new Set()
+    ;[...tree.nodes].forEach(nodeId => {
+      if (treeExcluded.has(nodeId)) return
+      const result = redundantCopyPath(
+        cy, tree, nodeId, incomingByTarget, outgoingBySource,
+      )
+      if (!result) return
+
+      redundantCopyCount += 1
+      treeCopyIds.add(result.copyId)
+      result.removableIds.forEach(removableId => {
+        treeExcluded.add(removableId)
+        excludedNodeIds.add(removableId)
+        const removableNode = cy.getElementById(removableId)
+        const gapId = removableNode.length ? removableNode.data('gapId') : null
+        if (gapId) treeGapIds.add(gapId)
+      })
+    })
+
+    treeExcluded.forEach(nodeId => tree.nodes.delete(nodeId))
+    tree.redundantNodeIds = [...treeExcluded]
+    tree.redundantCopyIds = [...treeCopyIds]
+    tree.redundantGapIds = [...treeGapIds]
+  })
+
+  return { excludedNodeIds, redundantCopyCount }
+}
+
+export function runConceptLayout(cy, { supplementedGaps = [] } = {}) {
+  // A redundant-path validation pass may have hidden nodes that belonged only
+  // to a pruned path. Restore them before rebuilding copies/trees so every
+  // layout run starts from the same graph state.
+  cy.nodes('.layout-redundant-tree-node')
+    .style('display', 'element')
+    .removeClass('layout-redundant-tree-node')
+
+  // A previous layout pass hides the extra incoming edges that were replaced
+  // by per-tree copies. Restore only those layout-owned edges before removing
+  // the copies, otherwise every re-layout progressively loses branches.
+  cy.edges('.layout-copy-hidden-edge')
+    .style('display', 'element')
+    .removeClass('layout-copy-hidden-edge')
   // 清除之前可能创建的副本
   cy.nodes().filter(n => n.data('isCopy') === '1').remove()
   cy.edges().filter(e => e.data('isCopyEdge') === '1').remove()
+  cy.nodes().forEach(node => node.removeData('supplementedGapIds'))
 
   // LA-035: 分离图片节点和概念节点
   // P30-FIX: 兼容 image_pseudo 和 formula_pseudo 类型
@@ -377,7 +531,10 @@ export function runConceptLayout(cy) {
 
   const semanticEdges = cy.edges().filter(e => {
     // LA-052: 使用范式配置动态判断语义边类型
-    return isSemanticEdge(e.data('type'))
+    // Gap Flow temporarily hides the original skip edge while its virtual
+    // replacement chain is visible. Hidden edges must not affect indegree or
+    // trigger duplicate concept nodes in the layout.
+    return isSemanticEdge(e.data('type')) && e.style('display') !== 'none'
   })
 
   // 收集边：过滤自环边，但自环节点仍作为普通节点显示
@@ -453,6 +610,7 @@ export function runConceptLayout(cy) {
   // 先处理多入边节点（创建副本），然后按根拆分子树
 
   // 2a. 为每个分量创建副本（处理多入度节点）
+  const copiedTargetByEdgeId = new Map()
   components.forEach((compNodes, compIdx) => {
     const compEdgeList = edgeList.filter(e =>
       compNodes.has(e.source) && compNodes.has(e.target)
@@ -501,7 +659,10 @@ export function runConceptLayout(cy) {
           }
         })
 
-        incoming[j].edgeRef.style('display', 'none')
+        incoming[j].edgeRef
+          .addClass('layout-copy-hidden-edge')
+          .style('display', 'none')
+        copiedTargetByEdgeId.set(incoming[j].edgeRef.id(), copyId)
         cy.add({
           data: {
             id: `${incoming[j].source}_${incoming[j].type}_${copyId}`,
@@ -515,6 +676,88 @@ export function runConceptLayout(cy) {
         })
       }
     })
+  })
+
+  // A supplemented Gap may reuse an existing CanonicalConcept. If that
+  // concept has multiple incoming edges, the normal layout creates a copy for
+  // the Gap's incoming branch. Copies intentionally own only their incoming
+  // edge, so without this pass the accepted replacement path visually stops
+  // at a leaf copy while the outgoing half remains attached to another
+  // occurrence. Materialise only the reviewed Gap path on that occurrence;
+  // ordinary graph copies and their ownership rules remain unchanged.
+  const semanticEdgeByPath = new Map()
+  edgeList.forEach(item => {
+    const key = `${item.source}\u0000${item.target}\u0000${item.type}`
+    if (!semanticEdgeByPath.has(key)) semanticEdgeByPath.set(key, item.edgeRef)
+  })
+  ;(supplementedGaps || []).forEach(gap => {
+    if (gap?.status !== 'supplemented') return
+    const inserted = (gap.supplemented_by || []).filter(Boolean)
+    const path = [gap.source_id, ...inserted, gap.target_id].filter(Boolean)
+    const relations = gap.replacement_relations || []
+    if (!inserted.length || relations.length !== path.length - 1) return
+
+    let sourceOccurrenceId = path[0]
+    for (let index = 0; index < path.length - 1; index += 1) {
+      const originalSourceId = path[index]
+      const originalTargetId = path[index + 1]
+      const relation = relations[index]
+      const originalEdge = semanticEdgeByPath.get(
+        `${originalSourceId}\u0000${originalTargetId}\u0000${relation}`,
+      )
+      if (!originalEdge?.length) break
+      let targetOccurrenceId = copiedTargetByEdgeId.get(originalEdge.id()) || originalTargetId
+
+      if (sourceOccurrenceId !== originalSourceId) {
+        // The reviewed path has entered a per-tree copy branch. Reusing the
+        // canonical target here would make that same occurrence reachable
+        // from two roots. Both tree layouts would then translate the node,
+        // producing an extreme Y position and a page-spanning edge. Continue
+        // the established copy-isolation rule for the rest of this one Gap
+        // path instead of changing ordinary tree ownership.
+        const pathCopyId = `${originalTargetId}_gapcopy${index}_${gap.gap_id}`
+        if (!cy.getElementById(pathCopyId).length) {
+          const originalTarget = cy.getElementById(originalTargetId)
+          if (!originalTarget.length) break
+          cy.add({
+            data: {
+              ...originalTarget.data(),
+              id: pathCopyId,
+              originalId: canonicalNodeId(originalTarget),
+              isCopy: '1',
+              isSupplementedGapCopy: '1',
+              supplementedGapOwnerId: gap.gap_id,
+            },
+          })
+        }
+        targetOccurrenceId = pathCopyId
+        const edgeId = `supplemented-gap-copy:${gap.gap_id}:${index}:${sourceOccurrenceId}:${targetOccurrenceId}`
+        if (!cy.getElementById(edgeId).length) {
+          cy.add({
+            data: {
+              id: edgeId,
+              source: sourceOccurrenceId,
+              target: targetOccurrenceId,
+              type: relation,
+              label: getRelationLabel(relation),
+              isCopyEdge: '1',
+              isSupplementedGapPath: '1',
+              gapId: gap.gap_id,
+            },
+          })
+        }
+      }
+
+      if (index >= 0 && index < inserted.length) {
+        const insertedOccurrence = cy.getElementById(targetOccurrenceId)
+        if (insertedOccurrence.length) {
+          const gapIds = new Set(insertedOccurrence.data('supplementedGapIds') || [])
+          gapIds.add(gap.gap_id)
+          insertedOccurrence.data('supplementedGapIds', [...gapIds])
+        }
+      }
+      sourceOccurrenceId = targetOccurrenceId
+    }
   })
 
   // 2b. 基于 cy 中实际可见的边，识别所有根和子树
@@ -579,14 +822,27 @@ export function runConceptLayout(cy) {
 
   console.log(`[runConceptLayout] Trees after split: ${allTrees.length}`)
 
+  const treeValidation = pruneRedundantCopyPaths(cy, allTrees, visibleEdges)
+  if (treeValidation.redundantCopyCount > 0) {
+    console.log(
+      `[runConceptLayout] Pruned ${treeValidation.redundantCopyCount} redundant same-tree copies`,
+    )
+  }
+
   // P19-FIX-3: 处理漏掉的节点（不在任何树中的连通节点，通常是环状结构）
   const nodesInTrees = new Set()
   allTrees.forEach(tree => {
     tree.nodes.forEach(id => nodesInTrees.add(id))
   })
+  // An id can be redundant in one tree but still be required in another. Only
+  // nodes excluded from every generated tree may be hidden on the global
+  // canvas; this preserves the existing cross-tree copy semantics.
+  const fullyExcludedNodeIds = new Set(
+    [...treeValidation.excludedNodeIds].filter(id => !nodesInTrees.has(id)),
+  )
   const leakedIds = []
   allConceptIds.forEach(id => {
-    if (!nodesInTrees.has(id)) leakedIds.push(id)
+    if (!nodesInTrees.has(id) && !treeValidation.excludedNodeIds.has(id)) leakedIds.push(id)
   })
   if (leakedIds.length > 0) {
     console.warn(`[runConceptLayout] ${leakedIds.length} leaked nodes not in any tree:`, leakedIds)
@@ -814,8 +1070,8 @@ export function runConceptLayout(cy) {
   // ===== 步骤3: 二维网格排列所有树（替代原来的纵向堆叠）=====
   // P19-FIX: 将纵向堆叠改为二维网格，避免总高度过大
   const container = cy.container()
-  const containerW = container.clientWidth || 1200
-  const containerH = container.clientHeight || 800
+  const containerW = container?.clientWidth || 1200
+  const containerH = container?.clientHeight || 800
   const maxRowWidth = Math.max(600, containerW * 0.9) // 每行最大宽度
 
   // 按节点数降序排列（大的树优先）
@@ -890,11 +1146,22 @@ export function runConceptLayout(cy) {
     n.style('display', 'element')
     n.style('opacity', 0.85)
   })
+  // Keep pruned nodes in the backing graph for the next deterministic layout
+  // pass, but exclude them from rendering, global bounds, and the origin
+  // fallback. Hiding the endpoint is sufficient to suppress its incident
+  // edges without mutating their original visibility state.
+  fullyExcludedNodeIds.forEach(id => {
+    const node = cy.getElementById(id)
+    if (!node.length) return
+    node.addClass('layout-redundant-tree-node')
+    node.style('display', 'none')
+  })
 
   // 全局 bbox（使用节点实际尺寸）
   let minX = Infinity, maxX = -Infinity
   let minY = Infinity, maxY = -Infinity
   connectedNodes.forEach(n => {
+    if (n.style('display') === 'none') return
     const x = n.position('x')
     const y = n.position('y')
     const w = n.width() || 160
@@ -905,6 +1172,7 @@ export function runConceptLayout(cy) {
     maxY = Math.max(maxY, y + h / 2)
   })
   cy.nodes('[isCopy = 1]').forEach(n => {
+    if (n.style('display') === 'none') return
     const x = n.position('x')
     const y = n.position('y')
     const w = n.width() || 160
@@ -971,9 +1239,11 @@ export function runConceptLayout(cy) {
     // 计算概念树的最下边界
     let maxConceptY = 0
     connectedNodes.forEach(n => {
+      if (n.style('display') === 'none') return
       maxConceptY = Math.max(maxConceptY, n.position('y') + (n.height() || 80) / 2)
     })
     cy.nodes('[isCopy = 1]').forEach(n => {
+      if (n.style('display') === 'none') return
       maxConceptY = Math.max(maxConceptY, n.position('y') + (n.height() || 80) / 2)
     })
     // orphanNodes 如果在无语义边时已布局，也要考虑
@@ -1017,4 +1287,34 @@ export function runConceptLayout(cy) {
 
   // 动态调整边曲率
   adjustEdgeCurvature(cy)
+
+  // Expose the trees already produced by the original layout. Consumers may
+  // page these results, but must not repartition nodes or rebuild ownership.
+  const trees = sortedTrees.map(({ treeIdx, count }) => {
+    const tree = allTrees[treeIdx]
+    const nodeIds = [...tree.nodes]
+    const edgeIds = []
+    visibleEdges.forEach(edge => {
+      if (tree.nodes.has(edge.source().id()) && tree.nodes.has(edge.target().id())) {
+        edgeIds.push(edge.id())
+      }
+    })
+    const rootNode = cy.getElementById(tree.rootId)
+    return {
+      id: `concept-tree:${treeIdx}:${tree.rootId}`,
+      rootId: tree.rootId,
+      rootOriginalId: rootNode.data('originalId') || tree.rootId,
+      rootLabel: rootNode.data('label') || tree.rootId,
+      nodeIds,
+      edgeIds,
+      nodeCount: count,
+      edgeCount: edgeIds.length,
+      isPseudo: Boolean(tree.isPseudo),
+      redundantNodeIds: tree.redundantNodeIds || [],
+      redundantCopyIds: tree.redundantCopyIds || [],
+      redundantGapIds: tree.redundantGapIds || [],
+    }
+  })
+
+  return { trees }
 }

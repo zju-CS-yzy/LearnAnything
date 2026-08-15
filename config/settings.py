@@ -6,6 +6,7 @@ LearnAnything API 配置中心 (LA-DEPLOY-FEAT)
     2. 视觉处理 (vlm)      - 图片描述、表格提取、公式识别
     3. 文本向量化 (embedding) - 文本向量化、语义搜索
     4. PDF 解析 (mineru)   - PDF 结构化提取
+    5. 学术资料检索 (openalex) - 公开题录检索与 DOI 摘要补齐
 
 每个功能模块独立配置，用户可根据可用 API 自由选择提供商。
 """
@@ -182,6 +183,15 @@ def get_subject_graph_db_path(subject_id: str, user_id: str = None) -> Path:
     return d / "graph" / "graph"
 
 
+def get_subject_gap_db_path(subject_id: str, user_id: str = None) -> Path:
+    """Return the subject-scoped Gap Flow SQLite database path."""
+    if user_id:
+        d = get_user_subject_dir(user_id, subject_id)
+    else:
+        d = get_share_subject_dir(subject_id)
+    return d / "gap_flow.db"
+
+
 def get_subject_images_dir(subject_id: str, user_id: str = None) -> Path:
     """获取学科图片目录"""
     if user_id:
@@ -303,6 +313,17 @@ SUPPORTED_PROVIDERS = {
         "default_base_url": "https://your-api-endpoint.com/v1",
         "api_key_format": "your-api-key",
     },
+    "openalex": {
+        "name": "OpenAlex",
+        "url": "https://openalex.org/settings/api",
+        "docs_url": "https://developers.openalex.org/api-reference/introduction",
+        "icon": "🔎",
+        "description": "公开学术元数据检索与 DOI 摘要补齐",
+        "features": ["openalex"],
+        "models": {},
+        "default_base_url": "https://api.openalex.org",
+        "api_key_format": "OpenAlex API Key",
+    },
 }
 
 
@@ -355,6 +376,11 @@ class AppConfig:
     vlm: FeatureConfig = field(default_factory=lambda: FeatureConfig())
     embedding: FeatureConfig = field(default_factory=lambda: FeatureConfig())
     mineru: FeatureConfig = field(default_factory=lambda: FeatureConfig())
+    openalex: FeatureConfig = field(default_factory=lambda: FeatureConfig(
+        provider="openalex",
+        api_key=os.getenv("OPENALEX_API_KEY", "").strip(),
+        base_url="https://api.openalex.org",
+    ))
     
     # MinerU 特殊配置（CLI 路径等）
     mineru_cli_path: str = ""
@@ -426,7 +452,7 @@ def _load_api_config() -> AppConfig:
         parser = configparser.ConfigParser()
         parser.read(API_CONFIG_PATH, encoding="utf-8")
         
-        for feature in ["llm", "llm_fallback", "vlm", "embedding", "mineru"]:
+        for feature in ["llm", "llm_fallback", "vlm", "embedding", "mineru", "openalex"]:
             if parser.has_section(feature):
                 section = parser[feature]
                 fc = FeatureConfig(
@@ -494,7 +520,7 @@ def save_api_config(config: AppConfig) -> None:
     
     parser = configparser.ConfigParser()
     
-    for feature in ["llm", "llm_fallback", "vlm", "embedding", "mineru"]:
+    for feature in ["llm", "llm_fallback", "vlm", "embedding", "mineru", "openalex"]:
         fc: FeatureConfig = getattr(config, feature)
         parser.add_section(feature)
         parser.set(feature, "provider", fc.provider)
@@ -570,6 +596,13 @@ def _sync_to_env(config: AppConfig):
     if config.mineru.api_key:
         os.environ["MINERU_TOKEN"] = config.mineru.api_key
 
+    # OpenAlex academic metadata / DOI abstract enrichment.
+    # Clear stale process state when the integration is disabled or its key is removed.
+    if config.openalex.enabled and config.openalex.api_key:
+        os.environ["OPENALEX_API_KEY"] = config.openalex.api_key
+    else:
+        os.environ.pop("OPENALEX_API_KEY", None)
+
 
 # ========== 全局配置实例 ==========
 
@@ -602,6 +635,11 @@ def get_embedding_config() -> FeatureConfig:
 def get_mineru_config() -> FeatureConfig:
     """获取 MinerU 配置"""
     return _CONFIG.mineru
+
+
+def get_openalex_config() -> FeatureConfig:
+    """获取 OpenAlex 学术检索配置"""
+    return _CONFIG.openalex
 
 
 def get_full_config() -> AppConfig:
@@ -640,6 +678,7 @@ def check_all_features() -> Dict[str, bool]:
         "vlm": is_feature_available("vlm"),
         "embedding": is_feature_available("embedding"),
         "mineru": is_feature_available("mineru"),
+        "openalex": is_feature_available("openalex"),
     }
 
 

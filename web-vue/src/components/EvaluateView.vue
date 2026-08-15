@@ -53,7 +53,7 @@
               {{ bloomLabel(currentQuestion.bloom_level) }}
             </span>
           </div>
-          <div class="question-text">{{ currentQuestion.question }}</div>
+          <RichText class="question-text" :content="currentQuestion.question" />
           <div v-if="currentQuestion.options && currentQuestion.options.length" class="options-list">
             <div
               v-for="(opt, i) in currentQuestion.options"
@@ -63,7 +63,7 @@
               @click="userAnswers[currentIndex] = String.fromCharCode(65 + i)"
             >
               <span class="choice-label">{{ ['A', 'B', 'C', 'D', 'E', 'F'][i] || i }}</span>
-              <span class="choice-text">{{ stripPrefix(opt) }}</span>
+              <RichText class="choice-text" :content="stripPrefix(opt)" inline :markdown="false" />
             </div>
           </div>
           <div v-else class="answer-input">
@@ -152,18 +152,18 @@
               >
                 <div class="detail-header">
                   <span class="detail-status">{{ d.is_correct ? '✅' : '❌' }}</span>
-                  <span class="detail-question">{{ d.question }}</span>
+                  <RichText class="detail-question" :content="d.question" inline />
                   <span v-if="d.bloom_level" class="bloom-tag-small" :class="'bloom-' + d.bloom_level">
                     {{ bloomLabel(d.bloom_level) }}
                   </span>
                 </div>
                 <div class="detail-answers">
                   <span :class="{ 'user-correct': d.is_correct, 'user-wrong': !d.is_correct }">
-                    你的答案：{{ d.user_answer || '(未作答)' }}
+                    你的答案：<RichText :content="d.user_answer || '(未作答)'" inline :markdown="false" />
                   </span>
-                  <span class="correct-answer">正确答案：{{ d.correct_answer }}</span>
+                  <span class="correct-answer">正确答案：<RichText :content="d.correct_answer" inline :markdown="false" /></span>
                 </div>
-                <div class="detail-feedback">{{ d.feedback }}</div>
+                <RichText class="detail-feedback" :content="d.feedback" />
               </div>
             </div>
           </div>
@@ -181,6 +181,7 @@
 import { ref, computed, inject } from 'vue'
 import { apiEvalStart, apiEvalSubmit } from '../composables/useApi.js'
 import EvaluationReport from './EvaluationReport.vue'
+import RichText from './common/RichText.vue'
 
 // 全局学科状态
 const subjectState = inject('subjectState')
